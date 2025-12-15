@@ -159,6 +159,16 @@ class NotificationService:
             hostname = socket.gethostname()
             ip = self._get_local_ip()
 
+            # Build moderation status string
+            if self.settings.wecom_moderation_enabled:
+                moderation_urls = self.settings.get_moderation_url_list()
+                moderation_status = (
+                    f"Enabled ({self.settings.wecom_moderation_strategy}, "
+                    f"{len(moderation_urls)} URLs)"
+                )
+            else:
+                moderation_status = "Disabled"
+
             content = f"""# 🚀 YouTube Audio API Started
 
 🖥️ **Host**: {hostname} ({ip})
@@ -170,6 +180,7 @@ class NotificationService:
 > ⏳ Task Interval: {self.settings.task_interval_min}-{self.settings.task_interval_max}s
 > 🗂️ File Retention: {self.settings.file_retention_days} days
 > 🔑 PO Token: {self.settings.pot_server_url}
+> 🛡️ Content Moderation: {moderation_status}
 
 ✨ Service is ready to accept requests!
 """
