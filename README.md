@@ -548,6 +548,42 @@ yt-dlp --cookies-from-browser chrome --cookies cookies.txt "https://www.youtube.
 COOKIE_FILE=./cookies.txt
 ```
 
+### youtube cookie 获取方式
+Extractors · yt-dlp/yt-dlp Wiki:  https://github.com/yt-dlp/yt-dlp/wiki/extractors
+
+Caution
+
+---
+
+By using your account with yt-dlp, you run the risk of it being banned (temporarily or permanently). Be mindful with the request rate and amount of downloads you make with an account.  
+Use it only when necessary, or consider using a throwaway account.
+
+---
+
+Note
+
+This is only necessary for content that requires an account to access, such as private playlists, age-restricted videos and members-only content.
+
+If you are unfamiliar with the basics of exporting cookies and passing them to yt-dlp, then first see [How do I pass cookies to yt-dlp?](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp)
+
+---
+
+YouTube rotates account cookies frequently on open YouTube browser tabs as a security measure.  
+To export cookies that will remain working with yt-dlp, you will need to export cookies in such a way that they are never rotated.
+
+---
+
+One way to do this is through a private browsing/incognito window:
+
+1. Open a new private browsing/incognito window and log into YouTube
+2. In same window and same tab from step 1, navigate to `https://www.youtube.com/robots.txt` (this should be the **only** private/incognito browsing tab open)
+3. Export `youtube.com` cookies from the browser, then **close the private browsing/incognito window** so that the session is never opened in the browser again.
+
+Note
+
+Do **NOT** use the `--cookies COOKIEFILE --cookies-from-browser BROWSER` method (as described in the above FAQ link) to export your cookies to a cookiefile. This will export **all** of your regular browser cookies, but **not** the cookies from this private/incognito YouTube session. Instead, use one of the browser extensions recommended in the [FAQ](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp).
+
+
 ### 配置逻辑
 
 | 场景 | Cookies | PO Token 请求 | 成功率 |
