@@ -14,7 +14,7 @@ RUN curl -L --retry 3 --retry-delay 5 --retry-connrefused \
     tar -xf /tmp/ffmpeg.tar.xz -C /tmp/ffmpeg --strip-components=1 && \
     cp /tmp/ffmpeg/bin/ffmpeg /tmp/ffmpeg/bin/ffprobe /usr/local/bin/
 
-# Stage 2: Build Python dependencies
+# Stage 2: Build Python dependencies with uv
 FROM python:3.11-slim AS builder
 
 WORKDIR /app
@@ -23,11 +23,17 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libffi-dev \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
-COPY requirements-prod.txt .
-RUN pip install --no-cache-dir --target=/app/deps -r requirements-prod.txt
+# Install uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+# Copy dependency files
+COPY pyproject.toml .
+
+# Install Python dependencies (production only, no dev dependencies)
+RUN uv pip install --system --no-cache --target=/app/deps -r pyproject.toml
 
 # Stage 3: Final runtime image
 FROM python:3.11-slim

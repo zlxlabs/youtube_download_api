@@ -5,19 +5,15 @@ $ErrorActionPreference = "Stop"
 
 Write-Host "Starting YouTube Audio API development environment..." -ForegroundColor Cyan
 
-# Check if virtual environment exists
-if (-not (Test-Path ".\venv")) {
-    Write-Host "Creating virtual environment..." -ForegroundColor Yellow
-    python -m venv venv
+# Check if uv is installed
+if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
+    Write-Host "Installing uv..." -ForegroundColor Yellow
+    Invoke-RestMethod https://astral.sh/uv/install.ps1 | Invoke-Expression
 }
 
-# Activate virtual environment
-Write-Host "Activating virtual environment..." -ForegroundColor Yellow
-.\venv\Scripts\Activate.ps1
-
-# Install dependencies
-Write-Host "Installing dependencies..." -ForegroundColor Yellow
-pip install -r requirements.txt
+# Sync dependencies (creates .venv automatically if not exists)
+Write-Host "Syncing dependencies with uv..." -ForegroundColor Yellow
+uv sync
 
 # Check if .env.development exists
 if (-not (Test-Path ".\.env.development")) {
@@ -48,4 +44,4 @@ $env:ENV_FILE = ".env.development"
 
 # Start the development server
 Write-Host "Starting development server..." -ForegroundColor Green
-uvicorn src.main:app --reload --host 127.0.0.1 --port 8000
+uv run uvicorn src.main:app --reload --host 127.0.0.1 --port 8000

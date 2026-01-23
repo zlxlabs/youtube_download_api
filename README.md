@@ -20,6 +20,7 @@ Docker 部署的 YouTube 音频下载服务，提供 RESTful API 接口，支持
 ### 环境要求
 
 - Python 3.11+
+- [uv](https://docs.astral.sh/uv/) (Python 包管理器)
 - Docker & Docker Compose
 - 代理服务（开发环境需要）
 
@@ -30,16 +31,22 @@ Docker 部署的 YouTube 音频下载服务，提供 RESTful API 接口，支持
 git clone <repo-url>
 cd youtube-audio-api
 
-# 2. 复制配置文件
+# 2. 安装 uv（如果尚未安装）
+# Windows
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+# Linux/Mac
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# 3. 复制配置文件
 cp .env.example .env.development
 # 编辑 .env.development，填入必要配置
 
-# 3. 启动开发环境 (Windows)
+# 4. 启动开发环境 (Windows)
 .\scripts\dev.ps1
-或者
-$env:ENV_FILE=".env.development"; uvicorn src.main:app --reload --host 127.0.0.1 --port 8000
+# 或者手动运行
+uv sync && $env:ENV_FILE=".env.development"; uv run uvicorn src.main:app --reload --host 127.0.0.1 --port 8000
 
-# 或 Linux/Mac
+# Linux/Mac
 chmod +x scripts/dev.sh
 ./scripts/dev.sh
 ```

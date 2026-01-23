@@ -6,19 +6,17 @@ set -e
 
 echo -e "\033[36mStarting YouTube Audio API development environment...\033[0m"
 
-# Check if virtual environment exists
-if [ ! -d "venv" ]; then
-    echo -e "\033[33mCreating virtual environment...\033[0m"
-    python3 -m venv venv
+# Check if uv is installed
+if ! command -v uv &> /dev/null; then
+    echo -e "\033[33mInstalling uv...\033[0m"
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    # Add uv to PATH for current session
+    export PATH="$HOME/.local/bin:$PATH"
 fi
 
-# Activate virtual environment
-echo -e "\033[33mActivating virtual environment...\033[0m"
-source venv/bin/activate
-
-# Install dependencies
-echo -e "\033[33mInstalling dependencies...\033[0m"
-pip install -r requirements.txt
+# Sync dependencies (creates .venv automatically if not exists)
+echo -e "\033[33mSyncing dependencies with uv...\033[0m"
+uv sync
 
 # Check if .env.development exists
 if [ ! -f ".env.development" ]; then
@@ -48,4 +46,4 @@ export ENV_FILE=".env.development"
 
 # Start the development server
 echo -e "\033[32mStarting development server...\033[0m"
-uvicorn src.main:app --reload --host 127.0.0.1 --port 8000
+uv run uvicorn src.main:app --reload --host 127.0.0.1 --port 8000
