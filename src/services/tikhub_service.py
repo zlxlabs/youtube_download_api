@@ -211,14 +211,20 @@ class TikHubService:
             logger.info(f"Subtitle saved to: {output_path}")
             return True
 
-        except httpx.TimeoutException:
-            logger.warning("TikHub API request timed out")
+        except httpx.TimeoutException as e:
+            logger.warning(f"TikHub API request timed out: {type(e).__name__} - {e}")
             return False
         except httpx.RequestError as e:
-            logger.warning(f"TikHub API request failed: {e}")
+            logger.warning(
+                f"TikHub API request failed: {type(e).__name__} - {e or 'No error message'}"
+            )
+            logger.debug(f"Request error details: {repr(e)}")
             return False
         except Exception as e:
-            logger.warning(f"Failed to fetch subtitle via TikHub: {e}")
+            logger.warning(
+                f"Failed to fetch subtitle via TikHub: {type(e).__name__} - {e}",
+                exc_info=True
+            )
             return False
 
     async def fetch_best_subtitle(
