@@ -20,6 +20,7 @@ from src.db.models import (
     FileRecord,
     FileType,
     Task,
+    TaskPriority,
     TaskStatus,
     VideoInfo,
     VideoResource,
@@ -94,9 +95,32 @@ class Database:
             raise RuntimeError("Database not connected")
         return await self._connection.execute(sql, params)
 
+    async def _run_migrations(self) -> None:
+        """Run database migrations for schema updates."""
+        # Check if tasks table exists and has priority column
+        cursor = await self.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='tasks'"
+        )
+        tasks_table_exists = await cursor.fetchone()
+
+        if tasks_table_exists:
+            # Check if priority column exists
+            cursor = await self.execute("PRAGMA table_info(tasks)")
+            columns = await cursor.fetchall()
+            has_priority = any(col["name"] == "priority" for col in columns)
+
+            if not has_priority:
+                # Add priority column with default value 'normal'
+                await self.execute(
+                    "ALTER TABLE tasks ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal'"
+                )
+                logger.info("Migration: Added 'priority' column to tasks table")
+
     async def _create_tables(self) -> None:
         """Create database tables if not exist."""
         async with self.transaction():
+            # Run migrations before creating tables
+            await self._run_migrations()
             # Video resources table (core entity)
             await self.execute("""
                 CREATE TABLE IF NOT EXISTS video_resources (
@@ -135,6 +159,7 @@ class Database:
                     video_id TEXT NOT NULL,
                     video_url TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'pending',
+                    priority TEXT NOT NULL DEFAULT 'normal',
                     include_audio INTEGER DEFAULT 1,
                     include_transcript INTEGER DEFAULT 1,
                     audio_file_id TEXT,
@@ -172,6 +197,9 @@ class Database:
             )
             await self.execute(
                 "CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)"
+            )
+            await self.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority)"
             )
             await self.execute(
                 "CREATE INDEX IF NOT EXISTS idx_tasks_video_id ON tasks(video_id)"
@@ -443,19 +471,20 @@ class Database:
             await self.execute(
                 """
                 INSERT INTO tasks (
-                    id, video_id, video_url, status,
+                    id, video_id, video_url, status, priority,
                     include_audio, include_transcript,
                     audio_file_id, transcript_file_id,
                     reused_audio, reused_transcript,
                     callback_url, callback_secret, callback_status,
                     created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task.id,
                     task.video_id,
                     task.video_url,
                     task.status.value,
+                    task.priority.value,
                     1 if task.include_audio else 0,
                     1 if task.include_transcript else 0,
                     task.audio_file_id,
@@ -875,6 +904,7 @@ class Database:
             video_id=row["video_id"],
             video_url=row["video_url"],
             status=TaskStatus(row["status"]),
+            priority=TaskPriority(row["priority"]) if row["priority"] else TaskPriority.NORMAL,
             include_audio=bool(row["include_audio"]),
             include_transcript=bool(row["include_transcript"]),
             audio_file_id=row["audio_file_id"],

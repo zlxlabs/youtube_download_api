@@ -56,6 +56,32 @@ class FileType(str, Enum):
     TRANSCRIPT = "transcript"
 
 
+class TaskPriority(str, Enum):
+    """Task priority enumeration."""
+
+    URGENT = "urgent"  # 紧急任务，立即处理
+    NORMAL = "normal"  # 普通任务，正常排队（默认）
+
+    def to_queue_priority(self) -> int:
+        """
+        Convert to queue priority number.
+
+        Returns:
+            Queue priority (0=highest, 2=lowest)
+        """
+        return PRIORITY_MAPPING[self]
+
+
+# 优先级映射：API 枚举 -> 队列优先级数字
+PRIORITY_MAPPING: dict[TaskPriority, int] = {
+    TaskPriority.URGENT: 0,  # 最高优先级
+    TaskPriority.NORMAL: 1,  # 中等优先级
+}
+
+# 重试任务的队列优先级（最低优先级）
+RETRY_QUEUE_PRIORITY = 2
+
+
 @dataclass
 class VideoInfo:
     """Video information extracted from YouTube."""
@@ -170,6 +196,7 @@ class Task:
     # Request parameters (what client wants)
     include_audio: bool = True  # Whether to download audio
     include_transcript: bool = True  # Whether to fetch transcript
+    priority: TaskPriority = TaskPriority.NORMAL  # Task priority (urgent/normal)
 
     # File references (pointing to files table, may reuse existing files)
     audio_file_id: Optional[str] = None

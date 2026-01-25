@@ -88,7 +88,7 @@ Header: X-API-Key: your-api-key
 
 ### 创建下载任务
 
-**请求**
+**请求示例 - 普通任务**
 ```bash
 curl -X POST http://localhost:8000/api/v1/tasks \
   -H "Content-Type: application/json" \
@@ -102,15 +102,45 @@ curl -X POST http://localhost:8000/api/v1/tasks \
   }'
 ```
 
+**请求示例 - 紧急任务（优先处理）**
+```bash
+curl -X POST http://localhost:8000/api/v1/tasks \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-api-key" \
+  -d '{
+    "video_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    "priority": "urgent",
+    "include_audio": true,
+    "include_transcript": true
+  }'
+```
+
 **请求参数**
 
 | 参数 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
 | `video_url` | string | 是 | - | YouTube 视频 URL |
+| `priority` | string | 否 | normal | 任务优先级：`urgent`（紧急，立即处理）或 `normal`（普通，正常排队） |
 | `include_audio` | boolean | 否 | true | 是否下载音频 |
 | `include_transcript` | boolean | 否 | true | 是否获取字幕 |
 | `callback_url` | string | 否 | - | Webhook 回调 URL |
 | `callback_secret` | string | 否 | - | HMAC 签名密钥（8-256字符） |
+
+**任务优先级说明**
+
+系统采用三级优先级队列机制：
+
+| 优先级 | API 参数 | 说明 | 适用场景 |
+|--------|----------|------|----------|
+| **高** | `urgent` | 紧急任务，立即处理 | 用户实时等待、VIP 用户、重要业务 |
+| **中** | `normal` | 普通任务，正常排队（默认） | 常规下载请求 |
+| **低** | _(系统内部)_ | 重试任务，最低优先级 | 自动重试的失败任务 |
+
+优先级特性：
+- 紧急任务优先于普通任务处理
+- 新任务优先于重试任务处理
+- 相同优先级按提交时间先后顺序处理
+- 重试任务自动降为最低优先级，避免影响新请求
 
 **下载模式说明**
 
@@ -160,6 +190,7 @@ curl -X POST http://localhost:8000/api/v1/tasks \
   "status": "pending",
   "video_id": "dQw4w9WgXcQ",
   "video_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+  "priority": "normal",
   "video_info": null,
   "files": null,
   "error": null,
@@ -195,6 +226,7 @@ curl http://localhost:8000/api/v1/tasks/{task_id} \
   "status": "completed",
   "video_id": "dQw4w9WgXcQ",
   "video_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+  "priority": "normal",
   "video_info": {
     "title": "Rick Astley - Never Gonna Give You Up",
     "author": "Rick Astley",

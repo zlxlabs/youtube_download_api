@@ -26,6 +26,7 @@ from src.db.models import (
     FileType,
     FileRecord,
     RETRY_CONFIG,
+    RETRY_QUEUE_PRIORITY,
     Task,
     TaskStatus,
     VideoInfo,
@@ -520,8 +521,8 @@ class DownloadWorker:
                 )
 
                 await asyncio.sleep(retry_delay)
-                # 重试任务使用低优先级（priority=1），新任务会优先处理
-                await self.task_service.task_queue.put((1, task.id))
+                # 重试任务使用最低优先级，新任务会优先处理
+                await self.task_service.task_queue.put((RETRY_QUEUE_PRIORITY, task.id))
                 return
 
         await self.db.update_task_status(

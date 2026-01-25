@@ -24,7 +24,7 @@ from src.api.schemas import (
 )
 from src.config import Settings
 from src.db.database import Database
-from src.db.models import CallbackStatus, FileType, Task, TaskStatus
+from src.db.models import CallbackStatus, FileType, Task, TaskStatus, TaskPriority
 from src.services.file_service import FileService
 from src.utils.helpers import extract_video_id
 from src.utils.logger import logger
@@ -145,6 +145,7 @@ class TaskService:
             video_id=video_id,
             video_url=request.video_url,
             status=TaskStatus.PENDING,
+            priority=request.priority,  # 使用用户指定的优先级
             include_audio=request.include_audio,
             include_transcript=request.include_transcript,
             # Pre-fill existing resources
@@ -161,12 +162,13 @@ class TaskService:
         await self.db.create_task(task)
         logger.info(
             f"Created task {task.id} for video {video_id} "
-            f"(need_audio={need_audio}, need_transcript={need_transcript}, "
+            f"(priority={task.priority.value}, need_audio={need_audio}, need_transcript={need_transcript}, "
             f"reused_audio={task.reused_audio}, reused_transcript={task.reused_transcript})"
         )
 
-        # Add to queue for worker (priority=0 for new tasks)
-        await self._task_queue.put((0, task.id))
+        # Add to queue for worker (使用用户指定的优先级)
+        queue_priority = task.priority.to_queue_priority()
+        await self._task_queue.put((queue_priority, task.id))
 
         # Build response
         response = await self._build_task_response(task)
@@ -390,8 +392,9 @@ class TaskService:
         count = 0
 
         for task in tasks:
-            # 启动时恢复的任务作为新任务处理（priority=0）
-            await self._task_queue.put((0, task.id))
+            # 启动时恢复的任务保持原有优先级
+            queue_priority = task.priority.to_queue_priority()
+            await self._task_queue.put((queue_priority, task.id))
             count += 1
 
         if count > 0:
@@ -415,6 +418,7 @@ class TaskService:
             status=task.status,
             video_id=task.video_id,
             video_url=task.video_url,
+            priority=task.priority,  # 包含任务优先级
             created_at=task.created_at or datetime.now(timezone.utc),
             started_at=task.started_at,
             completed_at=task.completed_at,

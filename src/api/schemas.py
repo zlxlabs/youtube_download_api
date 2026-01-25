@@ -9,7 +9,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator
 
-from src.db.models import CallbackStatus, ErrorCode, TaskStatus
+from src.db.models import CallbackStatus, ErrorCode, TaskPriority, TaskStatus
 from src.utils.helpers import extract_video_id
 
 
@@ -23,6 +23,10 @@ class CreateTaskRequest(BaseModel):
         ...,
         description="YouTube video URL",
         examples=["https://www.youtube.com/watch?v=dQw4w9WgXcQ"],
+    )
+    priority: TaskPriority = Field(
+        default=TaskPriority.NORMAL,
+        description="Task priority: 'urgent' for immediate processing, 'normal' for regular queue (default)",
     )
     callback_url: Optional[HttpUrl] = Field(
         default=None,
@@ -139,6 +143,9 @@ class TaskResponse(BaseModel):
     status: TaskStatus
     video_id: str
     video_url: Optional[str] = None
+    priority: Optional[TaskPriority] = Field(
+        None, description="Task priority (null for cache hits)"
+    )
     video_info: Optional[VideoInfoResponse] = None
     files: Optional[FilesResponse] = None
     error: Optional[ErrorInfoResponse] = None
