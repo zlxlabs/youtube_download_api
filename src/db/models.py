@@ -208,13 +208,13 @@ RETRY_CONFIG: dict[ErrorCode, dict[str, Any]] = {
         "jitter": 30,  # Random jitter range (seconds)
     },
     ErrorCode.RATE_LIMITED: {
-        "max_retries": 3,
-        "backoff": [120, 240, 480],
-        "jitter": 60,
+        "max_retries": 5,  # 增加重试次数到 5 次
+        "backoff": [300, 600, 1200, 2400, 3600],  # 更长的退避时间（5分钟到1小时）
+        "jitter": 120,  # 增加随机抖动范围
     },
     ErrorCode.POT_TOKEN_FAILED: {
-        "max_retries": 3,
-        "backoff": [120, 240, 480],
+        "max_retries": 5,  # PO Token 失败也增加重试次数
+        "backoff": [60, 120, 240, 480, 900],
         "jitter": 30,
     },
     ErrorCode.DOWNLOAD_FAILED: {
