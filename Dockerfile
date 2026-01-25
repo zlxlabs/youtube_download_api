@@ -44,34 +44,34 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install runtime dependencies (curl for healthcheck, unzip for deno)
+# Install runtime dependencies and JavaScript runtimes in one layer
+# Runtime dependencies:
+# - curl: healthcheck
+# - ca-certificates: TLS verification
+# - unzip: deno installation
+# - libssl3: OpenSSL library for curl_cffi
+# - libcurl4: curl library for curl_cffi
+# JavaScript runtimes:
+# - Deno: for yt-dlp n challenge solving (nsig decryption)
+# - Node.js: additional JS runtime support
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
     unzip \
-    && rm -rf /var/lib/apt/lists/* \
-    && rm -rf /root/.cache
-
-# Install Deno for yt-dlp n challenge solving (nsig decryption)
-# https://github.com/yt-dlp/yt-dlp/wiki/EJS
-RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh \
+    libssl3 \
+    libcurl4 \
+    # Install Deno
+    && curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh \
     && deno --version \
-    # 清理 Deno 安装缓存
-    && rm -rf /root/.cache/deno
-
-# Install Node.js (LTS) for additional JavaScript runtime support
-# 2026-01-25: 添加完整的 JavaScript 运行时，提高 n challenge 解决成功率
-# 2026-01-26: 优化镜像体积，移除 npm/corepack 等不必要组件
-RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - \
+    # Install Node.js from NodeSource
+    && curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && node --version \
-    # 移除 npm 和 corepack，yt-dlp 只需要 node 运行时
+    # Clean up to reduce image size
     && rm -rf /usr/lib/node_modules/npm \
     && rm -rf /usr/lib/node_modules/corepack \
-    # 移除 Node.js 文档和示例代码
     && rm -rf /usr/share/doc/nodejs \
     && rm -rf /usr/share/man/man1/node* \
-    # 清理 apt 缓存
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* \
     && rm -rf /tmp/* \
