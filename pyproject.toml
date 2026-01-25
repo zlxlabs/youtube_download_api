@@ -12,7 +12,10 @@ dependencies = [
     "uvicorn[standard]>=0.24.0",
     # Download Core
     # curl-cffi extras enables TLS fingerprint impersonation
-    "yt-dlp[default,curl-cffi]>=2025.05.22",
+    # 2026-01-25: 升级到 0.14.0 修复 TLS 错误
+    # yt-dlp 使用预发布版本以支持 curl-cffi 0.14.0
+    "curl-cffi>=0.14.0",
+    "yt-dlp[default,curl-cffi]>=2026.1.19",
     "bgutil-ytdlp-pot-provider",
     # Database
     "aiosqlite>=0.19.0",

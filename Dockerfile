@@ -29,11 +29,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-# Copy dependency files
-COPY pyproject.toml .
+# Copy dependency files (uv.lock is required for uv export)
+# README.md is required by hatchling to build the local package
+COPY pyproject.toml uv.lock README.md ./
 
-# Install Python dependencies (production only, no dev dependencies)
-RUN uv pip install --system --no-cache --target=/app/deps -r pyproject.toml
+# Export dependencies to requirements.txt and install
+# --no-dev: 排除开发依赖
+# --no-hashes: 简化 requirements.txt 格式
+RUN uv export --no-dev --no-hashes -o requirements.txt && \
+    uv pip install --system --no-cache --target=/app/deps -r requirements.txt
 
 # Stage 3: Final runtime image
 FROM python:3.11-slim
@@ -52,6 +56,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # https://github.com/yt-dlp/yt-dlp/wiki/EJS
 RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh \
     && deno --version
+
+# Install Node.js (LTS) for additional JavaScript runtime support
+# 2026-01-25: 添加完整的 JavaScript 运行时，提高 n challenge 解决成功率
+RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && node --version \
+    && npm --version \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy ffmpeg binaries from downloader stage
 COPY --from=ffmpeg-downloader /usr/local/bin/ffmpeg /usr/local/bin/

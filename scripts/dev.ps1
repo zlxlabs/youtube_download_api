@@ -12,8 +12,9 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
 }
 
 # Sync dependencies (creates .venv automatically if not exists)
+# --prerelease=allow: 允许安装预发布版本（yt-dlp 需要）
 Write-Host "Syncing dependencies with uv..." -ForegroundColor Yellow
-uv sync
+uv sync --prerelease=allow
 
 # Check if .env.development exists
 if (-not (Test-Path ".\.env.development")) {

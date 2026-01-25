@@ -15,8 +15,9 @@ if ! command -v uv &> /dev/null; then
 fi
 
 # Sync dependencies (creates .venv automatically if not exists)
+# --prerelease=allow: 允许安装预发布版本（yt-dlp 需要）
 echo -e "\033[33mSyncing dependencies with uv...\033[0m"
-uv sync
+uv sync --prerelease=allow
 
 # Check if .env.development exists
 if [ ! -f ".env.development" ]; then
