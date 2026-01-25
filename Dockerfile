@@ -55,15 +55,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install Deno for yt-dlp n challenge solving (nsig decryption)
 # https://github.com/yt-dlp/yt-dlp/wiki/EJS
 RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh \
-    && deno --version
+    && deno --version \
+    # 清理 Deno 安装缓存
+    && rm -rf /root/.cache/deno
 
 # Install Node.js (LTS) for additional JavaScript runtime support
 # 2026-01-25: 添加完整的 JavaScript 运行时，提高 n challenge 解决成功率
+# 2026-01-26: 优化镜像体积，移除 npm/corepack 等不必要组件
 RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && node --version \
-    && npm --version \
-    && rm -rf /var/lib/apt/lists/*
+    # 移除 npm 和 corepack，yt-dlp 只需要 node 运行时
+    && rm -rf /usr/lib/node_modules/npm \
+    && rm -rf /usr/lib/node_modules/corepack \
+    # 移除 Node.js 文档和示例代码
+    && rm -rf /usr/share/doc/nodejs \
+    && rm -rf /usr/share/man/man1/node* \
+    # 清理 apt 缓存
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /tmp/* \
+    && rm -rf /root/.cache
 
 # Copy ffmpeg binaries from downloader stage
 COPY --from=ffmpeg-downloader /usr/local/bin/ffmpeg /usr/local/bin/
@@ -82,8 +94,16 @@ RUN mkdir -p /app/data/files/audio /app/data/files/transcript /app/data/logs
 RUN find /usr/local/lib/python3.11/site-packages -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true && \
     find /usr/local/lib/python3.11/site-packages -type d -name "tests" -exec rm -rf {} + 2>/dev/null || true && \
     find /usr/local/lib/python3.11/site-packages -type d -name "test" -exec rm -rf {} + 2>/dev/null || true && \
+    find /usr/local/lib/python3.11/site-packages -type f -name "*.pyc" -delete 2>/dev/null || true && \
+    find /usr/local/lib/python3.11/site-packages -type f -name "*.pyo" -delete 2>/dev/null || true && \
     rm -rf /usr/local/lib/python3.11/site-packages/pip* && \
-    rm -rf /usr/local/lib/python3.11/site-packages/setuptools*
+    rm -rf /usr/local/lib/python3.11/site-packages/setuptools* && \
+    # 移除 Python 包中的文档和示例
+    find /usr/local/lib/python3.11/site-packages -type d -name "docs" -exec rm -rf {} + 2>/dev/null || true && \
+    find /usr/local/lib/python3.11/site-packages -type d -name "examples" -exec rm -rf {} + 2>/dev/null || true && \
+    # 清理所有缓存
+    rm -rf /root/.cache && \
+    rm -rf /tmp/*
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1

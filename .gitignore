@@ -77,3 +77,4 @@ temp/
 *.tmp
 *.temp
 docker/output
+build-optimized.bat
