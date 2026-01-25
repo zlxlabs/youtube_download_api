@@ -200,27 +200,28 @@ class Task:
 
 
 # Retry configuration for different error types
+# 所有可重试错误统一改为最多重试 1 次
 RETRY_CONFIG: dict[ErrorCode, dict[str, Any]] = {
-    # Retryable errors
+    # Retryable errors - 统一最多重试 1 次
     ErrorCode.NETWORK_ERROR: {
-        "max_retries": 3,
-        "backoff": [120, 240, 480],  # Exponential backoff (seconds)
-        "jitter": 30,  # Random jitter range (seconds)
+        "max_retries": 1,
+        "backoff": [300],  # 5分钟后重试
+        "jitter": 60,  # 随机抖动 0-60秒
     },
     ErrorCode.RATE_LIMITED: {
-        "max_retries": 5,  # 增加重试次数到 5 次
-        "backoff": [300, 600, 1200, 2400, 3600],  # 更长的退避时间（5分钟到1小时）
-        "jitter": 120,  # 增加随机抖动范围
+        "max_retries": 1,
+        "backoff": [600],  # 10分钟后重试
+        "jitter": 120,  # 随机抖动 0-120秒
     },
     ErrorCode.POT_TOKEN_FAILED: {
-        "max_retries": 5,  # PO Token 失败也增加重试次数
-        "backoff": [60, 120, 240, 480, 900],
-        "jitter": 30,
+        "max_retries": 1,
+        "backoff": [180],  # 3分钟后重试
+        "jitter": 60,
     },
     ErrorCode.DOWNLOAD_FAILED: {
-        "max_retries": 3,
-        "backoff": [120, 240, 480],
-        "jitter": 30,
+        "max_retries": 1,
+        "backoff": [300],  # 5分钟后重试
+        "jitter": 60,
     },
     # Non-retryable errors (fail immediately)
     ErrorCode.VIDEO_UNAVAILABLE: {"max_retries": 0},

@@ -520,7 +520,8 @@ class DownloadWorker:
                 )
 
                 await asyncio.sleep(retry_delay)
-                await self.task_service.task_queue.put(task.id)
+                # 重试任务使用低优先级（priority=1），新任务会优先处理
+                await self.task_service.task_queue.put((1, task.id))
                 return
 
         await self.db.update_task_status(

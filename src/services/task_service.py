@@ -51,10 +51,13 @@ class TaskService:
         self.settings = settings
         self.file_service = file_service
         # Task queue for worker to consume
-        self._task_queue: asyncio.Queue[str] = asyncio.Queue()
+        # 使用优先级队列：(priority, task_id)
+        # priority=0: 新任务（高优先级）
+        # priority=1: 重试任务（低优先级）
+        self._task_queue: asyncio.PriorityQueue[tuple[int, str]] = asyncio.PriorityQueue()
 
     @property
-    def task_queue(self) -> asyncio.Queue[str]:
+    def task_queue(self) -> asyncio.PriorityQueue[tuple[int, str]]:
         """Get the task queue."""
         return self._task_queue
 
@@ -162,8 +165,8 @@ class TaskService:
             f"reused_audio={task.reused_audio}, reused_transcript={task.reused_transcript})"
         )
 
-        # Add to queue for worker
-        await self._task_queue.put(task.id)
+        # Add to queue for worker (priority=0 for new tasks)
+        await self._task_queue.put((0, task.id))
 
         # Build response
         response = await self._build_task_response(task)
@@ -355,11 +358,16 @@ class TaskService:
         """
         Get next task from queue.
 
+        优先级队列会自动按优先级排序：
+        - priority=0: 新任务（高优先级，先处理）
+        - priority=1: 重试任务（低优先级，后处理）
+
         Returns:
             Task object or None if queue is empty.
         """
         try:
-            task_id = await asyncio.wait_for(self._task_queue.get(), timeout=1.0)
+            # 从优先级队列获取任务，解包 (priority, task_id)
+            priority, task_id = await asyncio.wait_for(self._task_queue.get(), timeout=1.0)
             task = await self.db.get_task(task_id)
 
             # Skip if task was cancelled while waiting
@@ -382,7 +390,8 @@ class TaskService:
         count = 0
 
         for task in tasks:
-            await self._task_queue.put(task.id)
+            # 启动时恢复的任务作为新任务处理（priority=0）
+            await self._task_queue.put((0, task.id))
             count += 1
 
         if count > 0:
