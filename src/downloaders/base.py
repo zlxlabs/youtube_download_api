@@ -1,0 +1,133 @@
+"""
+下载器抽象基类。
+
+定义所有下载器必须实现的接口。
+"""
+
+from abc import ABC, abstractmethod
+from pathlib import Path
+from typing import Optional
+
+from src.downloaders.models import DownloaderResult, DownloaderType
+
+
+class BaseDownloader(ABC):
+    """
+    下载器抽象基类。
+
+    所有下载器实现必须继承此类并实现所有抽象方法。
+    """
+
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        """
+        下载器名称。
+
+        Returns:
+            下载器名称（如 "ytdlp", "tikhub"）
+        """
+        pass
+
+    @property
+    @abstractmethod
+    def downloader_type(self) -> DownloaderType:
+        """
+        下载器类型枚举。
+
+        Returns:
+            DownloaderType 枚举值
+        """
+        pass
+
+    @property
+    @abstractmethod
+    def is_available(self) -> bool:
+        """
+        检查下载器是否可用。
+
+        检查必要的配置（如 API key）是否已设置。
+
+        Returns:
+            True 表示可用，False 表示不可用
+        """
+        pass
+
+    @abstractmethod
+    async def download(
+        self,
+        video_url: str,
+        video_id: str,
+        output_dir: Path,
+        include_audio: bool = True,
+        include_transcript: bool = True,
+    ) -> DownloaderResult:
+        """
+        下载视频音频和字幕。
+
+        Args:
+            video_url: YouTube 视频 URL
+            video_id: YouTube 视频 ID
+            output_dir: 输出目录（临时目录）
+            include_audio: 是否下载音频
+            include_transcript: 是否获取字幕
+
+        Returns:
+            DownloaderResult 包含下载结果
+
+        Raises:
+            DownloaderError: 下载失败时抛出
+        """
+        pass
+
+    @abstractmethod
+    def should_retry(self, error: Exception) -> bool:
+        """
+        判断错误是否应该重试当前下载器（而非降级）。
+
+        某些临时性错误（如网络超时）应该重试当前下载器，
+        而某些错误（如限流、认证失败）应该降级到下一个下载器。
+
+        Args:
+            error: 捕获的异常
+
+        Returns:
+            True 表示应该重试当前下载器，False 表示应该降级
+        """
+        pass
+
+    @abstractmethod
+    def should_trigger_circuit_breaker(self, error: Exception) -> bool:
+        """
+        判断错误是否应该触发熔断器。
+
+        某些系统性错误（如限流）应该触发熔断器，
+        而某些视频特定错误（如视频不存在）不应该触发。
+
+        Args:
+            error: 捕获的异常
+
+        Returns:
+            True 表示应该计入熔断器失败次数，False 表示不计入
+        """
+        pass
+
+    @abstractmethod
+    async def get_video_metadata(
+        self,
+        video_url: str,
+        video_id: str,
+    ) -> Optional[dict]:
+        """
+        仅获取视频元数据（不下载）。
+
+        用于快速检查视频可用性。
+
+        Args:
+            video_url: YouTube 视频 URL
+            video_id: YouTube 视频 ID
+
+        Returns:
+            视频元数据字典，失败返回 None
+        """
+        pass

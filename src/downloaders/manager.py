@@ -1,0 +1,402 @@
+"""
+下载器管理器。
+
+负责管理多个下载器，实现降级策略和熔断保护。
+"""
+
+from pathlib import Path
+from typing import Dict, List, Optional
+
+from src.config import Settings
+from src.core.downloader import DownloadCancelledError
+from src.downloaders.base import BaseDownloader
+from src.downloaders.circuit_breaker import CircuitBreaker, CircuitBreakerOpen
+from src.downloaders.exceptions import AllDownloadersFailed, DownloaderError
+from src.downloaders.models import DownloaderResult
+from src.downloaders.tikhub_downloader import TikHubDownloader
+from src.downloaders.ytdlp_downloader import YtdlpDownloader
+from src.utils.logger import logger
+
+
+class DownloaderStats:
+    """
+    下载器统计数据。
+
+    记录各下载器的成功/失败次数，用于监控和告警。
+    注意：仅用于统计，不影响路由决策。
+    """
+
+    def __init__(self):
+        """初始化统计数据。"""
+        self.stats: Dict[str, Dict[str, int]] = {}
+
+    def record_success(self, downloader: str) -> None:
+        """记录成功。"""
+        if downloader not in self.stats:
+            self.stats[downloader] = {"success": 0, "failure": 0, "total": 0}
+
+        self.stats[downloader]["success"] += 1
+        self.stats[downloader]["total"] += 1
+
+    def record_failure(self, downloader: str) -> None:
+        """记录失败。"""
+        if downloader not in self.stats:
+            self.stats[downloader] = {"success": 0, "failure": 0, "total": 0}
+
+        self.stats[downloader]["failure"] += 1
+        self.stats[downloader]["total"] += 1
+
+    def get_success_rate(self, downloader: str) -> float:
+        """
+        获取成功率。
+
+        Returns:
+            成功率（0.0-1.0），如果没有数据返回 0.0
+        """
+        if downloader not in self.stats:
+            return 0.0
+
+        total = self.stats[downloader]["total"]
+        if total == 0:
+            return 0.0
+
+        return self.stats[downloader]["success"] / total
+
+    def get_summary(self) -> Dict[str, dict]:
+        """
+        获取统计摘要。
+
+        Returns:
+            包含所有下载器统计的字典
+        """
+        summary = {}
+        for downloader, data in self.stats.items():
+            summary[downloader] = {
+                **data,
+                "success_rate": self.get_success_rate(downloader),
+            }
+        return summary
+
+
+class DownloaderManager:
+    """
+    下载器管理器。
+
+    管理多个下载器，实现：
+    1. 按优先级顺序尝试
+    2. 熔断器保护
+    3. 自动降级
+    4. 统计监控
+    """
+
+    def __init__(self, settings: Settings):
+        """
+        初始化下载器管理器。
+
+        Args:
+            settings: 应用配置
+        """
+        self.settings = settings
+        self.downloaders = self._init_downloaders()
+        self.circuit_breakers = self._init_circuit_breakers()
+        self.stats = DownloaderStats()
+
+        logger.info(
+            f"DownloaderManager initialized with {len(self.downloaders)} downloader(s): "
+            f"{[d.name for d in self.downloaders]}"
+        )
+
+    def _init_downloaders(self) -> List[BaseDownloader]:
+        """
+        初始化下载器列表。
+
+        根据配置的优先级顺序初始化下载器。
+
+        Returns:
+            下载器列表
+        """
+        downloaders: List[BaseDownloader] = []
+
+        # 从配置读取优先级顺序
+        priority_str = getattr(
+            self.settings, "downloader_priority", "ytdlp,tikhub"
+        )
+        priority_list = [name.strip() for name in priority_str.split(",")]
+
+        logger.info(f"Downloader priority: {priority_list}")
+
+        for name in priority_list:
+            try:
+                if name == "ytdlp":
+                    downloader = YtdlpDownloader(self.settings)
+                    if downloader.is_available:
+                        downloaders.append(downloader)
+                        logger.info(f"  ✓ {name} enabled")
+                    else:
+                        logger.warning(f"  ✗ {name} not available (skipped)")
+
+                elif name == "tikhub":
+                    downloader = TikHubDownloader(self.settings)
+                    if downloader.is_available:
+                        downloaders.append(downloader)
+                        logger.info(f"  ✓ {name} enabled (API key configured)")
+                    else:
+                        logger.warning(f"  ✗ {name} not available (API key not configured)")
+
+                else:
+                    logger.warning(f"  ? Unknown downloader: {name} (skipped)")
+
+            except Exception as e:
+                logger.error(f"  ✗ Failed to initialize {name}: {e}")
+
+        if not downloaders:
+            logger.warning("No downloaders available! Please check configuration.")
+
+        return downloaders
+
+    def _init_circuit_breakers(self) -> Dict[str, CircuitBreaker]:
+        """
+        为每个下载器初始化熔断器。
+
+        Returns:
+            下载器名称 -> 熔断器的映射
+        """
+        circuit_breakers: Dict[str, CircuitBreaker] = {}
+
+        # 检查熔断器是否启用
+        circuit_breaker_enabled = getattr(
+            self.settings, "circuit_breaker_enabled", True
+        )
+
+        if not circuit_breaker_enabled:
+            logger.info("Circuit breaker disabled by configuration")
+            return circuit_breakers
+
+        # 熔断器配置
+        failure_threshold = getattr(
+            self.settings, "circuit_breaker_threshold", 5
+        )
+        timeout = getattr(
+            self.settings, "circuit_breaker_timeout", 1800
+        )
+        half_open_max_calls = getattr(
+            self.settings, "circuit_breaker_half_open_calls", 3
+        )
+
+        for downloader in self.downloaders:
+            circuit_breaker = CircuitBreaker(
+                name=downloader.name,
+                failure_threshold=failure_threshold,
+                timeout=timeout,
+                half_open_max_calls=half_open_max_calls,
+            )
+            circuit_breakers[downloader.name] = circuit_breaker
+
+        logger.info(
+            f"Circuit breakers initialized: "
+            f"threshold={failure_threshold}, timeout={timeout}s"
+        )
+
+        return circuit_breakers
+
+    async def download_with_fallback(
+        self,
+        video_url: str,
+        video_id: str,
+        output_dir: Path,
+        include_audio: bool = True,
+        include_transcript: bool = True,
+    ) -> DownloaderResult:
+        """
+        使用降级策略下载。
+
+        按优先级顺序尝试所有下载器，遇到熔断器开启时跳过。
+
+        Args:
+            video_url: YouTube 视频 URL
+            video_id: YouTube 视频 ID
+            output_dir: 输出目录（临时目录）
+            include_audio: 是否下载音频
+            include_transcript: 是否获取字幕
+
+        Returns:
+            DownloaderResult 包含下载结果
+
+        Raises:
+            AllDownloadersFailed: 所有下载器都失败
+            DownloadCancelledError: 下载被取消
+        """
+        errors: List[str] = []
+        last_error: Optional[Exception] = None
+
+        for downloader in self.downloaders:
+            circuit_breaker = self.circuit_breakers.get(downloader.name)
+
+            try:
+                logger.info(
+                    f"Trying downloader: {downloader.name} "
+                    f"(circuit: {circuit_breaker.state.value if circuit_breaker else 'disabled'})"
+                )
+
+                # 使用熔断器包装调用
+                if circuit_breaker:
+                    result = await circuit_breaker.call_async(
+                        lambda: self._download_with_downloader(
+                            downloader,
+                            video_url,
+                            video_id,
+                            output_dir,
+                            include_audio,
+                            include_transcript,
+                        )
+                    )
+                else:
+                    result = await self._download_with_downloader(
+                        downloader,
+                        video_url,
+                        video_id,
+                        output_dir,
+                        include_audio,
+                        include_transcript,
+                    )
+
+                # 成功：记录统计并返回
+                self.stats.record_success(downloader.name)
+                logger.info(
+                    f"✓ Download succeeded with {downloader.name} "
+                    f"(success rate: {self.stats.get_success_rate(downloader.name):.1%})"
+                )
+
+                return result
+
+            except CircuitBreakerOpen as e:
+                # 熔断器开启，跳过此下载器
+                logger.warning(f"✗ {downloader.name} circuit breaker open: {e.message}")
+                errors.append(f"{downloader.name}: Circuit breaker open")
+                continue
+
+            except DownloadCancelledError:
+                # 下载取消，直接向上抛出，不继续尝试其他下载器
+                logger.info("Download cancelled, stopping fallback")
+                raise
+
+            except DownloaderError as e:
+                # 下载器错误
+                logger.warning(
+                    f"✗ {downloader.name} failed: {e.error_code.value} - {e.message}"
+                )
+                errors.append(f"{downloader.name}: {e.message}")
+                last_error = e
+
+                # 记录统计
+                self.stats.record_failure(downloader.name)
+
+                # 判断是否应该触发熔断器
+                if circuit_breaker and downloader.should_trigger_circuit_breaker(e):
+                    logger.debug(f"Error will count towards circuit breaker for {downloader.name}")
+                    # 熔断器已经通过 call_async 记录了失败
+                else:
+                    logger.debug(f"Error will not trigger circuit breaker for {downloader.name}")
+
+                # 判断是否应该重试当前下载器（而非降级）
+                if downloader.should_retry(e):
+                    logger.info(f"Error is retryable, not falling back to next downloader")
+                    raise
+
+                # 否则，继续尝试下一个下载器
+                logger.info(f"Falling back to next downloader...")
+                continue
+
+            except Exception as e:
+                # 未预期的错误
+                logger.error(f"✗ {downloader.name} unexpected error: {e}")
+                errors.append(f"{downloader.name}: {e}")
+                last_error = e
+
+                # 记录统计
+                self.stats.record_failure(downloader.name)
+
+                # 继续尝试下一个下载器
+                continue
+
+        # 所有下载器都失败了
+        logger.error("All downloaders failed")
+        logger.error(f"Error summary:\n" + "\n".join(f"  - {e}" for e in errors))
+
+        # 显示统计信息
+        logger.info(f"Downloader stats: {self.stats.get_summary()}")
+
+        raise AllDownloadersFailed(errors)
+
+    async def _download_with_downloader(
+        self,
+        downloader: BaseDownloader,
+        video_url: str,
+        video_id: str,
+        output_dir: Path,
+        include_audio: bool,
+        include_transcript: bool,
+    ) -> DownloaderResult:
+        """
+        使用指定下载器下载（包装为同步函数供熔断器调用）。
+
+        Args:
+            downloader: 下载器实例
+            video_url: 视频 URL
+            video_id: 视频 ID
+            output_dir: 输出目录
+            include_audio: 是否下载音频
+            include_transcript: 是否获取字幕
+
+        Returns:
+            DownloaderResult
+
+        Raises:
+            DownloaderError: 下载失败
+        """
+        return await downloader.download(
+            video_url=video_url,
+            video_id=video_id,
+            output_dir=output_dir,
+            include_audio=include_audio,
+            include_transcript=include_transcript,
+        )
+
+    def get_circuit_breaker_states(self) -> Dict[str, dict]:
+        """
+        获取所有熔断器的状态。
+
+        Returns:
+            熔断器状态字典
+        """
+        states = {}
+        for name, circuit_breaker in self.circuit_breakers.items():
+            states[name] = circuit_breaker.get_state_summary()
+        return states
+
+    def get_stats_summary(self) -> Dict[str, dict]:
+        """
+        获取统计摘要。
+
+        Returns:
+            统计摘要字典
+        """
+        return self.stats.get_summary()
+
+    def cancel_all(self) -> None:
+        """取消所有下载器的当前操作。"""
+        for downloader in self.downloaders:
+            if hasattr(downloader, "cancel"):
+                downloader.cancel()
+
+    def reset_cancel_all(self) -> None:
+        """重置所有下载器的取消状态。"""
+        for downloader in self.downloaders:
+            if hasattr(downloader, "reset_cancel"):
+                downloader.reset_cancel()
+
+    async def close(self) -> None:
+        """关闭所有下载器（释放资源）。"""
+        for downloader in self.downloaders:
+            if hasattr(downloader, "close"):
+                await downloader.close()

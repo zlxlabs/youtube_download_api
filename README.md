@@ -9,6 +9,8 @@ Docker 部署的 YouTube 音频下载服务，提供 RESTful API 接口，支持
 - **字幕提取** - JSON 格式，优先中英文字幕
 - **灵活下载模式** - 支持仅音频/仅字幕/完整模式
 - **智能资源复用** - 文件级缓存，同视频资源跨任务共享
+- **多下载器降级** - yt-dlp + TikHub API 双重保障，自动降级切换
+- **熔断器保护** - 智能熔断机制，避免持续性故障影响服务
 - **风控绕过** - TLS 指纹模拟 + PO Token 机制
 - **任务队列** - 异步处理，支持并发控制和错误重试
 - **双模式通知** - Webhook 回调 + 轮询查询
@@ -492,6 +494,12 @@ def verify_signature(body: bytes, signature: str, secret: str) -> bool:
 | `AUDIO_QUALITY` | 否 | 128 | 音频比特率 (kbps) |
 | `DATA_DIR` | 否 | ./data | 数据存储目录 |
 | `FILE_RETENTION_DAYS` | 否 | 60 | 文件保留天数 |
+| `TIKHUB_API_KEY` | 否 | - | TikHub API 密钥（用于下载降级） |
+| `DOWNLOADER_PRIORITY` | 否 | ytdlp,tikhub | 下载器优先级顺序 |
+| `CIRCUIT_BREAKER_ENABLED` | 否 | true | 启用熔断器保护 |
+| `CIRCUIT_BREAKER_THRESHOLD` | 否 | 5 | 熔断器失败阈值 |
+| `CIRCUIT_BREAKER_TIMEOUT` | 否 | 1800 | 熔断器超时（秒） |
+| `CIRCUIT_BREAKER_HALF_OPEN_CALLS` | 否 | 3 | 半开状态最大调用次数 |
 | `COOKIE_FILE` | 否 | - | Cookie 文件路径 |
 | `DRY_RUN` | 否 | false | 干跑模式（跳过下载） |
 
@@ -543,6 +551,123 @@ WECOM_MODERATION_STRATEGY=pinyin_reverse
 敏感词1
 敏感词2
 ```
+
+### 多下载器配置
+
+系统支持多种下载方式，并提供自动降级机制，以提高下载成功率和服务可靠性。
+
+#### 支持的下载器
+
+| 下载器 | 说明 | 优点 | 缺点 | 成本 |
+|--------|------|------|------|------|
+| **yt-dlp** | 本地 yt-dlp 库 | 免费、功能强大 | 可能遇到 YouTube 限流 | 免费 |
+| **TikHub** | TikHub API 服务 | 稳定、不受限流影响 | 需要 API key | 0.002$/次 |
+
+#### 工作原理
+
+```
+请求下载
+  │
+  ├─> 1. 尝试 yt-dlp（优先）
+  │   ├─ 成功 → 返回结果
+  │   └─ 失败（限流/错误）→ 继续
+  │
+  ├─> 2. 尝试 TikHub（降级）
+  │   ├─ 成功 → 返回结果
+  │   └─ 失败 → 返回错误
+  │
+  └─ 所有下载器都失败 → 任务失败
+```
+
+#### 熔断器保护
+
+系统采用熔断器模式保护下载器，避免持续性故障影响服务：
+
+**熔断器状态机**
+
+```
+CLOSED（正常）
+  ├─ 连续失败 5 次 → OPEN（熔断）
+  │
+OPEN（熔断）
+  ├─ 拒绝所有请求，直接跳过该下载器
+  ├─ 等待 30 分钟 → HALF_OPEN（半开）
+  │
+HALF_OPEN（半开）
+  ├─ 允许 3 次测试请求
+  ├─ 连续成功 2 次 → CLOSED（恢复）
+  └─ 失败 → OPEN（重新熔断）
+```
+
+**实际效果**
+
+```
+场景：yt-dlp 遇到 YouTube 限流
+
+时刻 10:00 - yt-dlp 连续失败 5 次
+           → 熔断器开启
+
+时刻 10:00-10:30 - 所有任务直接使用 TikHub
+                 → 跳过 yt-dlp，节省时间
+
+时刻 10:30 - 熔断器恢复，重新尝试 yt-dlp
+```
+
+#### 配置示例
+
+**场景 1：仅使用 yt-dlp（免费）**
+
+```bash
+DOWNLOADER_PRIORITY=ytdlp
+TIKHUB_API_KEY=  # 不配置
+```
+
+**场景 2：yt-dlp + TikHub 双重保障（推荐）**
+
+```bash
+DOWNLOADER_PRIORITY=ytdlp,tikhub
+TIKHUB_API_KEY=your-api-key-here
+```
+
+**场景 3：仅使用 TikHub（最稳定）**
+
+```bash
+DOWNLOADER_PRIORITY=tikhub
+TIKHUB_API_KEY=your-api-key-here
+```
+
+**场景 4：自定义熔断器参数**
+
+```bash
+# 更激进的熔断策略（适合频繁限流的环境）
+CIRCUIT_BREAKER_THRESHOLD=3        # 3 次失败即熔断
+CIRCUIT_BREAKER_TIMEOUT=900        # 15 分钟后恢复
+
+# 更保守的熔断策略（适合偶尔限流的环境）
+CIRCUIT_BREAKER_THRESHOLD=10       # 10 次失败才熔断
+CIRCUIT_BREAKER_TIMEOUT=3600       # 1 小时后恢复
+```
+
+**场景 5：禁用熔断器（不推荐）**
+
+```bash
+CIRCUIT_BREAKER_ENABLED=false
+```
+
+#### 监控和统计
+
+系统会记录每个下载器的成功/失败情况，可通过日志查看：
+
+```
+[INFO] DownloaderManager initialized with 2 downloader(s): ['ytdlp', 'tikhub']
+[INFO] Trying downloader: ytdlp (circuit: closed)
+[WARNING] ✗ ytdlp failed: RATE_LIMITED - Rate limited by YouTube
+[INFO] Falling back to next downloader...
+[INFO] Trying downloader: tikhub (circuit: closed)
+[INFO] ✓ Download succeeded with tikhub (success rate: 98.5%)
+```
+
+熔断器状态可通过健康检查接口查询（TODO：待实现）。
 
 ## PO Token 配置
 

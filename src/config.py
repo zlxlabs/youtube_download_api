@@ -80,6 +80,33 @@ class Settings(BaseSettings):
         default=None, description="TikHub API key for subtitle fetching"
     )
 
+    # ============ Downloader Configuration ============
+    downloader_priority: str = Field(
+        default="ytdlp,tikhub",
+        description="Downloader priority order (comma-separated, e.g., 'ytdlp,tikhub')",
+    )
+
+    # ============ Circuit Breaker Configuration ============
+    circuit_breaker_enabled: bool = Field(
+        default=True,
+        description="Enable circuit breaker for downloaders",
+    )
+    circuit_breaker_threshold: int = Field(
+        default=5,
+        ge=1,
+        description="Consecutive failures to trigger circuit breaker",
+    )
+    circuit_breaker_timeout: int = Field(
+        default=1800,
+        ge=60,
+        description="Circuit breaker timeout in seconds (default: 30 minutes)",
+    )
+    circuit_breaker_half_open_calls: int = Field(
+        default=3,
+        ge=1,
+        description="Maximum calls allowed in half-open state",
+    )
+
     # ============ WeCom Content Moderation ============
     wecom_moderation_enabled: bool = Field(
         default=False, description="Enable content moderation for WeCom notifications"
