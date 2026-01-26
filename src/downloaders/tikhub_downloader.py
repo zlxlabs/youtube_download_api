@@ -7,6 +7,7 @@ TikHub API 下载器实现。
 import asyncio
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 
@@ -405,8 +406,33 @@ class TikHubDownloader(BaseDownloader):
                 "Chrome/120.0.0.0 Safari/537.36"
             ),
             "Accept": "*/*",
+            "Accept-Language": "en-US,en;q=0.9",
             "Accept-Encoding": "identity",
+            "Origin": "https://www.youtube.com",
+            "Referer": "https://www.youtube.com/",
         }
+
+    def _get_url_param(self, url: str, name: str) -> Optional[str]:
+        """提取 URL 查询参数。"""
+        try:
+            query = urlparse(url).query
+            values = parse_qs(query).get(name)
+            if values:
+                return values[0]
+        except Exception:
+            return None
+        return None
+
+    def _log_url_ip_hint(self, audio_url: str) -> None:
+        """记录 URL 中的 ip 参数，辅助排查 403/连接失败。"""
+        ip_value = self._get_url_param(audio_url, "ip")
+        if not ip_value:
+            return
+        logger.warning(f"[tikhub] URL ip param: {ip_value}")
+        if ":" in ip_value:
+            logger.warning(
+                "[tikhub] URL ip param is IPv6; ensure IPv6 egress is available"
+            )
 
     def _parse_content_range_total(self, content_range: str) -> Optional[int]:
         """
@@ -487,12 +513,26 @@ class TikHubDownloader(BaseDownloader):
                     downloaded += len(chunk)
                 return bytes_written, response_total, response.status_code
 
+        class _FallbackToSimple(Exception):
+            """Signal to retry download without Range."""
+
         try:
             completed_full = False
             with open(temp_path, "wb") as f:
-                bytes_written, total_size, status_code = await fetch_range(
-                    0, range_size - 1, f
-                )
+                try:
+                    bytes_written, total_size, status_code = await fetch_range(
+                        0, range_size - 1, f
+                    )
+                except httpx.HTTPStatusError as e:
+                    status_code = e.response.status_code if e.response else None
+                    if status_code == 403:
+                        logger.warning(
+                            "[tikhub] Range request rejected with 403, "
+                            "trying non-range download once"
+                        )
+                        self._log_url_ip_hint(audio_url)
+                        raise _FallbackToSimple from e
+                    raise
 
                 if status_code == 200:
                     logger.info(
@@ -530,6 +570,27 @@ class TikHubDownloader(BaseDownloader):
                 downloader=self.name,
             )
 
+        except _FallbackToSimple:
+            if temp_path.exists():
+                temp_path.unlink()
+            return await self._download_audio_simple(audio_url, output_dir, video_id)
+
+        except httpx.ConnectError as e:
+            self._log_url_ip_hint(audio_url)
+            error_msg = str(e) if str(e) else "ConnectError (no detail)"
+            logger.error(
+                f"[tikhub] Chunked download failed: ConnectError: {error_msg}",
+                exc_info=True,
+            )
+            raise DownloaderError(
+                message=(
+                    "Audio download failed: ConnectError "
+                    "(check outbound connectivity to googlevideo.com)"
+                ),
+                error_code=ErrorCode.NETWORK_ERROR,
+                downloader=self.name,
+            ) from e
+
         except Exception as e:
             error_msg = str(e) if str(e) else repr(e)
             logger.error(
@@ -558,10 +619,11 @@ class TikHubDownloader(BaseDownloader):
 
         try:
             timeout = httpx.Timeout(30.0, read=300.0)
+            headers = self._build_media_headers()
 
             # 一次性下载全部内容
             logger.info("[tikhub] Sending GET request...")
-            response = await self.client.get(audio_url, timeout=timeout)
+            response = await self.client.get(audio_url, headers=headers, timeout=timeout)
             response.raise_for_status()
 
             logger.info(f"[tikhub] Got response: {response.status_code}, size: {len(response.content) / 1024 / 1024:.1f}MB")
@@ -610,11 +672,14 @@ class TikHubDownloader(BaseDownloader):
         try:
             # 使用独立的超时设置：连接超时 30s，读取超时 300s
             timeout = httpx.Timeout(30.0, read=300.0)
+            headers = self._build_media_headers()
 
             logger.info(f"[tikhub] Starting stream download...")
 
             # 使用 stream 方式下载大文件
-            async with self.client.stream("GET", audio_url, timeout=timeout) as response:
+            async with self.client.stream(
+                "GET", audio_url, headers=headers, timeout=timeout
+            ) as response:
                 logger.info(f"[tikhub] Got response: {response.status_code}")
                 response.raise_for_status()
 
