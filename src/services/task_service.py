@@ -24,7 +24,14 @@ from src.api.schemas import (
 )
 from src.config import Settings
 from src.db.database import Database
-from src.db.models import CallbackStatus, FileType, Task, TaskStatus, TaskPriority
+from src.db.models import (
+    CallbackStatus,
+    FileType,
+    Task,
+    TaskStatus,
+    TaskPriority,
+    calculate_queue_priority,
+)
 from src.services.file_service import FileService
 from src.utils.helpers import extract_video_id
 from src.utils.logger import logger
@@ -160,14 +167,22 @@ class TaskService:
         )
 
         await self.db.create_task(task)
+
+        # 计算队列优先级（基于用户优先级和任务类型）
+        queue_priority = calculate_queue_priority(
+            user_priority=task.priority,
+            include_audio=task.include_audio,
+            include_transcript=task.include_transcript,
+        )
+
         logger.info(
             f"Created task {task.id} for video {video_id} "
-            f"(priority={task.priority.value}, need_audio={need_audio}, need_transcript={need_transcript}, "
+            f"(user_priority={task.priority.value}, queue_priority={queue_priority}, "
+            f"need_audio={need_audio}, need_transcript={need_transcript}, "
             f"reused_audio={task.reused_audio}, reused_transcript={task.reused_transcript})"
         )
 
-        # Add to queue for worker (使用用户指定的优先级)
-        queue_priority = task.priority.to_queue_priority()
+        # Add to queue for worker
         await self._task_queue.put((queue_priority, task.id))
 
         # Build response
@@ -392,8 +407,12 @@ class TaskService:
         count = 0
 
         for task in tasks:
-            # 启动时恢复的任务保持原有优先级
-            queue_priority = task.priority.to_queue_priority()
+            # 启动时恢复的任务，重新计算队列优先级
+            queue_priority = calculate_queue_priority(
+                user_priority=task.priority,
+                include_audio=task.include_audio,
+                include_transcript=task.include_transcript,
+            )
             await self._task_queue.put((queue_priority, task.id))
             count += 1
 
@@ -432,10 +451,16 @@ class TaskService:
         if task.status == TaskStatus.PENDING:
             position = await self.db.get_queue_position(task.id)
             response.position = position
-            # Estimate wait time based on average task interval
-            avg_interval = (
-                self.settings.task_interval_min + self.settings.task_interval_max
-            ) / 2
+            # Estimate wait time based on task type
+            # 字幕任务使用短间隔估算，音频/混合任务使用长间隔估算
+            if not task.include_audio and task.include_transcript:
+                avg_interval = (
+                    self.settings.transcript_interval_min + self.settings.transcript_interval_max
+                ) / 2
+            else:
+                avg_interval = (
+                    self.settings.audio_interval_min + self.settings.audio_interval_max
+                ) / 2
             response.estimated_wait = int(position * avg_interval)
 
         # Add progress for downloading tasks

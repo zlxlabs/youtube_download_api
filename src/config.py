@@ -56,12 +56,32 @@ class Settings(BaseSettings):
     download_concurrency: int = Field(
         default=1, ge=1, le=5, description="Number of concurrent downloads (reserved, not yet implemented)"
     )
+
+    # ============ Task Interval Configuration ============
+    # 字幕任务间隔（轻量级，低风控）
+    transcript_interval_min: int = Field(
+        default=20, ge=5, description="Minimum interval between transcript-only tasks (seconds)"
+    )
+    transcript_interval_max: int = Field(
+        default=40, ge=10, description="Maximum interval between transcript-only tasks (seconds)"
+    )
+
+    # 音频/混合任务间隔（重量级，高风控）
+    audio_interval_min: int = Field(
+        default=60, ge=5, description="Minimum interval between audio/mixed tasks (seconds)"
+    )
+    audio_interval_max: int = Field(
+        default=600, ge=10, description="Maximum interval between audio/mixed tasks (seconds)"
+    )
+
+    # 向后兼容：保留旧配置名称，映射到音频间隔
     task_interval_min: int = Field(
-        default=300, ge=5, description="Minimum interval between tasks (seconds)"
+        default=60, ge=5, description="Minimum interval between tasks (seconds) - deprecated, use audio_interval_min"
     )
     task_interval_max: int = Field(
-        default=1800, ge=10, description="Maximum interval between tasks (seconds)"
+        default=600, ge=10, description="Maximum interval between tasks (seconds) - deprecated, use audio_interval_max"
     )
+
     audio_quality: int = Field(
         default=128, ge=64, le=320, description="Audio bitrate (kbps)"
     )
@@ -159,6 +179,28 @@ class Settings(BaseSettings):
         if v < min_val:
             raise ValueError(
                 f"task_interval_max ({v}) must be >= task_interval_min ({min_val})"
+            )
+        return v
+
+    @field_validator("transcript_interval_max")
+    @classmethod
+    def validate_transcript_interval_max(cls, v: int, info) -> int:
+        """Ensure transcript_interval_max >= transcript_interval_min."""
+        min_val = info.data.get("transcript_interval_min", 20)
+        if v < min_val:
+            raise ValueError(
+                f"transcript_interval_max ({v}) must be >= transcript_interval_min ({min_val})"
+            )
+        return v
+
+    @field_validator("audio_interval_max")
+    @classmethod
+    def validate_audio_interval_max(cls, v: int, info) -> int:
+        """Ensure audio_interval_max >= audio_interval_min."""
+        min_val = info.data.get("audio_interval_min", 60)
+        if v < min_val:
+            raise ValueError(
+                f"audio_interval_max ({v}) must be >= audio_interval_min ({min_val})"
             )
         return v
 

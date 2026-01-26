@@ -154,17 +154,31 @@ class DownloadWorker:
             f"to {self._interval_multiplier:.2f} due to rate limiting"
         )
 
-    def _get_adaptive_wait_time(self) -> float:
+    def _get_adaptive_wait_time(self, task: Task) -> float:
         """
         计算自适应等待时间。
 
+        根据刚完成的任务类型选择间隔策略：
+        - 字幕任务（transcript_only）：短间隔（轻量级，低风控）
+        - 音频/混合任务：长间隔（重量级，高风控）
+
         基于配置的最小/最大间隔，乘以自适应倍数。
+
+        Args:
+            task: 刚完成的任务
 
         Returns:
             等待时间（秒）
         """
-        base_min = self.settings.task_interval_min
-        base_max = self.settings.task_interval_max
+        # 根据任务类型选择基准间隔
+        if not task.include_audio and task.include_transcript:
+            # 字幕任务：短间隔
+            base_min = self.settings.transcript_interval_min
+            base_max = self.settings.transcript_interval_max
+        else:
+            # 音频/混合任务：长间隔
+            base_min = self.settings.audio_interval_min
+            base_max = self.settings.audio_interval_max
 
         # 应用自适应倍数
         adjusted_min = base_min * self._interval_multiplier
@@ -237,22 +251,28 @@ class DownloadWorker:
             await self._handle_download_error(task, downloader_error)
 
         finally:
-            self._current_task = None
-
             # 如果已停止，不等待直接返回
             if not self._running:
+                self._current_task = None
                 return
 
-            # 使用自适应间隔
-            wait_time = self._get_adaptive_wait_time()
-            if self._interval_multiplier > 1.0:
-                logger.info(
-                    f"Waiting {wait_time:.1f}s before next task "
-                    f"(multiplier: {self._interval_multiplier:.2f}x)"
-                )
+            # 使用自适应间隔（基于刚完成的任务类型）
+            if self._current_task:
+                wait_time = self._get_adaptive_wait_time(self._current_task)
+                task_type = "transcript" if (not self._current_task.include_audio and self._current_task.include_transcript) else "audio/mixed"
+
+                if self._interval_multiplier > 1.0:
+                    logger.info(
+                        f"Waiting {wait_time:.1f}s before next task "
+                        f"(task_type={task_type}, multiplier: {self._interval_multiplier:.2f}x)"
+                    )
+                else:
+                    logger.debug(f"Waiting {wait_time:.1f}s before next task (task_type={task_type})")
+
+                self._current_task = None
+                await asyncio.sleep(wait_time)
             else:
-                logger.debug(f"Waiting {wait_time:.1f}s before next task")
-            await asyncio.sleep(wait_time)
+                self._current_task = None
 
     async def _execute_task(self, task: Task) -> dict:
         """

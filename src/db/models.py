@@ -62,24 +62,48 @@ class TaskPriority(str, Enum):
     URGENT = "urgent"  # 紧急任务，立即处理
     NORMAL = "normal"  # 普通任务，正常排队（默认）
 
-    def to_queue_priority(self) -> int:
-        """
-        Convert to queue priority number.
 
-        Returns:
-            Queue priority (0=highest, 2=lowest)
-        """
-        return PRIORITY_MAPPING[self]
+def calculate_queue_priority(
+    user_priority: TaskPriority,
+    include_audio: bool,
+    include_transcript: bool,
+) -> int:
+    """
+    Calculate queue priority based on user priority and task type.
 
+    优先级体系（3 级 + 重试）：
+    - 0: urgent（任何类型）- 全局最高优先级
+    - 1: normal + transcript_only - 字幕任务（轻量级，低风控）
+    - 2: normal + audio/mixed - 音频/混合任务（重量级，高风控）
+    - 3: retry - 重试任务（最低优先级）
 
-# 优先级映射：API 枚举 -> 队列优先级数字
-PRIORITY_MAPPING: dict[TaskPriority, int] = {
-    TaskPriority.URGENT: 0,  # 最高优先级
-    TaskPriority.NORMAL: 1,  # 中等优先级
-}
+    核心原则：
+    - urgent 最优先，不论音频还是字幕
+    - normal 任务中，字幕优先于音频
+
+    Args:
+        user_priority: 用户指定的优先级（urgent/normal）
+        include_audio: 是否包含音频下载
+        include_transcript: 是否包含字幕下载
+
+    Returns:
+        Queue priority (0=highest, 3=lowest for retry)
+    """
+    # urgent 任务全局最高优先级
+    if user_priority == TaskPriority.URGENT:
+        return 0
+
+    # normal 任务根据类型分级
+    if not include_audio and include_transcript:
+        # 仅字幕任务：高优先级（轻量级，低风控）
+        return 1
+    else:
+        # 音频/混合任务：中等优先级（重量级，高风控）
+        return 2
+
 
 # 重试任务的队列优先级（最低优先级）
-RETRY_QUEUE_PRIORITY = 2
+RETRY_QUEUE_PRIORITY = 3
 
 
 @dataclass
