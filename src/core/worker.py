@@ -214,7 +214,7 @@ class DownloadWorker:
             self._on_task_success()
 
             # Send notifications (non-critical, failure won't affect task status)
-            await self._send_notifications_safe(task)
+            await self._send_notifications_safe(task, result)
 
         except DownloadCancelledError:
             # 下载被取消（通常是因为 Ctrl+C）
@@ -397,6 +397,7 @@ class DownloadWorker:
                 "transcript_file_id": transcript_file_id,
                 "reused_audio": reused_audio,
                 "reused_transcript": reused_transcript,
+                "downloader": result.downloader,  # 下载器名称
             }
 
     async def _update_video_resource(
@@ -466,7 +467,17 @@ class DownloadWorker:
 
         task_updated = await self.db.get_task(task.id)
         if task_updated:
-            await self.notify_service.notify_failed(task_updated, error.message)
+            # 提取失败的下载器列表（如果是 AllDownloadersFailed 错误）
+            failed_downloaders = None
+            if isinstance(error, AllDownloadersFailed):
+                # errors 格式: ["ytdlp: error message", "tikhub: error message"]
+                failed_downloaders = [
+                    err.split(":")[0].strip() for err in error.errors if ":" in err
+                ]
+
+            await self.notify_service.notify_failed(
+                task_updated, error.message, failed_downloaders=failed_downloaders
+            )
 
             if task_updated.callback_url:
                 await self.callback_service.send_callback(task_updated)
@@ -536,7 +547,7 @@ class DownloadWorker:
         )
         raise last_error  # type: ignore[misc]
 
-    async def _send_notifications_safe(self, task: Task) -> None:
+    async def _send_notifications_safe(self, task: Task, result: dict) -> None:
         """
         Send notifications safely without affecting task completion.
 
@@ -544,13 +555,17 @@ class DownloadWorker:
 
         Args:
             task: Completed task.
+            result: Execution result containing downloader info.
         """
         try:
             task_updated = await self.db.get_task(task.id)
             if task_updated:
                 # 发送完成通知
                 try:
-                    await self.notify_service.notify_completed(task_updated)
+                    downloader = result.get("downloader")
+                    await self.notify_service.notify_completed(
+                        task_updated, downloader=downloader
+                    )
                 except Exception as e:
                     logger.error(
                         f"Failed to send completion notification for task {task.id}: {e}"

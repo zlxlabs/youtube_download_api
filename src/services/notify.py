@@ -26,6 +26,7 @@ from src.utils.logger import logger
 
 if TYPE_CHECKING:
     from src.db.database import Database
+    from src.downloaders.manager import DownloaderManager
 
 # Try to import wecom_notifier, but make it optional
 try:
@@ -44,16 +45,23 @@ class NotificationService:
     Sends notifications for startup, task completion, and failures.
     """
 
-    def __init__(self, settings: Settings, db: Optional["Database"] = None):
+    def __init__(
+        self,
+        settings: Settings,
+        db: Optional["Database"] = None,
+        downloader_manager: Optional["DownloaderManager"] = None,
+    ):
         """
         Initialize notification service.
 
         Args:
             settings: Application settings.
             db: Database instance for fetching video info.
+            downloader_manager: Downloader manager for stats (optional).
         """
         self.settings = settings
         self.db = db
+        self.downloader_manager = downloader_manager
         self.webhook_url = settings.wecom_webhook_url
         self.enabled = bool(settings.wecom_webhook_url) and WECOM_AVAILABLE
 
@@ -169,6 +177,22 @@ class NotificationService:
             else:
                 moderation_status = "Disabled"
 
+            # Build downloader configuration string
+            downloader_config = ""
+            if self.downloader_manager:
+                # 下载器优先级
+                downloader_names = [d.name for d in self.downloader_manager.downloaders]
+                if downloader_names:
+                    downloader_config += f"> 📥 Downloaders: {' → '.join(downloader_names)}\n"
+
+                # 熔断器配置
+                if self.downloader_manager.circuit_breakers:
+                    cb_threshold = getattr(self.settings, "circuit_breaker_threshold", 5)
+                    cb_timeout = getattr(self.settings, "circuit_breaker_timeout", 1800)
+                    downloader_config += f"> 🔌 Circuit Breaker: threshold={cb_threshold}, timeout={cb_timeout}s\n"
+                else:
+                    downloader_config += "> 🔌 Circuit Breaker: Disabled\n"
+
             content = f"""# 🚀 YouTube Audio API Started
 
 🖥️ **Host**: {hostname} ({ip})
@@ -181,7 +205,7 @@ class NotificationService:
 > 🗂️ File Retention: {self.settings.file_retention_days} days
 > 🔑 PO Token: {self.settings.pot_server_url}
 > 🛡️ Content Moderation: {moderation_status}
-
+{downloader_config}
 ✨ Service is ready to accept requests!
 """
             self.notifier.send_markdown(
@@ -208,12 +232,15 @@ class NotificationService:
         video_resource = await self.db.get_video_resource(video_id)
         return video_resource.video_info if video_resource else None
 
-    async def notify_completed(self, task: Task) -> None:
+    async def notify_completed(
+        self, task: Task, downloader: Optional[str] = None
+    ) -> None:
         """
         Send task completion notification.
 
         Args:
             task: Completed task.
+            downloader: Name of the downloader that succeeded (optional).
         """
         if not self.enabled or not self.notifier:
             return
@@ -264,6 +291,28 @@ class NotificationService:
                 else "N/A"
             )
 
+            # 构建下载器信息
+            downloader_info = ""
+            if downloader:
+                downloader_info = f"📥 **Downloader**: {downloader.upper()}\n"
+
+                # 添加统计信息
+                if self.downloader_manager:
+                    stats = self.downloader_manager.get_stats_summary().get(downloader, {})
+                    if stats.get("total", 0) > 0:
+                        success_rate = stats.get("success_rate", 0.0) * 100
+                        downloader_info += f"📊 **Success Rate**: {success_rate:.1f}% ({stats.get('success', 0)}/{stats.get('total', 0)})\n"
+
+            # 资源复用标识
+            reuse_info = ""
+            if task.reused_audio or task.reused_transcript:
+                reuse_parts = []
+                if task.reused_audio:
+                    reuse_parts.append("音频")
+                if task.reused_transcript:
+                    reuse_parts.append("字幕")
+                reuse_info = f"♻️ **Reused**: {', '.join(reuse_parts)}\n"
+
             content = f"""# ✅ Download Completed
 
 🎬 **Video**: {title}
@@ -278,7 +327,7 @@ class NotificationService:
 🎵 **Audio**: {audio_url}
 📄 **Transcript**: {transcript_url if task.transcript_file_id else "无字幕"}
 
-📅 **Created**: {created_time}
+{downloader_info}{reuse_info}📅 **Created**: {created_time}
 ▶️ **Started**: {started_time}
 ⏳ **Wait Time**: {wait_time}
 
@@ -293,13 +342,16 @@ class NotificationService:
         except Exception as e:
             logger.error(f"Failed to send completion notification: {e}")
 
-    async def notify_failed(self, task: Task, error: str) -> None:
+    async def notify_failed(
+        self, task: Task, error: str, failed_downloaders: Optional[list[str]] = None
+    ) -> None:
         """
         Send task failure notification.
 
         Args:
             task: Failed task.
             error: Error message.
+            failed_downloaders: List of downloaders that failed (optional).
         """
         if not self.enabled or not self.notifier:
             return
@@ -333,6 +385,21 @@ class NotificationService:
                 else "N/A"
             )
 
+            # 构建下载器失败信息
+            downloader_info = ""
+            if failed_downloaders:
+                downloader_info = f"❌ **Failed Downloaders**: {', '.join(d.upper() for d in failed_downloaders)}\n"
+
+            # 熔断器状态信息
+            circuit_breaker_info = ""
+            if self.downloader_manager and self.downloader_manager.circuit_breakers:
+                cb_states = self.downloader_manager.get_circuit_breaker_states()
+                open_circuits = [
+                    name for name, state in cb_states.items() if state.get("state") == "open"
+                ]
+                if open_circuits:
+                    circuit_breaker_info = f"🔌 **Circuit Open**: {', '.join(c.upper() for c in open_circuits)}\n"
+
             content = f"""# {title_emoji} {title_text}
 
 🎬 **Video**: {title}
@@ -341,7 +408,7 @@ class NotificationService:
 💥 **Error Code**: `{error_code}`
 📋 **Error Message**: {error}
 
-📅 **Created**: {created_time}
+{downloader_info}{circuit_breaker_info}📅 **Created**: {created_time}
 ▶️ **Started**: {started_time}
 ⏳ **Wait Time**: {wait_time}
 

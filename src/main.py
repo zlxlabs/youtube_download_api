@@ -102,6 +102,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         notify_service=notify_service,
     )
 
+    # Link downloader manager to notification service (for stats in notifications)
+    notify_service.downloader_manager = download_worker.downloader_manager
+
     # Restore pending tasks to queue
     await task_service.restore_pending_tasks()
 
