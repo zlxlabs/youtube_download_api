@@ -150,12 +150,13 @@ class TikHubDownloader(BaseDownloader):
                 logger.debug("[tikhub] Step 4: Selecting subtitle...")
                 subtitle_info = self._select_subtitle(video_data)
                 if subtitle_info:
-                    has_transcript = True
                     logger.debug("[tikhub] Step 4: Starting subtitle download...")
                     transcript_path = await self._download_subtitle(
                         subtitle_info, output_dir, video_id
                     )
                     logger.debug(f"[tikhub] Step 4: Subtitle downloaded to {transcript_path}")
+                    # 只有在实际下载成功时才标记为有字幕
+                    has_transcript = transcript_path is not None
 
             logger.info(
                 f"[tikhub] Download completed: audio={audio_path}, transcript={transcript_path}"
