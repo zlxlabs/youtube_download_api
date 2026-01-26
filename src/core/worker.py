@@ -334,6 +334,28 @@ class DownloadWorker:
                 f"transcript={result.transcript_path is not None})"
             )
 
+            # Audio fallback 逻辑：仅字幕模式但无字幕时，自动下载音频
+            audio_fallback = False
+            if not need_audio and need_transcript and not result.has_transcript:
+                logger.info(
+                    f"Task {task.id}: No transcript available, falling back to audio download"
+                )
+                audio_fallback = True
+
+                # 重新下载音频
+                result = await self.downloader_manager.download_with_fallback(
+                    video_url=task.video_url,
+                    video_id=task.video_id,
+                    output_dir=output_dir,
+                    include_audio=True,  # 强制下载音频
+                    include_transcript=False,  # 已经确认没有字幕了
+                )
+
+                logger.info(
+                    f"Task {task.id}: Audio fallback completed with {result.downloader} "
+                    f"(audio={result.audio_path is not None})"
+                )
+
             # 将 VideoMetadata 转换为 VideoInfo（兼容现有代码）
             from src.db.models import VideoInfo as DbVideoInfo
 
@@ -359,7 +381,8 @@ class DownloadWorker:
             audio_file_id = existing_audio.id if existing_audio else None
             reused_audio = existing_audio is not None
 
-            if need_audio and result.audio_path and result.audio_path.exists():
+            # 修复：audio_fallback 场景下也需要保存音频
+            if (need_audio or audio_fallback) and result.audio_path and result.audio_path.exists():
                 audio_file = await self.file_service.create_file_record(
                     video_id=task.video_id,
                     file_type=FileType.AUDIO,
@@ -397,6 +420,7 @@ class DownloadWorker:
                 "transcript_file_id": transcript_file_id,
                 "reused_audio": reused_audio,
                 "reused_transcript": reused_transcript,
+                "audio_fallback": audio_fallback,  # 标记是否触发了音频降级
                 "downloader": result.downloader,  # 下载器名称
             }
 
