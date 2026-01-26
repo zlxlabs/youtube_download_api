@@ -233,7 +233,10 @@ class NotificationService:
         return video_resource.video_info if video_resource else None
 
     async def notify_completed(
-        self, task: Task, downloader: Optional[str] = None
+        self,
+        task: Task,
+        downloader: Optional[str] = None,
+        transcript_fallback: bool = False,
     ) -> None:
         """
         Send task completion notification.
@@ -241,6 +244,7 @@ class NotificationService:
         Args:
             task: Completed task.
             downloader: Name of the downloader that succeeded (optional).
+            transcript_fallback: Whether this was a transcript fallback (audio failed).
         """
         if not self.enabled or not self.notifier:
             return
@@ -313,6 +317,11 @@ class NotificationService:
                     reuse_parts.append("字幕")
                 reuse_info = f"♻️ **Reused**: {', '.join(reuse_parts)}\n"
 
+            # 字幕降级标识
+            fallback_info = ""
+            if transcript_fallback:
+                fallback_info = f"⚠️ **Note**: Audio download failed, completed with transcript only\n"
+
             content = f"""# ✅ Download Completed
 
 🎬 **Video**: {title}
@@ -327,7 +336,7 @@ class NotificationService:
 🎵 **Audio**: {audio_url}
 📄 **Transcript**: {transcript_url if task.transcript_file_id else "无字幕"}
 
-{downloader_info}{reuse_info}📅 **Created**: {created_time}
+{downloader_info}{reuse_info}{fallback_info}📅 **Created**: {created_time}
 ▶️ **Started**: {started_time}
 ⏳ **Wait Time**: {wait_time}
 

@@ -126,12 +126,13 @@ class YtdlpDownloader(BaseDownloader):
             raise
 
         except YtdlpDownloadError as e:
-            # 转换为 DownloaderError
+            # 转换为 DownloaderError，传递 HTTP 状态码（如果有）
             logger.error(f"[ytdlp] Download failed: {e.error_code.value} - {e.message}")
             raise DownloaderError(
                 message=e.message,
                 error_code=e.error_code,
                 downloader=self.name,
+                http_status_code=getattr(e, "http_status_code", None),
             ) from e
 
         except Exception as e:

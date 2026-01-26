@@ -449,6 +449,8 @@ class DownloadWorker:
         """
         Handle download error with retry logic.
 
+        如果音频下载失败但用户未请求字幕，会尝试降级到字幕（因为字幕下载风控更低）。
+
         Args:
             task: Failed task.
             error: Download error.
@@ -458,6 +460,35 @@ class DownloadWorker:
         # 如果是限流错误，调整自适应间隔
         if error.error_code == ErrorCode.RATE_LIMITED:
             self._on_rate_limited()
+
+        # 字幕降级逻辑：音频失败时尝试下载字幕作为备选
+        # 条件：1) 用户请求了音频但未请求字幕 2) 音频下载失败 3) 尚未尝试过字幕降级
+        if (
+            task.include_audio
+            and not task.include_transcript
+            and isinstance(error, (DownloaderError, AllDownloadersFailed))
+            and not getattr(task, "_transcript_fallback_attempted", False)
+        ):
+            logger.info(
+                f"Task {task.id}: Audio download failed, attempting transcript fallback "
+                f"(transcript download has lower risk of rate limiting)"
+            )
+
+            # 尝试字幕降级
+            transcript_fallback_success = await self._try_transcript_fallback(task)
+
+            if transcript_fallback_success:
+                # 字幕降级成功，任务完成
+                logger.info(
+                    f"Task {task.id}: Transcript fallback succeeded, task completed with transcript only"
+                )
+                return
+            else:
+                # 字幕降级失败，继续原有的失败处理逻辑
+                logger.warning(
+                    f"Task {task.id}: Transcript fallback failed or video has no transcript, "
+                    f"task will be marked as failed"
+                )
 
         if is_retryable_error(error.error_code):
             config = RETRY_CONFIG.get(error.error_code, {})
@@ -505,6 +536,148 @@ class DownloadWorker:
 
             if task_updated.callback_url:
                 await self.callback_service.send_callback(task_updated)
+
+    async def _try_transcript_fallback(self, task: Task) -> bool:
+        """
+        尝试字幕降级：音频下载失败时，尝试仅下载字幕。
+
+        字幕下载对风控的影响更小，可以作为备选方案。
+
+        Args:
+            task: 失败的任务
+
+        Returns:
+            是否成功下载字幕并完成任务
+        """
+        try:
+            # 标记已尝试字幕降级（避免重复尝试）
+            # 注意：这个标记只在内存中，不持久化
+            task._transcript_fallback_attempted = True  # type: ignore
+
+            # 1. 检查是否已有字幕缓存
+            existing_files = await self.file_service.get_all_files_for_video(task.video_id)
+            existing_transcript = existing_files.get("transcript")
+
+            if existing_transcript:
+                logger.info(
+                    f"Task {task.id}: Found cached transcript for video {task.video_id}, "
+                    f"using cached file"
+                )
+                # 直接使用缓存的字幕完成任务
+                await self.db.update_task_completed(
+                    task_id=task.id,
+                    audio_file_id=None,
+                    transcript_file_id=existing_transcript.id,
+                    reused_audio=False,
+                    reused_transcript=True,
+                )
+
+                # 发送完成通知
+                task_updated = await self.db.get_task(task.id)
+                if task_updated:
+                    await self.notify_service.notify_completed(
+                        task_updated, downloader="cached", transcript_fallback=True
+                    )
+                    if task_updated.callback_url:
+                        await self.callback_service.send_callback(task_updated)
+
+                return True
+
+            # 2. 尝试下载字幕
+            logger.info(f"Task {task.id}: Attempting to download transcript only")
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                output_dir = Path(temp_dir)
+
+                try:
+                    # 使用下载器管理器下载字幕
+                    result: DownloaderResult = (
+                        await self.downloader_manager.download_with_fallback(
+                            video_url=task.video_url,
+                            video_id=task.video_id,
+                            output_dir=output_dir,
+                            include_audio=False,  # 仅字幕
+                            include_transcript=True,
+                        )
+                    )
+
+                    # 检查是否成功获取字幕
+                    if not result.has_transcript or not result.transcript_path:
+                        logger.info(
+                            f"Task {task.id}: Video {task.video_id} has no available transcript"
+                        )
+                        return False
+
+                    logger.info(
+                        f"Task {task.id}: Successfully downloaded transcript using {result.downloader}"
+                    )
+
+                    # 保存视频元数据
+                    from src.db.models import VideoInfo as DbVideoInfo
+
+                    video_info = DbVideoInfo(
+                        title=result.video_metadata.title,
+                        author=result.video_metadata.author,
+                        channel_id=result.video_metadata.channel_id,
+                        duration=result.video_metadata.duration,
+                        description=result.video_metadata.description,
+                        upload_date=result.video_metadata.upload_date,
+                        view_count=result.video_metadata.view_count,
+                        thumbnail=result.video_metadata.thumbnail,
+                    )
+
+                    await self._update_video_resource(
+                        task.video_id,
+                        video_info,
+                        result.has_transcript,
+                    )
+
+                    # 保存字幕文件
+                    lang = self._extract_language(result.transcript_path)
+                    transcript_file = await self.file_service.create_file_record(
+                        video_id=task.video_id,
+                        file_type=FileType.TRANSCRIPT,
+                        source_path=result.transcript_path,
+                        language=lang,
+                        video_title=video_info.title,
+                    )
+
+                    # 标记任务完成（仅字幕，音频为 None）
+                    await self.db.update_task_completed(
+                        task_id=task.id,
+                        audio_file_id=None,
+                        transcript_file_id=transcript_file.id,
+                        reused_audio=False,
+                        reused_transcript=False,
+                    )
+
+                    # 发送完成通知
+                    task_updated = await self.db.get_task(task.id)
+                    if task_updated:
+                        await self.notify_service.notify_completed(
+                            task_updated,
+                            downloader=result.downloader,
+                            transcript_fallback=True,
+                        )
+                        if task_updated.callback_url:
+                            await self.callback_service.send_callback(task_updated)
+
+                    return True
+
+                except (DownloaderError, AllDownloadersFailed) as e:
+                    # 字幕下载也失败了
+                    logger.warning(
+                        f"Task {task.id}: Transcript download failed: {e.error_code.value} - {e.message}"
+                    )
+                    return False
+
+        except Exception as e:
+            # 字幕降级过程中出现未预期错误
+            logger.error(
+                f"Task {task.id}: Unexpected error during transcript fallback: {e}",
+                exc_info=True,
+            )
+            return False
 
     def _extract_language(self, filepath: Path) -> str:
         """

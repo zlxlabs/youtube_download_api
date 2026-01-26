@@ -181,16 +181,20 @@ class TikHubDownloader(BaseDownloader):
 
         except httpx.HTTPStatusError as e:
             # HTTP 错误
-            error_msg = f"HTTP {e.response.status_code}: {e.response.text[:200]}"
+            status_code = e.response.status_code
+            error_msg = f"HTTP {status_code}: {e.response.text[:200]}"
             logger.error(f"[tikhub] HTTP error: {error_msg}")
 
             # 判断错误类型
-            if e.response.status_code == 401:
+            if status_code == 401:
                 error_code = ErrorCode.DOWNLOAD_FAILED
                 msg = "Authentication failed (invalid API key)"
-            elif e.response.status_code == 429:
+            elif status_code == 403:
                 error_code = ErrorCode.RATE_LIMITED
-                msg = "API rate limit exceeded"
+                msg = "Access forbidden (HTTP 403)"
+            elif status_code == 429:
+                error_code = ErrorCode.RATE_LIMITED
+                msg = "API rate limit exceeded (HTTP 429)"
             else:
                 error_code = ErrorCode.DOWNLOAD_FAILED
                 msg = error_msg
@@ -199,6 +203,7 @@ class TikHubDownloader(BaseDownloader):
                 message=msg,
                 error_code=error_code,
                 downloader=self.name,
+                http_status_code=status_code,
             ) from e
 
         except httpx.TimeoutException as e:

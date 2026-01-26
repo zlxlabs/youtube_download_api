@@ -165,9 +165,15 @@ class _InfoExtractionResult:
 class DownloadError(Exception):
     """Custom exception for download errors."""
 
-    def __init__(self, error_code: ErrorCode, message: str):
+    def __init__(
+        self,
+        error_code: ErrorCode,
+        message: str,
+        http_status_code: Optional[int] = None,
+    ):
         self.error_code = error_code
         self.message = message
+        self.http_status_code = http_status_code  # HTTP 状态码（用于判断是否应该重试）
         super().__init__(message)
 
 
@@ -452,9 +458,9 @@ class YouTubeDownloader:
             if self._cancel_event.is_set():
                 logger.info("Download cancelled (detected via yt-dlp error)")
                 raise DownloadCancelledError("Download cancelled") from e
-            error_code, message = self._map_ytdlp_error(e)
+            error_code, message, http_status_code = self._map_ytdlp_error(e)
             logger.error(f"Download failed: {error_code.value} - {message}")
-            raise DownloadError(error_code, message) from e
+            raise DownloadError(error_code, message, http_status_code) from e
 
         except Exception as e:
             # 检查是否是因为取消导致的错误
@@ -604,9 +610,9 @@ class YouTubeDownloader:
             if self._cancel_event.is_set():
                 logger.info("Extraction cancelled (detected via yt-dlp error)")
                 raise DownloadCancelledError("Extraction cancelled") from e
-            error_code, message = self._map_ytdlp_error(e)
+            error_code, message, http_status_code = self._map_ytdlp_error(e)
             logger.error(f"Info extraction failed: {error_code.value} - {message}")
-            raise DownloadError(error_code, message) from e
+            raise DownloadError(error_code, message, http_status_code) from e
 
         except Exception as e:
             # 检查是否是因为取消导致的错误
@@ -890,53 +896,55 @@ class YouTubeDownloader:
 
         return None
 
-    def _map_ytdlp_error(self, error: Exception) -> tuple[ErrorCode, str]:
+    def _map_ytdlp_error(self, error: Exception) -> tuple[ErrorCode, str, Optional[int]]:
         """
-        Map yt-dlp exception to error code and message.
+        Map yt-dlp exception to error code, message, and HTTP status code.
 
         Args:
             error: yt-dlp exception.
 
         Returns:
-            Tuple of (ErrorCode, error message).
+            Tuple of (ErrorCode, error message, HTTP status code).
+            HTTP status code is None if not applicable.
         """
         error_msg = str(error).lower()
 
         if "private video" in error_msg:
-            return ErrorCode.VIDEO_PRIVATE, "Video is private"
+            return ErrorCode.VIDEO_PRIVATE, "Video is private", None
 
         if "video unavailable" in error_msg or "not available" in error_msg:
-            return ErrorCode.VIDEO_UNAVAILABLE, "Video is unavailable"
+            return ErrorCode.VIDEO_UNAVAILABLE, "Video is unavailable", None
 
         if "age-restricted" in error_msg or "sign in to confirm your age" in error_msg:
             return (
                 ErrorCode.VIDEO_AGE_RESTRICTED,
                 "Video is age-restricted, cookie required",
+                None,
             )
 
         if "blocked" in error_msg and "country" in error_msg:
-            return ErrorCode.VIDEO_REGION_BLOCKED, "Video is blocked in this region"
+            return ErrorCode.VIDEO_REGION_BLOCKED, "Video is blocked in this region", None
 
         if "is a livestream" in error_msg or "live event" in error_msg:
-            return ErrorCode.VIDEO_LIVE_STREAM, "Live streams are not supported"
+            return ErrorCode.VIDEO_LIVE_STREAM, "Live streams are not supported", None
 
         if "http error 403" in error_msg or "forbidden" in error_msg:
-            return ErrorCode.RATE_LIMITED, "Rate limited by YouTube"
+            return ErrorCode.RATE_LIMITED, "Rate limited by YouTube (HTTP 403)", 403
 
         if "http error 429" in error_msg:
-            return ErrorCode.RATE_LIMITED, "Too many requests"
+            return ErrorCode.RATE_LIMITED, "Too many requests (HTTP 429)", 429
 
         if (
             "network" in error_msg
             or "connection" in error_msg
             or "timeout" in error_msg
         ):
-            return ErrorCode.NETWORK_ERROR, f"Network error: {error}"
+            return ErrorCode.NETWORK_ERROR, f"Network error: {error}", None
 
         if "po token" in error_msg or "pot" in error_msg:
-            return ErrorCode.POT_TOKEN_FAILED, "Failed to obtain PO Token"
+            return ErrorCode.POT_TOKEN_FAILED, "Failed to obtain PO Token", None
 
-        return ErrorCode.DOWNLOAD_FAILED, str(error)
+        return ErrorCode.DOWNLOAD_FAILED, str(error), None
 
     def _create_dry_run_result(self, output_dir: Path) -> DownloadResult:
         """

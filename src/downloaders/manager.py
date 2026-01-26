@@ -325,6 +325,48 @@ class DownloaderManager:
 
         raise AllDownloadersFailed(errors)
 
+    def _get_max_retries_for_error(self, error: DownloaderError) -> int:
+        """
+        根据错误类型决定最大重试次数。
+
+        策略：
+        - 403 错误（风控）：不重试，避免加重风控
+        - RATE_LIMITED 错误：不重试，应该直接降级到其他下载器
+        - 其他网络错误：最多重试 2 次
+
+        Args:
+            error: 下载器错误
+
+        Returns:
+            最大重试次数（0 表示不重试）
+        """
+        from src.db.models import ErrorCode
+
+        # 403 错误（风控问题），不重试
+        if error.http_status_code == 403:
+            logger.info(
+                f"HTTP 403 error detected (rate limiting/access control), "
+                f"will not retry to avoid triggering more restrictions"
+            )
+            return 0
+
+        # RATE_LIMITED 错误码，不重试（应该降级）
+        if error.error_code == ErrorCode.RATE_LIMITED:
+            logger.info(
+                f"Rate limit error detected, will not retry (should fallback to next downloader)"
+            )
+            return 0
+
+        # POT_TOKEN_FAILED 错误，不重试（重试也不会成功）
+        if error.error_code == ErrorCode.POT_TOKEN_FAILED:
+            logger.info(
+                f"PO Token failed, will not retry (should fallback to next downloader)"
+            )
+            return 0
+
+        # 其他错误，允许最多重试 2 次
+        return 2
+
     async def _download_with_downloader(
         self,
         downloader: BaseDownloader,
@@ -338,8 +380,9 @@ class DownloaderManager:
         使用指定下载器下载，带有重试和指数退避。
 
         重试策略：
-        - 最多重试 3 次（总共 4 次尝试）
-        - 指数退避：1s, 2s, 4s
+        - 403/风控错误：不重试（避免加重风控）
+        - 其他网络错误：最多重试 2 次（总共 3 次尝试）
+        - 指数退避：1s, 2s
         - 只对 should_retry() 返回 True 的错误重试
         - 适用于临时性网络问题（ConnectError, TimeoutException 等）
 
@@ -357,9 +400,10 @@ class DownloaderManager:
         Raises:
             DownloaderError: 下载失败（包括重试后仍失败）
         """
-        max_retries = 3
+        # 默认最大重试次数
+        default_max_retries = 2
 
-        for attempt in range(max_retries + 1):  # 0, 1, 2, 3
+        for attempt in range(default_max_retries + 1):  # 0, 1, 2
             try:
                 result = await downloader.download(
                     video_url=video_url,
@@ -378,6 +422,8 @@ class DownloaderManager:
                 return result
 
             except DownloaderError as e:
+                # 根据错误类型动态决定最大重试次数
+                max_retries = self._get_max_retries_for_error(e)
                 is_last_attempt = attempt == max_retries
 
                 # 判断是否应该重试
@@ -397,12 +443,13 @@ class DownloaderManager:
                     )
                     raise
 
-                # 计算退避时间（指数退避：1s, 2s, 4s）
-                backoff_delay = 2 ** attempt  # 1, 2, 4
+                # 计算退避时间（指数退避：1s, 2s）
+                backoff_delay = 2 ** attempt  # 1, 2
 
                 logger.warning(
                     f"[{downloader.name}] Attempt {attempt + 1}/{max_retries + 1} failed: "
                     f"{e.error_code.value} - {e.message}"
+                    f"{f' (HTTP {e.http_status_code})' if e.http_status_code else ''}"
                 )
                 logger.info(
                     f"[{downloader.name}] Retrying in {backoff_delay}s... "

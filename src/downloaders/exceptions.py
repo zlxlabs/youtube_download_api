@@ -15,10 +15,12 @@ class DownloaderError(Exception):
         message: str,
         error_code: ErrorCode = ErrorCode.DOWNLOAD_FAILED,
         downloader: Optional[str] = None,
+        http_status_code: Optional[int] = None,
     ):
         self.message = message
         self.error_code = error_code
         self.downloader = downloader
+        self.http_status_code = http_status_code  # HTTP 状态码（用于判断是否应该重试）
         super().__init__(message)
 
     def __str__(self) -> str:
