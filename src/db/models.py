@@ -19,6 +19,7 @@ class TaskStatus(str, Enum):
     COMPLETED = "completed"  # Successfully completed
     FAILED = "failed"  # Failed after all retries
     CANCELLED = "cancelled"  # Cancelled by user
+    DELAYED_IP_BAN = "delayed_ip_ban"  # Delayed due to IP ban (will retry later)
 
 
 class ErrorCode(str, Enum):
@@ -240,6 +241,10 @@ class Task:
     error_code: Optional[ErrorCode] = None
     error_message: Optional[str] = None
     retry_count: int = 0
+
+    # Partial success support (for mixed tasks)
+    partial_success: bool = False  # 是否是部分成功（如：音频失败但字幕成功）
+    failure_details: Optional[str] = None  # JSON string: 失败详情（哪些成功，哪些失败）
 
     # Timestamps
     created_at: Optional[datetime] = None

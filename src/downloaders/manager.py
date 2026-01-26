@@ -299,6 +299,15 @@ class DownloaderManager:
                 else:
                     logger.debug(f"Error will not trigger circuit breaker for {downloader.name}")
 
+                # 检查是否应该停止降级（如 403 本地 IP 问题）
+                if e.stop_fallback:
+                    logger.error(
+                        f"Stop fallback due to {e.http_status_code or 'critical'} error - "
+                        f"other downloaders will also fail with this issue"
+                    )
+                    # 直接抛出异常，不再尝试其他下载器
+                    raise AllDownloadersFailed(errors)
+
                 # 继续尝试下一个下载器（降级）
                 # 注意：此时已经过了下载器内部的重试（最多3次）
                 logger.info(f"Falling back to next downloader...")

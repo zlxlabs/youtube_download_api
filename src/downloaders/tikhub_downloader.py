@@ -199,11 +199,20 @@ class TikHubDownloader(BaseDownloader):
                 error_code = ErrorCode.DOWNLOAD_FAILED
                 msg = error_msg
 
+            # 403 错误表示本地 IP 问题，不应该尝试其他下载器
+            stop_fallback = (status_code == 403)
+            if stop_fallback:
+                logger.warning(
+                    f"[tikhub] HTTP 403 detected - local IP issue, "
+                    f"will not try other downloaders"
+                )
+
             raise DownloaderError(
                 message=msg,
                 error_code=error_code,
                 downloader=self.name,
                 http_status_code=status_code,
+                stop_fallback=stop_fallback,
             ) from e
 
         except httpx.TimeoutException as e:
@@ -651,6 +660,29 @@ class TikHubDownloader(BaseDownloader):
             logger.info(f"[tikhub] File saved to: {output_path.name}")
             return output_path
 
+        except httpx.HTTPStatusError as e:
+            status_code = e.response.status_code
+            logger.error(
+                f"[tikhub] Simple download failed: HTTP {status_code}",
+                exc_info=True
+            )
+
+            # 403 错误表示本地 IP 问题，不应该尝试其他下载器
+            stop_fallback = (status_code == 403)
+            if stop_fallback:
+                logger.warning(
+                    f"[tikhub] HTTP 403 detected during simple audio download - local IP issue, "
+                    f"will not try other downloaders"
+                )
+
+            raise DownloaderError(
+                message=f"Audio download failed: HTTP {status_code}",
+                error_code=ErrorCode.NETWORK_ERROR,
+                downloader=self.name,
+                http_status_code=status_code,
+                stop_fallback=stop_fallback,
+            ) from e
+
         except Exception as e:
             error_msg = str(e) if str(e) else repr(e)
             logger.error(
@@ -760,13 +792,25 @@ class TikHubDownloader(BaseDownloader):
             ) from e
 
         except httpx.HTTPStatusError as e:
+            status_code = e.response.status_code
             logger.error(
-                f"[tikhub] HTTP error {e.response.status_code} while downloading audio"
+                f"[tikhub] HTTP error {status_code} while downloading audio"
             )
+
+            # 403 错误表示本地 IP 问题，不应该尝试其他下载器
+            stop_fallback = (status_code == 403)
+            if stop_fallback:
+                logger.warning(
+                    f"[tikhub] HTTP 403 detected during audio download - local IP issue, "
+                    f"will not try other downloaders"
+                )
+
             raise DownloaderError(
-                message=f"Audio download failed: HTTP {e.response.status_code}",
+                message=f"Audio download failed: HTTP {status_code}",
                 error_code=ErrorCode.NETWORK_ERROR,
                 downloader=self.name,
+                http_status_code=status_code,
+                stop_fallback=stop_fallback,
             ) from e
 
         except Exception as e:

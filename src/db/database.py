@@ -97,24 +97,89 @@ class Database:
 
     async def _run_migrations(self) -> None:
         """Run database migrations for schema updates."""
-        # Check if tasks table exists and has priority column
+        # Check if tasks table exists
         cursor = await self.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='tasks'"
         )
         tasks_table_exists = await cursor.fetchone()
 
         if tasks_table_exists:
-            # Check if priority column exists
+            # Get existing columns
             cursor = await self.execute("PRAGMA table_info(tasks)")
             columns = await cursor.fetchall()
-            has_priority = any(col["name"] == "priority" for col in columns)
+            column_names = {col["name"] for col in columns}
 
-            if not has_priority:
-                # Add priority column with default value 'normal'
+            # Migration 1: Add priority column
+            if "priority" not in column_names:
                 await self.execute(
                     "ALTER TABLE tasks ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal'"
                 )
                 logger.info("Migration: Added 'priority' column to tasks table")
+
+            # Migration 2: Add partial_success column
+            if "partial_success" not in column_names:
+                await self.execute(
+                    "ALTER TABLE tasks ADD COLUMN partial_success INTEGER DEFAULT 0"
+                )
+                logger.info("Migration: Added 'partial_success' column to tasks table")
+
+            # Migration 3: Add failure_details column
+            if "failure_details" not in column_names:
+                await self.execute(
+                    "ALTER TABLE tasks ADD COLUMN failure_details TEXT"
+                )
+                logger.info("Migration: Added 'failure_details' column to tasks table")
+
+        # Create IP ban tables if not exist
+        await self._create_ip_ban_tables()
+
+    async def _create_ip_ban_tables(self) -> None:
+        """Create IP ban related tables."""
+        # IP ban status table (single row)
+        await self.execute("""
+            CREATE TABLE IF NOT EXISTS ip_ban_status (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                current_level TEXT NOT NULL DEFAULT 'normal',
+                banned_at TIMESTAMP,
+                last_attempt_at TIMESTAMP,
+                failed_attempts INTEGER DEFAULT 0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Initialize default row if not exists
+        await self.execute("""
+            INSERT OR IGNORE INTO ip_ban_status (id, current_level)
+            VALUES (1, 'normal')
+        """)
+
+        # IP ban history table
+        await self.execute("""
+            CREATE TABLE IF NOT EXISTS ip_ban_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ban_level TEXT NOT NULL,
+                trigger_source TEXT,
+                trigger_task_id TEXT,
+                trigger_downloader TEXT,
+                trigger_error TEXT,
+                banned_at TIMESTAMP NOT NULL,
+                recovered_at TIMESTAMP,
+                duration_seconds INTEGER,
+                probe_count INTEGER DEFAULT 0,
+                recovery_method TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Create indexes
+        await self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ip_ban_history_banned_at "
+            "ON ip_ban_history(banned_at)"
+        )
+        await self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ip_ban_history_ban_level "
+            "ON ip_ban_history(ban_level)"
+        )
 
     async def _create_tables(self) -> None:
         """Create database tables if not exist."""

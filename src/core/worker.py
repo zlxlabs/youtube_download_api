@@ -16,6 +16,8 @@ from src.config import Settings
 from src.core.downloader import (
     DownloadCancelledError,
 )
+from src.core.ip_ban_breaker import IPBanCircuitBreaker
+from src.core.ip_ban_models import ExecutionDecision, IPBanLevel
 from src.db.database import Database
 from src.downloaders.exceptions import AllDownloadersFailed, DownloaderError
 from src.downloaders.manager import DownloaderManager
@@ -76,6 +78,12 @@ class DownloadWorker:
         self.downloader_manager = DownloaderManager(settings)
         self._running = False
         self._current_task: Optional[Task] = None
+
+        # IP 熔断器（被动探测型）
+        self.ip_ban_breaker = IPBanCircuitBreaker(
+            min_wait_before_retry=3600,  # 60 分钟
+            max_retry_interval=1800,  # 30 分钟
+        )
 
         # 自适应间隔控制
         # interval_multiplier: 间隔倍数，限流时增大，连续成功时逐步恢复
@@ -209,6 +217,21 @@ class DownloadWorker:
         self._current_task = task
         logger.info(f"Processing task: {task.id} ({task.video_id})")
 
+        # 检查 IP 熔断状态
+        decision = await self._check_ip_ban_and_decide(task)
+
+        if decision and decision.action == "delay":
+            # 任务需要延迟
+            logger.info(f"Task {task.id} delayed: {decision.reason}")
+            # TODO: 实现任务延迟逻辑（更新任务的 retry_after 时间）
+            # 暂时先等待一段时间
+            await asyncio.sleep(min(decision.delay_seconds, 60))  # 最多等 60 秒
+            return
+
+        # 记录是否是探测尝试
+        is_probe = decision.is_probe if decision else False
+        ban_level_before = self.ip_ban_breaker.get_current_level()
+
         # 重置取消标志，为新任务准备
         self.downloader_manager.reset_cancel_all()
 
@@ -217,6 +240,14 @@ class DownloadWorker:
 
             # Execute task (smart download - only what's needed)
             result = await self._execute_task(task)
+
+            # 如果是探测尝试，分析结果并更新熔断状态
+            if is_probe and isinstance(result.get("downloader_result"), DownloaderResult):
+                await self._analyze_result_and_update_ban(
+                    result["downloader_result"],
+                    was_probe=True,
+                    ban_level_before=ban_level_before,
+                )
 
             # Update task completion with retry logic
             # 这是关键操作，如果失败会导致任务状态不一致
@@ -476,6 +507,10 @@ class DownloadWorker:
             error: Download error.
         """
         logger.error(f"Task {task.id} failed: {error.error_code.value} - {error.message}")
+
+        # 检查是否需要触发 IP 熔断
+        if isinstance(error, DownloaderError):
+            await self._trigger_ban_from_error(error)
 
         # 如果是限流错误，调整自适应间隔
         if error.error_code == ErrorCode.RATE_LIMITED:
@@ -799,4 +834,188 @@ class DownloadWorker:
         except Exception as e:
             logger.error(
                 f"Failed to fetch task {task.id} for notifications: {e}"
+            )
+
+    def _get_task_type(self, task: Task) -> str:
+        """
+        判断任务类型。
+
+        Args:
+            task: 任务对象
+
+        Returns:
+            任务类型："transcript_only" | "audio" | "mixed"
+        """
+        if task.include_audio and task.include_transcript:
+            return "mixed"
+        elif task.include_audio:
+            return "audio"
+        else:
+            return "transcript_only"
+
+    async def _check_ip_ban_and_decide(self, task: Task) -> Optional[ExecutionDecision]:
+        """
+        检查 IP 熔断状态并决定是否执行任务。
+
+        Args:
+            task: 待执行的任务
+
+        Returns:
+            ExecutionDecision 如果需要特殊处理（延迟/拒绝），
+            None 表示可以正常执行
+        """
+        ban_level = self.ip_ban_breaker.get_current_level()
+
+        if ban_level == IPBanLevel.NORMAL:
+            return None  # 正常执行
+
+        task_type = self._get_task_type(task)
+
+        # 音频熔断状态
+        if ban_level == IPBanLevel.AUDIO_BANNED:
+            if task_type == "transcript_only":
+                # 字幕任务允许执行
+                return None
+
+            # 音频/混合任务，检查是否可以尝试
+            allowed, reason = self.ip_ban_breaker.should_allow_attempt(task_type)
+
+            if not allowed:
+                # 不允许，延迟任务
+                remaining = self.ip_ban_breaker.get_remaining_time()
+                return ExecutionDecision(
+                    action="delay",
+                    reason=f"Audio ban active: {reason}",
+                    delay_seconds=remaining,
+                )
+
+            # 允许尝试（作为被动探测）
+            logger.info(
+                f"Task {task.id} [{task_type}] allowed as recovery probe "
+                f"after {self.ip_ban_breaker.get_time_since_ban() // 60} minutes"
+            )
+            return ExecutionDecision(
+                action="execute",
+                reason="Recovery probe allowed",
+                is_probe=True,
+            )
+
+        # 全局熔断状态
+        elif ban_level == IPBanLevel.FULLY_BANNED:
+            # 全局熔断更严格
+            min_wait = 3600 if task_type == "transcript_only" else 7200
+
+            allowed, reason = self.ip_ban_breaker.should_allow_attempt(
+                task_type, min_wait_override=min_wait
+            )
+
+            if not allowed:
+                remaining = self.ip_ban_breaker.get_remaining_time()
+                return ExecutionDecision(
+                    action="delay",
+                    reason=f"Full IP ban active: {reason}",
+                    delay_seconds=max(remaining, min_wait),
+                )
+
+            # 允许尝试
+            logger.info(
+                f"Task {task.id} [{task_type}] allowed as recovery probe "
+                f"during full ban"
+            )
+            return ExecutionDecision(
+                action="execute",
+                reason="Full ban recovery probe allowed",
+                is_probe=True,
+            )
+
+        return None
+
+    async def _analyze_result_and_update_ban(
+        self, result: DownloaderResult, was_probe: bool, ban_level_before: IPBanLevel
+    ) -> None:
+        """
+        分析下载结果，更新熔断状态（被动探测核心）。
+
+        Args:
+            result: 下载结果
+            was_probe: 是否是探测尝试
+            ban_level_before: 执行前的熔断级别
+        """
+        if ban_level_before == IPBanLevel.NORMAL or not was_probe:
+            # 不是探测，或本来就是正常状态，无需分析
+            return
+
+        audio_success = result.audio_path is not None
+        transcript_success = result.transcript_path is not None
+
+        # 音频熔断期间的探测
+        if ban_level_before == IPBanLevel.AUDIO_BANNED:
+            if audio_success:
+                # 音频恢复！
+                logger.info("🎉 Audio recovery detected! Lifting audio ban.")
+                await self.ip_ban_breaker.reset_to_normal()
+                await self.notify_service.send_ip_recovery_notification(
+                    "IP recovered: Audio downloads are now available"
+                )
+
+            elif result.partial_success and transcript_success:
+                # 字幕成功但音频仍失败
+                logger.info("Transcript OK but audio still banned, continuing audio ban")
+                await self.ip_ban_breaker.extend_audio_ban()
+
+            else:
+                # 都失败，升级到全局熔断
+                logger.error("Both failed during audio ban probe, upgrading to full ban")
+                await self.ip_ban_breaker.upgrade_to_full_ban()
+
+        # 全局熔断期间的探测
+        elif ban_level_before == IPBanLevel.FULLY_BANNED:
+            if transcript_success:
+                # 字幕恢复，降级到音频熔断
+                logger.info("📉 Transcript recovered, downgrading to audio ban")
+                await self.ip_ban_breaker.downgrade_to_audio_ban()
+                await self.notify_service.send_ip_recovery_notification(
+                    "Partial recovery: Transcript downloads available, audio still restricted"
+                )
+
+            else:
+                # 仍然失败
+                logger.warning("Full ban probe failed, continuing full ban")
+                await self.ip_ban_breaker.extend_full_ban()
+
+    async def _trigger_ban_from_error(self, error: DownloaderError) -> None:
+        """
+        根据错误触发熔断。
+
+        Args:
+            error: 下载器错误
+        """
+        if error.http_status_code != 403:
+            return
+
+        operation = getattr(error, "operation", None)
+
+        if operation == "audio" or operation == "mixed":
+            # 音频相关的 403 → 音频熔断
+            await self.ip_ban_breaker.trigger_audio_ban(
+                reason=f"{error.downloader}: {error.message}"
+            )
+            await self.notify_service.send_ip_ban_notification(
+                level="audio",
+                reason=error.message,
+            )
+
+        elif operation == "transcript":
+            # 字幕 403 → 全局熔断（更严重）
+            await self.ip_ban_breaker.trigger_full_ban(
+                reason=f"{error.downloader}: {error.message}"
+            )
+            await self.notify_service.send_ip_ban_notification(
+                level="full",
+                reason=error.message,
+            )
+        else:
+            # 未知操作，保守处理 → 音频熔断
+            await self.ip_ban_breaker.trigger_audio_ban(
+                reason=f"{error.downloader}: {error.message}"
             )

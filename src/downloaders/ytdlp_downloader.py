@@ -65,7 +65,12 @@ class YtdlpDownloader(BaseDownloader):
         include_transcript: bool = True,
     ) -> DownloaderResult:
         """
-        下载视频音频和字幕。
+        下载视频音频和字幕（支持部分成功）。
+
+        新逻辑：
+        - 如果只请求音频 → 音频失败则整个失败
+        - 如果只请求字幕 → 字幕失败则整个失败
+        - 如果请求混合 → 至少一个成功就算部分成功
 
         Args:
             video_url: YouTube 视频 URL
@@ -75,23 +80,48 @@ class YtdlpDownloader(BaseDownloader):
             include_transcript: 是否获取字幕
 
         Returns:
-            DownloaderResult 包含下载结果
+            DownloaderResult 包含下载结果（可能是部分成功）
 
         Raises:
-            DownloaderError: 下载失败时抛出
+            DownloaderError: 完全失败时抛出
             DownloadCancelledError: 下载取消时抛出（直接透传）
         """
-        logger.info(f"[ytdlp] Downloading {video_id}: audio={include_audio}, transcript={include_transcript}")
+        logger.info(
+            f"[ytdlp] Downloading {video_id}: "
+            f"audio={include_audio}, transcript={include_transcript}"
+        )
 
+        # 对于纯音频或纯字幕任务，保持原有逻辑（不支持部分成功）
+        if not (include_audio and include_transcript):
+            return await self._download_simple(
+                video_url, video_id, output_dir, include_audio, include_transcript
+            )
+
+        # 混合任务：分步处理，支持部分成功
+        return await self._download_with_partial_success(
+            video_url, video_id, output_dir
+        )
+
+    async def _download_simple(
+        self,
+        video_url: str,
+        video_id: str,
+        output_dir: Path,
+        include_audio: bool,
+        include_transcript: bool,
+    ) -> DownloaderResult:
+        """
+        简单下载（纯音频或纯字幕，不支持部分成功）。
+
+        保持原有逻辑，失败即抛出异常。
+        """
         try:
-            # 根据模式选择下载方法
             if include_audio:
-                # 完整下载模式（音频 + 字幕）
+                # 完整下载模式（包含音频）
                 result = await self._downloader.download(
                     video_url=video_url,
                     output_dir=output_dir,
                 )
-
                 video_metadata = self._convert_video_info(result.video_info, video_id)
 
                 return DownloaderResult(
@@ -109,7 +139,6 @@ class YtdlpDownloader(BaseDownloader):
                     video_url=video_url,
                     output_dir=output_dir,
                 )
-
                 video_metadata = self._convert_video_info(result.video_info, video_id)
 
                 return DownloaderResult(
@@ -122,27 +151,151 @@ class YtdlpDownloader(BaseDownloader):
                 )
 
         except DownloadCancelledError:
-            # 下载取消异常直接向上抛出，不包装
             raise
 
         except YtdlpDownloadError as e:
-            # 转换为 DownloaderError，传递 HTTP 状态码（如果有）
-            logger.error(f"[ytdlp] Download failed: {e.error_code.value} - {e.message}")
+            http_status = getattr(e, "http_status_code", None)
+            stop_fallback = http_status == 403
+
+            if stop_fallback:
+                logger.warning(
+                    f"[ytdlp] HTTP 403 detected - local IP issue, "
+                    f"will not try other downloaders"
+                )
+
+            logger.error(
+                f"[ytdlp] Download failed: {e.error_code.value} - {e.message}"
+            )
             raise DownloaderError(
                 message=e.message,
                 error_code=e.error_code,
                 downloader=self.name,
-                http_status_code=getattr(e, "http_status_code", None),
+                http_status_code=http_status,
+                stop_fallback=stop_fallback,
+                operation="audio" if include_audio else "transcript",
             ) from e
 
         except Exception as e:
-            # 未预期的错误
             logger.error(f"[ytdlp] Unexpected error: {e}")
             raise DownloaderError(
                 message=str(e),
                 error_code=ErrorCode.DOWNLOAD_FAILED,
                 downloader=self.name,
             ) from e
+
+    async def _download_with_partial_success(
+        self, video_url: str, video_id: str, output_dir: Path
+    ) -> DownloaderResult:
+        """
+        混合任务下载（支持部分成功）。
+
+        尝试下载音频和字幕，至少一个成功即返回部分成功结果。
+        """
+        video_metadata = None
+        audio_path = None
+        transcript_path = None
+        audio_error = None
+        audio_error_code = None
+        transcript_error = None
+        transcript_error_code = None
+
+        # 第一步：调用完整下载（包含音频和字幕）
+        try:
+            result = await self._downloader.download(
+                video_url=video_url,
+                output_dir=output_dir,
+            )
+
+            # 成功：提取结果
+            video_metadata = self._convert_video_info(result.video_info, video_id)
+            audio_path = result.audio_path
+            transcript_path = result.transcript_path
+
+            # 完全成功
+            return DownloaderResult(
+                success=True,
+                downloader=self.name,
+                video_metadata=video_metadata,
+                audio_path=audio_path,
+                transcript_path=transcript_path,
+                has_transcript=bool(transcript_path),
+            )
+
+        except DownloadCancelledError:
+            # 取消异常直接抛出
+            raise
+
+        except YtdlpDownloadError as e:
+            # 下载失败，记录错误但不立即抛出
+            http_status = getattr(e, "http_status_code", None)
+            audio_error = f"{e.error_code.value}: {e.message}"
+            audio_error_code = e.error_code.value
+
+            if http_status == 403:
+                audio_error = f"IP_BANNED_403: {e.message}"
+
+            logger.warning(
+                f"[ytdlp] Full download failed: {audio_error}, "
+                f"will try transcript-only mode"
+            )
+
+            # 尝试仅字幕模式（作为降级）
+            try:
+                result = await self._downloader.extract_transcript_only(
+                    video_url=video_url,
+                    output_dir=output_dir,
+                )
+
+                # 字幕成功
+                video_metadata = self._convert_video_info(result.video_info, video_id)
+                transcript_path = result.transcript_path
+
+                # 部分成功：音频失败，字幕成功
+                logger.info("[ytdlp] Partial success: transcript OK, audio failed")
+
+                return DownloaderResult(
+                    success=True,
+                    partial_success=True,
+                    downloader=self.name,
+                    video_metadata=video_metadata,
+                    audio_path=None,
+                    transcript_path=transcript_path,
+                    has_transcript=result.has_transcript,
+                    audio_error=audio_error,
+                    audio_error_code=audio_error_code,
+                    failure_details={
+                        "audio": {
+                            "requested": True,
+                            "success": False,
+                            "error": audio_error,
+                            "error_code": audio_error_code,
+                        },
+                        "transcript": {
+                            "requested": True,
+                            "success": True,
+                            "error": None,
+                        },
+                    },
+                )
+
+            except YtdlpDownloadError as transcript_err:
+                # 字幕也失败
+                transcript_error = f"{transcript_err.error_code.value}: {transcript_err.message}"
+                transcript_error_code = transcript_err.error_code.value
+
+                logger.error(
+                    f"[ytdlp] Both audio and transcript failed: "
+                    f"audio={audio_error}, transcript={transcript_error}"
+                )
+
+                # 完全失败
+                raise DownloaderError(
+                    message=f"Both failed - Audio: {audio_error}; Transcript: {transcript_error}",
+                    error_code=ErrorCode.DOWNLOAD_FAILED,
+                    downloader=self.name,
+                    stop_fallback=(http_status == 403),
+                    operation="mixed",
+                ) from e
 
     def should_retry(self, error: Exception) -> bool:
         """

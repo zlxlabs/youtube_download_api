@@ -124,6 +124,14 @@ class ResultInfoResponse(BaseModel):
         default=False,
         description="Whether transcript file was retrieved from cache",
     )
+    partial_success: bool = Field(
+        default=False,
+        description="Whether this is a partial success (e.g., audio failed but transcript succeeded)",
+    )
+    failure_details: Optional[dict] = Field(
+        default=None,
+        description="Detailed information about what succeeded/failed (for partial success cases)",
+    )
 
 
 class ErrorInfoResponse(BaseModel):

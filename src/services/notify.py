@@ -503,3 +503,74 @@ class NotificationService:
             return ip
         except Exception:
             return "127.0.0.1"
+
+    async def send_ip_ban_notification(self, level: str, reason: str) -> None:
+        """
+        发送 IP 熔断通知。
+
+        Args:
+            level: 熔断级别 ("audio" 或 "full")
+            reason: 熔断原因
+        """
+        if not self.enabled or not self.notifier:
+            return
+
+        try:
+            if level == "audio":
+                title = "⚠️ IP 状态变更 - 音频熔断"
+                impact = "音频/混合任务暂停"
+                available = "仅字幕任务正常"
+                recovery = "预计 60 分钟后探测"
+            else:
+                title = "🔒 IP 状态变更 - 全局熔断"
+                impact = "所有任务暂停"
+                available = "无可用服务"
+                recovery = "预计 90-120 分钟后探测"
+
+            content = f"""# {title}
+
+**级别**: {level}_banned
+**影响**: {impact}
+**可用**: {available}
+**原因**: {reason}
+
+⏰ **恢复**: {recovery}
+
+系统将利用用户任务被动探测恢复状态。
+"""
+            self.notifier.send_markdown(
+                webhook_url=self.webhook_url,
+                content=content,
+                mention_all=True,
+            )
+            logger.info(f"IP ban notification sent: level={level}")
+
+        except Exception as e:
+            logger.error(f"Failed to send IP ban notification: {e}")
+
+    async def send_ip_recovery_notification(self, message: str) -> None:
+        """
+        发送 IP 恢复通知。
+
+        Args:
+            message: 恢复消息
+        """
+        if not self.enabled or not self.notifier:
+            return
+
+        try:
+            content = f"""# ✅ IP 状态恢复
+
+{message}
+
+服务已恢复正常运行！
+"""
+            self.notifier.send_markdown(
+                webhook_url=self.webhook_url,
+                content=content,
+                mention_all=True,
+            )
+            logger.info("IP recovery notification sent")
+
+        except Exception as e:
+            logger.error(f"Failed to send IP recovery notification: {e}")
