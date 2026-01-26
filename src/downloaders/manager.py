@@ -4,6 +4,7 @@
 负责管理多个下载器，实现降级策略和熔断保护。
 """
 
+import asyncio
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -281,9 +282,9 @@ class DownloaderManager:
                 raise
 
             except DownloaderError as e:
-                # 下载器错误
+                # 下载器错误（已经过内部重试）
                 logger.warning(
-                    f"✗ {downloader.name} failed: {e.error_code.value} - {e.message}"
+                    f"✗ {downloader.name} failed after retries: {e.error_code.value} - {e.message}"
                 )
                 errors.append(f"{downloader.name}: {e.message}")
                 last_error = e
@@ -298,12 +299,8 @@ class DownloaderManager:
                 else:
                     logger.debug(f"Error will not trigger circuit breaker for {downloader.name}")
 
-                # 判断是否应该重试当前下载器（而非降级）
-                if downloader.should_retry(e):
-                    logger.info(f"Error is retryable, not falling back to next downloader")
-                    raise
-
-                # 否则，继续尝试下一个下载器
+                # 继续尝试下一个下载器（降级）
+                # 注意：此时已经过了下载器内部的重试（最多3次）
                 logger.info(f"Falling back to next downloader...")
                 continue
 
@@ -338,7 +335,13 @@ class DownloaderManager:
         include_transcript: bool,
     ) -> DownloaderResult:
         """
-        使用指定下载器下载（包装为同步函数供熔断器调用）。
+        使用指定下载器下载，带有重试和指数退避。
+
+        重试策略：
+        - 最多重试 3 次（总共 4 次尝试）
+        - 指数退避：1s, 2s, 4s
+        - 只对 should_retry() 返回 True 的错误重试
+        - 适用于临时性网络问题（ConnectError, TimeoutException 等）
 
         Args:
             downloader: 下载器实例
@@ -352,15 +355,69 @@ class DownloaderManager:
             DownloaderResult
 
         Raises:
-            DownloaderError: 下载失败
+            DownloaderError: 下载失败（包括重试后仍失败）
         """
-        return await downloader.download(
-            video_url=video_url,
-            video_id=video_id,
-            output_dir=output_dir,
-            include_audio=include_audio,
-            include_transcript=include_transcript,
-        )
+        max_retries = 3
+
+        for attempt in range(max_retries + 1):  # 0, 1, 2, 3
+            try:
+                result = await downloader.download(
+                    video_url=video_url,
+                    video_id=video_id,
+                    output_dir=output_dir,
+                    include_audio=include_audio,
+                    include_transcript=include_transcript,
+                )
+
+                # 成功，如果之前有重试，记录成功信息
+                if attempt > 0:
+                    logger.info(
+                        f"[{downloader.name}] Succeeded after {attempt} retry(ies)"
+                    )
+
+                return result
+
+            except DownloaderError as e:
+                is_last_attempt = attempt == max_retries
+
+                # 判断是否应该重试
+                should_retry = downloader.should_retry(e)
+
+                if not should_retry:
+                    # 不可重试的错误（如 API 限流、认证失败），直接抛出
+                    logger.debug(
+                        f"[{downloader.name}] Error is not retryable, aborting"
+                    )
+                    raise
+
+                if is_last_attempt:
+                    # 已达到最大重试次数
+                    logger.warning(
+                        f"[{downloader.name}] Max retries ({max_retries}) reached, giving up"
+                    )
+                    raise
+
+                # 计算退避时间（指数退避：1s, 2s, 4s）
+                backoff_delay = 2 ** attempt  # 1, 2, 4
+
+                logger.warning(
+                    f"[{downloader.name}] Attempt {attempt + 1}/{max_retries + 1} failed: "
+                    f"{e.error_code.value} - {e.message}"
+                )
+                logger.info(
+                    f"[{downloader.name}] Retrying in {backoff_delay}s... "
+                    f"(retry {attempt + 1}/{max_retries})"
+                )
+
+                await asyncio.sleep(backoff_delay)
+
+            except Exception as e:
+                # 未预期的错误，不重试
+                logger.error(
+                    f"[{downloader.name}] Unexpected error (not retrying): "
+                    f"{type(e).__name__}: {e}"
+                )
+                raise
 
     def get_circuit_breaker_states(self) -> Dict[str, dict]:
         """

@@ -210,6 +210,17 @@ class TikHubDownloader(BaseDownloader):
                 downloader=self.name,
             ) from e
 
+        except httpx.ConnectError as e:
+            # 连接错误（网络不可达、DNS 失败等）
+            # 这类错误通常是临时性的，应该重试而不是立即降级
+            error_msg = str(e) if str(e) else "Network unreachable"
+            logger.error(f"[tikhub] Connection failed: {error_msg}", exc_info=True)
+            raise DownloaderError(
+                message=f"Connection failed: {error_msg}",
+                error_code=ErrorCode.NETWORK_ERROR,
+                downloader=self.name,
+            ) from e
+
         except Exception as e:
             # 其他未预期错误
             error_msg = str(e) if str(e) else repr(e)

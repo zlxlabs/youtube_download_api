@@ -78,3 +78,6 @@ temp/
 *.temp
 docker/output
 build-optimized.bat
+
+# Manual test outputs
+tests/manual/output/
