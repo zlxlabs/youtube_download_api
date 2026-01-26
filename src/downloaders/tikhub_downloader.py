@@ -123,10 +123,9 @@ class TikHubDownloader(BaseDownloader):
             if include_audio:
                 audio_url = self._select_audio_url(video_data)
                 if audio_url:
-                    # 直接使用简单下载（更可靠）
-                    # TODO: 调查为什么流式下载会卡住
-                    logger.info("[tikhub] Using simple download (non-streaming) for reliability")
-                    audio_path = await self._download_audio_simple(
+                    # 使用分段下载避免大文件长时间无响应
+                    logger.info("[tikhub] Using chunked download (range) for reliability")
+                    audio_path = await self._download_audio_chunked(
                         audio_url, output_dir, video_id
                     )
                 else:
@@ -382,6 +381,148 @@ class TikHubDownloader(BaseDownloader):
         # 如果没有优先语言，选择第一个
         logger.info(f"[tikhub] Selected subtitle: {items[0].get('code')} (fallback)")
         return items[0]
+
+    def _build_media_headers(self) -> dict[str, str]:
+        """构建媒体下载请求头，模拟浏览器以提高稳定性。"""
+        return {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Accept": "*/*",
+            "Accept-Encoding": "identity",
+        }
+
+    def _parse_content_range_total(self, content_range: str) -> Optional[int]:
+        """
+        解析 Content-Range 的总大小。
+
+        格式: bytes start-end/total
+        """
+        if not content_range or "/" not in content_range:
+            return None
+        total_part = content_range.split("/")[-1].strip()
+        return int(total_part) if total_part.isdigit() else None
+
+    async def _download_audio_chunked(
+        self, audio_url: str, output_dir: Path, video_id: str
+    ) -> Path:
+        """
+        分段下载音频文件（Range 请求）。
+
+        通过小块 Range 请求绕过长连接下载过慢的问题。
+        """
+        output_path = output_dir / f"{video_id}.m4a"
+        temp_path = output_dir / f"{video_id}.m4a.part"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        logger.info("[tikhub] Using chunked download method (range)")
+        logger.info(f"[tikhub] Full download URL:\n{audio_url}")
+
+        timeout = httpx.Timeout(30.0, read=120.0)
+        range_size = 1024 * 1024  # 1MB
+        stream_chunk_size = 65536
+        headers = self._build_media_headers()
+
+        downloaded = 0
+        total_size: Optional[int] = None
+        last_log_percent = -1
+
+        def log_progress() -> None:
+            nonlocal last_log_percent
+            if not total_size:
+                return
+            percent = int(downloaded / total_size * 100)
+            if percent >= last_log_percent + 10 or downloaded >= total_size:
+                logger.info(
+                    f"[tikhub] Progress: {downloaded / 1024 / 1024:.1f}MB "
+                    f"/ {total_size / 1024 / 1024:.1f}MB ({percent}%)"
+                )
+                last_log_percent = percent
+
+        async def fetch_range(
+            start: int, end: int, file_obj
+        ) -> tuple[int, Optional[int], int]:
+            nonlocal downloaded
+            range_header = f"bytes={start}-{end}"
+            request_headers = {**headers, "Range": range_header}
+            async with self.client.stream(
+                "GET", audio_url, headers=request_headers, timeout=timeout
+            ) as response:
+                if response.status_code == 416:
+                    return 0, total_size, response.status_code
+                response.raise_for_status()
+
+                response_total = None
+                if response.status_code == 206:
+                    response_total = self._parse_content_range_total(
+                        response.headers.get("content-range", "")
+                    )
+                elif response.status_code == 200:
+                    content_length = response.headers.get("content-length")
+                    if content_length and content_length.isdigit():
+                        response_total = int(content_length)
+
+                bytes_written = 0
+                async for chunk in response.aiter_bytes(chunk_size=stream_chunk_size):
+                    if not chunk:
+                        continue
+                    bytes_written += len(chunk)
+                    file_obj.write(chunk)
+                    downloaded += len(chunk)
+                return bytes_written, response_total, response.status_code
+
+        try:
+            completed_full = False
+            with open(temp_path, "wb") as f:
+                bytes_written, total_size, status_code = await fetch_range(
+                    0, range_size - 1, f
+                )
+
+                if status_code == 200:
+                    logger.info(
+                        f"[tikhub] Full response received: {downloaded / 1024 / 1024:.1f}MB"
+                    )
+                    completed_full = True
+                else:
+                    if total_size is None:
+                        raise DownloaderError(
+                            message="Range response missing Content-Range",
+                            error_code=ErrorCode.NETWORK_ERROR,
+                            downloader=self.name,
+                        )
+
+                    log_progress()
+
+                    while downloaded < total_size:
+                        start = downloaded
+                        end = min(start + range_size - 1, total_size - 1)
+
+                        bytes_written, _, status_code = await fetch_range(start, end, f)
+                        if status_code == 416 or bytes_written == 0:
+                            break
+
+                        log_progress()
+
+            if completed_full or (total_size and downloaded >= total_size):
+                temp_path.replace(output_path)
+                logger.info(f"[tikhub] File saved to: {output_path.name}")
+                return output_path
+
+            raise DownloaderError(
+                message="Audio download incomplete",
+                error_code=ErrorCode.NETWORK_ERROR,
+                downloader=self.name,
+            )
+
+        except Exception as e:
+            logger.error(f"[tikhub] Chunked download failed: {type(e).__name__}: {e}")
+            raise DownloaderError(
+                message=f"Audio download failed: {e}",
+                error_code=ErrorCode.NETWORK_ERROR,
+                downloader=self.name,
+            ) from e
 
     async def _download_audio_simple(
         self, audio_url: str, output_dir: Path, video_id: str
