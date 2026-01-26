@@ -111,23 +111,30 @@ class TikHubDownloader(BaseDownloader):
 
         try:
             # 1. 获取视频信息和资源链接
+            logger.debug("[tikhub] Step 1: Fetching video info from TikHub API...")
             video_data = await self._fetch_video_info(
                 video_id, include_audio=include_audio, include_transcript=include_transcript
             )
+            logger.debug("[tikhub] Step 1: Video info fetched successfully")
 
             # 2. 解析视频元数据
+            logger.debug("[tikhub] Step 2: Parsing video metadata...")
             video_metadata = self._parse_video_metadata(video_data, video_id)
+            logger.debug(f"[tikhub] Step 2: Metadata parsed - title: {video_metadata.title}")
 
             # 3. 下载音频（如果需要）
             audio_path = None
             if include_audio:
+                logger.debug("[tikhub] Step 3: Selecting audio URL...")
                 audio_url = self._select_audio_url(video_data)
                 if audio_url:
                     # 使用分段下载避免大文件长时间无响应
                     logger.info("[tikhub] Using chunked download (range) for reliability")
+                    logger.debug("[tikhub] Step 3: Starting audio download...")
                     audio_path = await self._download_audio_chunked(
                         audio_url, output_dir, video_id
                     )
+                    logger.debug(f"[tikhub] Step 3: Audio downloaded to {audio_path}")
                 else:
                     raise DownloaderError(
                         message="No audio URL available",
@@ -139,12 +146,15 @@ class TikHubDownloader(BaseDownloader):
             transcript_path = None
             has_transcript = False
             if include_transcript:
+                logger.debug("[tikhub] Step 4: Selecting subtitle...")
                 subtitle_info = self._select_subtitle(video_data)
                 if subtitle_info:
                     has_transcript = True
+                    logger.debug("[tikhub] Step 4: Starting subtitle download...")
                     transcript_path = await self._download_subtitle(
                         subtitle_info, output_dir, video_id
                     )
+                    logger.debug(f"[tikhub] Step 4: Subtitle downloaded to {transcript_path}")
 
             logger.info(
                 f"[tikhub] Download completed: audio={audio_path}, transcript={transcript_path}"
@@ -200,9 +210,13 @@ class TikHubDownloader(BaseDownloader):
 
         except Exception as e:
             # 其他未预期错误
-            logger.error(f"[tikhub] Unexpected error: {e}")
+            error_msg = str(e) if str(e) else repr(e)
+            logger.error(
+                f"[tikhub] Unexpected error: {type(e).__name__}: {error_msg}",
+                exc_info=True  # 打印完整堆栈
+            )
             raise DownloaderError(
-                message=str(e),
+                message=f"{type(e).__name__}: {error_msg}" if error_msg else type(e).__name__,
                 error_code=ErrorCode.DOWNLOAD_FAILED,
                 downloader=self.name,
             ) from e
@@ -517,9 +531,13 @@ class TikHubDownloader(BaseDownloader):
             )
 
         except Exception as e:
-            logger.error(f"[tikhub] Chunked download failed: {type(e).__name__}: {e}")
+            error_msg = str(e) if str(e) else repr(e)
+            logger.error(
+                f"[tikhub] Chunked download failed: {type(e).__name__}: {error_msg}",
+                exc_info=True  # 打印完整堆栈
+            )
             raise DownloaderError(
-                message=f"Audio download failed: {e}",
+                message=f"Audio download failed: {type(e).__name__}: {error_msg}",
                 error_code=ErrorCode.NETWORK_ERROR,
                 downloader=self.name,
             ) from e
@@ -555,9 +573,13 @@ class TikHubDownloader(BaseDownloader):
             return output_path
 
         except Exception as e:
-            logger.error(f"[tikhub] Simple download failed: {type(e).__name__}: {e}")
+            error_msg = str(e) if str(e) else repr(e)
+            logger.error(
+                f"[tikhub] Simple download failed: {type(e).__name__}: {error_msg}",
+                exc_info=True
+            )
             raise DownloaderError(
-                message=f"Audio download failed: {e}",
+                message=f"Audio download failed: {type(e).__name__}: {error_msg}",
                 error_code=ErrorCode.NETWORK_ERROR,
                 downloader=self.name,
             ) from e
@@ -666,12 +688,13 @@ class TikHubDownloader(BaseDownloader):
             ) from e
 
         except Exception as e:
+            error_msg = str(e) if str(e) else repr(e)
             logger.error(
-                f"[tikhub] Download failed: {type(e).__name__}: {e}",
+                f"[tikhub] Download failed: {type(e).__name__}: {error_msg}",
                 exc_info=True
             )
             raise DownloaderError(
-                message=f"Audio download failed: {e}",
+                message=f"Audio download failed: {type(e).__name__}: {error_msg}",
                 error_code=ErrorCode.NETWORK_ERROR,
                 downloader=self.name,
             ) from e
