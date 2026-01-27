@@ -16,6 +16,7 @@ Docker 部署的 YouTube 音频下载服务，提供 RESTful API 接口，支持
 - **双模式通知** - Webhook 回调 + 轮询查询
 - **企业微信** - 任务状态实时通知
 - **自动清理** - 文件 60 天自动过期清理
+- **人工上传** - 手动上传音频/视频，自动封装/转码并管理
 
 ## 快速开始
 
@@ -46,7 +47,7 @@ cp .env.example .env.development
 # 4. 启动开发环境 (Windows)
 .\scripts\dev.ps1
 # 或者手动运行
-uv sync && $env:ENV_FILE=".env.development"; uv run uvicorn src.main:app --reload --host 127.0.0.1 --port 8000
+uv sync && $env:ENV_FILE=".env.development"; uv run uvicorn src.main:app --host 127.0.0.1 --port 8000
 
 # Linux/Mac
 chmod +x scripts/dev.sh
@@ -80,13 +81,29 @@ docker-compose logs -f youtube-api
 | GET | `/api/v1/tasks/{task_id}` | 查询任务详情 | 需要 |
 | DELETE | `/api/v1/tasks/{task_id}` | 取消任务 | 需要 |
 | GET | `/api/v1/files/{file_id}` | 下载文件 | 公开 |
+| POST | `/api/v1/manual-upload` | 人工上传音频 | 需要 |
+| GET | `/api/v1/manual-uploads` | 列出人工上传 | 需要 |
+| GET | `/api/v1/video-status/{video_id}` | 视频资源状态 | 需要 |
+| DELETE | `/api/v1/manual-uploads/{video_id}` | 删除人工上传 | 需要 |
 | GET | `/health` | 健康检查 | 公开 |
+| GET | `/admin` | 管理界面（人工上传） | 公开 |
 
 ### 鉴权方式
 
 ```
 Header: X-API-Key: your-api-key
 ```
+
+### 人工上传配置
+
+可通过环境变量控制人工上传开关与限制：
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `MANUAL_UPLOAD_ENABLED` | `true` | 是否启用人工上传 |
+| `MANUAL_UPLOAD_MAX_SIZE_MB` | `500` | 单文件最大大小（MB） |
+| `MANUAL_UPLOAD_ALLOWED_VIDEO_FORMATS` | `.mp4,.webm,.mkv,.avi,.mov` | 允许的视频格式 |
+| `MANUAL_UPLOAD_ALLOWED_AUDIO_FORMATS` | `.m4a,.mp3,.aac,.opus,.wav,.flac,.ogg` | 允许的音频格式 |
 
 ### 创建下载任务
 
@@ -193,6 +210,49 @@ curl -X POST http://localhost:8000/api/v1/tasks \
 - `task_id: null` - 没有创建新任务
 - `cache_hit: true` - 明确标识为缓存命中
 - `status: "completed"` - 直接返回完成状态
+
+---
+
+## 人工上传
+
+适用于已自行下载音频/视频，直接上传并生成可下载音频文件的场景。
+
+### 功能说明
+
+- 支持上传音频或视频文件，统一输出为 `m4a`
+- 如果原始音频为 **AAC**（常见于 mp4），将优先 **直接封装（copy）**，速度更快
+- 上传后自动写入 `video_resources`，并可在管理界面查看/删除
+
+### 管理界面
+
+浏览器访问：`http://localhost:8000/admin`
+
+### 支持格式
+
+- 视频：`.mp4`, `.webm`, `.mkv`, `.avi`, `.mov`
+- 音频：`.m4a`, `.mp3`, `.aac`, `.opus`, `.wav`, `.flac`, `.ogg`
+
+### API 示例
+
+**上传文件**
+```bash
+curl -X POST http://localhost:8000/api/v1/manual-upload \
+  -H "X-API-Key: your-api-key" \
+  -F "video_url=https://www.youtube.com/watch?v=dQw4w9WgXcQ" \
+  -F "file=@/path/to/video.mp4"
+```
+
+**列出上传**
+```bash
+curl -H "X-API-Key: your-api-key" \
+  "http://localhost:8000/api/v1/manual-uploads?limit=20&offset=0"
+```
+
+**删除上传**
+```bash
+curl -X DELETE -H "X-API-Key: your-api-key" \
+  "http://localhost:8000/api/v1/manual-uploads/dQw4w9WgXcQ"
+```
 
 **响应**
 ```json
