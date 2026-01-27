@@ -163,14 +163,37 @@ class TranscodeService:
 
         output_file = output_dir / f"{output_filename}.m4a"
 
-        if input_file.suffix.lower() == ".m4a":
-            current_bitrate = await self._get_audio_bitrate(input_file)
-            if current_bitrate and abs(current_bitrate - target_bitrate) < 10:
-                logger.info("File already in m4a format with correct bitrate, skipping transcode")
-                import shutil
+        # If AAC audio is already present, remux (copy) to m4a for speed.
+        audio_codec = await self._get_audio_codec(input_file)
+        if audio_codec == "aac":
+            logger.info("AAC detected, remuxing audio stream to m4a (no re-encode)")
+            cmd = [
+                "ffmpeg",
+                "-i", str(input_file),
+                "-vn",
+                "-c:a", "copy",
+                "-y",
+                str(output_file),
+            ]
 
-                shutil.copy(str(input_file), str(output_file))
-                return output_file
+            returncode, _, stderr = await self._run_command(
+                cmd,
+                timeout=300,
+                log_fallback="Async subprocess not supported, falling back to sync ffmpeg",
+            )
+
+            if returncode == 0 and output_file.exists():
+                if await self.validate_file(output_file):
+                    logger.info(f"Remux completed: {output_file}")
+                    return output_file
+            else:
+                error_msg = stderr.decode() if stderr else "Unknown error"
+                logger.warning(f"Remux failed (returncode={returncode}): {error_msg}")
+                if output_file.exists():
+                    try:
+                        output_file.unlink()
+                    except OSError:
+                        pass
 
         cmd = [
             "ffmpeg",
@@ -241,6 +264,28 @@ class TranscodeService:
         except Exception as e:
             logger.debug(f"Failed to get bitrate: {e}")
 
+        return None
+
+    async def _get_audio_codec(self, file_path: Path) -> Optional[str]:
+        try:
+            cmd = [
+                "ffprobe",
+                "-v", "error",
+                "-select_streams", "a:0",
+                "-show_entries", "stream=codec_name",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(file_path),
+            ]
+            returncode, stdout, _ = await self._run_command(
+                cmd,
+                timeout=10,
+                log_fallback="Async subprocess not supported, falling back to sync ffprobe",
+            )
+            if returncode == 0:
+                codec = stdout.decode().strip()
+                return codec or None
+        except Exception as e:
+            logger.debug(f"Failed to get codec: {e}")
         return None
 
     async def extract_audio_metadata(self, file_path: Path) -> dict:
