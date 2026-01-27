@@ -8,6 +8,7 @@
 - 任务历史查询
 - 视频资源管理
 - 创建任务和文件上传
+- Cookie 管理（Web 界面直接编辑 cookies.txt）
 
 ### 定位
 Web UI 是辅助性功能，主要用于：
@@ -25,15 +26,15 @@ Web UI 是辅助性功能，主要用于：
 ### 2.1 前端结构
 
 ```
-┌─────────────────────────────────────────────────────┐
-│  顶部栏：API Key 配置 | 刷新按钮                       │
-├─────────────────────────────────────────────────────┤
-│  Tab导航：[ 队列 | 任务历史 | 视频资源 | 创建/上传 ]   │
-├─────────────────────────────────────────────────────┤
-│                                                       │
-│  主内容区（根据 Tab 切换显示不同内容）                  │
-│                                                       │
-└─────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  顶部栏：API Key 配置 | 刷新按钮                              │
+├──────────────────────────────────────────────────────────────┤
+│  Tab导航：[ 队列 | 任务历史 | 视频资源 | 创建/上传 | ⚙️ 设置 ] │
+├──────────────────────────────────────────────────────────────┤
+│                                                                │
+│  主内容区（根据 Tab 切换显示不同内容）                          │
+│                                                                │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ### 2.2 Tab 功能说明
@@ -74,6 +75,15 @@ Web UI 是辅助性功能，主要用于：
 - **区域 B：人工上传**（复用现有功能）
   - 输入：video_url、文件、可选元数据
   - 操作：上传文件
+
+#### Tab 5: 设置（Cookie 管理）
+- **Cookie 管理区域**
+  - 显示：Cookie 文件路径、文件大小、最后更新时间
+  - 编辑器：多行文本框，支持编辑 cookies.txt 内容
+  - 操作：保存、重新加载、验证格式、清空
+  - 安全提示：敏感数据警告
+  - 帮助文档：折叠式说明（如何获取 Cookie）
+- **其他设置区域**（预留扩展）
 
 ### 2.3 技术栈
 
@@ -251,6 +261,144 @@ GET /api/v1/tasks?status=<status>&limit=20&offset=0
 ```
 GET /api/v1/tasks?status=completed&search=Rick&created_after=2025-01-01T00:00:00Z&limit=20&offset=0
 ```
+
+---
+
+### 3.3 Cookie 管理 API
+
+#### 3.3.1 获取 Cookie 内容
+
+**请求**
+```
+GET /api/v1/settings/cookie
+Header: X-API-Key: your-api-key
+```
+
+**响应**
+```json
+{
+  "content": "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t1234567890\tVISITOR_INFO1_LIVE\txxx",
+  "file_path": "/app/data/cookies.txt",
+  "file_size": 2048,
+  "last_modified": "2025-01-27T10:30:00Z",
+  "exists": true
+}
+```
+
+**错误响应**
+```json
+{
+  "detail": "Cookie file not configured (COOKIE_FILE environment variable not set)"
+}
+```
+
+---
+
+#### 3.3.2 更新 Cookie 内容
+
+**请求**
+```
+PUT /api/v1/settings/cookie
+Header: X-API-Key: your-api-key
+Content-Type: application/json
+
+{
+  "content": "# Netscape HTTP Cookie File\n...",
+  "create_backup": true
+}
+```
+
+**参数说明**
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| content | string | 是 | Cookie 文件内容 |
+| create_backup | boolean | 否 | 是否创建备份（默认 true） |
+
+**响应**
+```json
+{
+  "success": true,
+  "message": "Cookie file updated successfully",
+  "backup_file": "/app/data/cookies.txt.backup.20250127_103000",
+  "file_size": 2048,
+  "lines_count": 15
+}
+```
+
+**错误响应**
+```json
+{
+  "detail": "Invalid cookie format: missing Netscape header"
+}
+```
+
+---
+
+#### 3.3.3 验证 Cookie 格式
+
+**请求**
+```
+POST /api/v1/settings/cookie/validate
+Header: X-API-Key: your-api-key
+Content-Type: application/json
+
+{
+  "content": "# Netscape HTTP Cookie File\n..."
+}
+```
+
+**响应 - 验证成功**
+```json
+{
+  "valid": true,
+  "message": "Cookie format is valid",
+  "details": {
+    "has_header": true,
+    "cookies_count": 15,
+    "domains": [".youtube.com", ".google.com"],
+    "issues": []
+  }
+}
+```
+
+**响应 - 验证失败**
+```json
+{
+  "valid": false,
+  "message": "Invalid cookie format",
+  "details": {
+    "has_header": false,
+    "cookies_count": 0,
+    "issues": [
+      "Missing Netscape cookie header",
+      "Line 5: Invalid format (expected 7 fields)"
+    ]
+  }
+}
+```
+
+**格式验证规则**
+
+Netscape Cookie 格式要求：
+```
+# Netscape HTTP Cookie File
+domain	flag	path	secure	expiration	name	value
+```
+
+验证检查项：
+1. ✅ 第一行是否为 `# Netscape HTTP Cookie File`
+2. ✅ 每行是否包含 7 个字段（用 Tab 分隔）
+3. ✅ domain 字段是否有效
+4. ✅ expiration 是否为有效时间戳
+5. ⚠️ 是否包含 `.youtube.com` 域名（警告，非强制）
+
+**备份机制**
+
+备份文件命名格式：`cookies.txt.backup.20250127_103000`
+
+备份保留策略：
+- 最多保留 10 个备份
+- 超过 30 天的备份自动清理
 
 ---
 
@@ -461,6 +609,7 @@ src/static/admin/
       <button class="tab" data-tab="history">任务历史</button>
       <button class="tab" data-tab="resources">视频资源</button>
       <button class="tab" data-tab="create">创建/上传</button>
+      <button class="tab" data-tab="settings">⚙️ 设置</button>
     </nav>
 
     <!-- Tab 内容区 -->
@@ -572,6 +721,73 @@ src/static/admin/
         </form>
       </section>
     </div>
+
+    <div id="tab-settings" class="tab-content">
+      <!-- Cookie 管理 -->
+      <section class="card">
+        <h2>🍪 YouTube Cookie 管理</h2>
+
+        <!-- 警告提示 -->
+        <div class="alert warning">
+          ⚠️ Cookie 包含敏感登录凭证，请勿泄露！定期更新并使用小号 Cookie。
+        </div>
+
+        <!-- Cookie 状态信息 -->
+        <div class="cookie-status">
+          <span>📁 文件路径: <code id="cookie-path">-</code></span>
+          <span>📊 文件大小: <span id="cookie-size">-</span></span>
+          <span>🕐 最后更新: <span id="cookie-updated">-</span></span>
+        </div>
+
+        <!-- Cookie 编辑器 -->
+        <div class="cookie-editor">
+          <textarea
+            id="cookie-content"
+            placeholder="粘贴 cookies.txt 内容...&#10;格式示例：&#10;# Netscape HTTP Cookie File&#10;.youtube.com	TRUE	/	TRUE	1234567890	VISITOR_INFO1_LIVE	xxx"
+            rows="20"
+            spellcheck="false"
+          ></textarea>
+        </div>
+
+        <!-- 操作按钮 -->
+        <div class="cookie-actions">
+          <button class="btn" onclick="saveCookie()">💾 保存</button>
+          <button class="btn-secondary" onclick="loadCookie()">🔄 重新加载</button>
+          <button class="btn-secondary" onclick="validateCookie()">✅ 验证格式</button>
+          <button class="btn-danger" onclick="clearCookie()">🗑️ 清空</button>
+        </div>
+
+        <!-- 帮助文档折叠区 -->
+        <details class="help-section">
+          <summary>📖 如何获取 Cookie？</summary>
+          <div class="help-content">
+            <h4>方法 1：使用浏览器插件（推荐）</h4>
+            <ol>
+              <li>安装 "Get cookies.txt LOCALLY" 插件（Chrome/Firefox）</li>
+              <li>访问 <code>https://www.youtube.com</code> 并登录</li>
+              <li>点击插件图标，导出 cookies.txt</li>
+              <li>将内容粘贴到上方编辑器</li>
+            </ol>
+
+            <h4>方法 2：使用 yt-dlp 命令</h4>
+            <pre><code>yt-dlp --cookies-from-browser chrome --cookies cookies.txt "https://www.youtube.com"</code></pre>
+
+            <h4>⚠️ 注意事项</h4>
+            <ul>
+              <li>建议使用小号 Cookie，避免主账号被封</li>
+              <li>Cookie 有效期通常为 30-90 天</li>
+              <li>切勿分享 Cookie 给他人</li>
+            </ul>
+          </div>
+        </details>
+      </section>
+
+      <!-- 其他设置区域（预留） -->
+      <section class="card">
+        <h2>🔧 其他设置</h2>
+        <p class="placeholder">更多设置功能开发中...</p>
+      </section>
+    </div>
   </div>
 
   <!-- 弹窗 -->
@@ -660,6 +876,7 @@ function loadTabData(tabName) {
     case 'history': loadHistory(); break;
     case 'resources': loadResources(); break;
     case 'create': /* 无需加载 */ break;
+    case 'settings': loadCookie(); break;
   }
 }
 
@@ -1131,6 +1348,89 @@ async function handleUpload(event) {
 }
 ```
 
+#### Tab 5: Cookie 管理
+
+```javascript
+// ============ Tab 5: Cookie 管理 ============
+async function loadCookie() {
+  try {
+    const data = await apiRequest('/api/v1/settings/cookie');
+
+    if (!data.exists) {
+      showToast('Cookie 文件未配置或不存在', 'warning');
+      document.getElementById('cookie-content').value = '# Netscape HTTP Cookie File\n';
+      return;
+    }
+
+    // 填充内容
+    document.getElementById('cookie-content').value = data.content;
+
+    // 更新状态信息
+    document.getElementById('cookie-path').textContent = data.file_path;
+    document.getElementById('cookie-size').textContent = formatFileSize(data.file_size);
+    document.getElementById('cookie-updated').textContent = formatDateTime(data.last_modified);
+
+    showToast('Cookie 加载成功');
+  } catch (err) {
+    console.error('Failed to load cookie:', err);
+  }
+}
+
+async function saveCookie() {
+  const content = document.getElementById('cookie-content').value.trim();
+
+  if (!content) {
+    showToast('Cookie 内容不能为空', 'error');
+    return;
+  }
+
+  if (!confirm('确定保存 Cookie？旧文件将被备份。')) return;
+
+  try {
+    const result = await apiRequest('/api/v1/settings/cookie', {
+      method: 'PUT',
+      body: JSON.stringify({ content, create_backup: true })
+    });
+
+    showToast(`保存成功！已创建备份：${result.backup_file.split('/').pop()}`);
+    loadCookie(); // 重新加载
+  } catch (err) {
+    console.error('Failed to save cookie:', err);
+  }
+}
+
+async function validateCookie() {
+  const content = document.getElementById('cookie-content').value.trim();
+
+  if (!content) {
+    showToast('请先输入 Cookie 内容', 'warning');
+    return;
+  }
+
+  try {
+    const result = await apiRequest('/api/v1/settings/cookie/validate', {
+      method: 'POST',
+      body: JSON.stringify({ content })
+    });
+
+    if (result.valid) {
+      showToast(`✅ 格式正确！共 ${result.details.cookies_count} 条 Cookie`);
+    } else {
+      showToast(`❌ 格式错误：${result.details.issues.join('; ')}`, 'error');
+    }
+  } catch (err) {
+    console.error('Failed to validate cookie:', err);
+  }
+}
+
+async function clearCookie() {
+  if (!confirm('确定清空 Cookie 编辑器内容？（不会删除服务器文件）')) return;
+
+  document.getElementById('cookie-content').value = '# Netscape HTTP Cookie File\n';
+  showToast('已清空编辑器');
+}
+```
+
 #### 工具函数
 
 ```javascript
@@ -1403,6 +1703,94 @@ function formatDuration(seconds) {
 .toast.success {
   background: #32cd32;
 }
+
+/* Cookie 编辑器 */
+.cookie-editor textarea {
+  width: 100%;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 12px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  background: #f9f9f9;
+  resize: vertical;
+}
+
+/* Cookie 状态信息 */
+.cookie-status {
+  display: flex;
+  gap: 20px;
+  margin-bottom: 15px;
+  padding: 10px;
+  background: #f0f0f0;
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+.cookie-status code {
+  background: #fff;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-family: monospace;
+}
+
+/* Cookie 操作按钮 */
+.cookie-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 15px;
+}
+
+/* 警告提示 */
+.alert.warning {
+  background: #fff3cd;
+  border: 1px solid #ffc107;
+  color: #856404;
+  padding: 12px;
+  border-radius: 4px;
+  margin-bottom: 15px;
+}
+
+/* 帮助文档 */
+.help-section {
+  margin-top: 20px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  padding: 10px;
+}
+
+.help-section summary {
+  cursor: pointer;
+  font-weight: bold;
+  user-select: none;
+}
+
+.help-content {
+  margin-top: 10px;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.help-content pre {
+  background: #f5f5f5;
+  padding: 10px;
+  border-radius: 4px;
+  overflow-x: auto;
+}
+
+.help-content code {
+  background: #f5f5f5;
+  padding: 2px 5px;
+  border-radius: 3px;
+  font-family: monospace;
+}
+
+/* 占位文本 */
+.placeholder {
+  color: #888;
+  font-style: italic;
+}
 ```
 
 ---
@@ -1423,41 +1811,58 @@ function formatDuration(seconds) {
    - [ ] 修改 `src/api/routes.py`，增强任务列表接口
    - [ ] 在 `src/main.py` 注册新路由
 
-3. **测试**
+3. **Cookie 管理**
+   - [ ] 在 `src/config.py` 添加 `COOKIE_FILE` 和 `COOKIE_BACKUP_DIR` 配置
+   - [ ] 创建 `src/services/cookie_service.py`
+   - [ ] 实现 `get_cookie_info()`、`update_cookie()`、`validate_cookie()` 方法
+   - [ ] 实现备份机制和清理策略
+   - [ ] 创建 `src/api/settings_routes.py`
+   - [ ] 实现 3 个 Cookie 管理接口
+   - [ ] 在 `src/main.py` 注册 settings 路由
+
+4. **测试**
    - [ ] 使用 curl 或 Postman 测试所有新增接口
    - [ ] 验证删除操作（级联删除文件、保留任务）
    - [ ] 验证搜索和筛选功能
+   - [ ] 测试 Cookie 管理接口（获取、更新、验证）
+   - [ ] 测试备份机制和格式验证
 
 ### 阶段 2: 前端页面（2-3天）
 
-4. **HTML 结构**
+5. **HTML 结构**
    - [ ] 重构 `src/static/admin/index.html`
-   - [ ] 实现 Tab 导航结构
-   - [ ] 实现 4 个 Tab 的 HTML 布局
+   - [ ] 实现 Tab 导航结构（5 个 Tab）
+   - [ ] 实现 5 个 Tab 的 HTML 布局
+   - [ ] 添加 Cookie 管理编辑器和帮助文档
 
-5. **JavaScript 逻辑**
-   - [ ] 实现 Tab 切换逻辑
+6. **JavaScript 逻辑**
+   - [ ] 实现 Tab 切换逻辑（包含 settings）
    - [ ] 实现任务队列加载和渲染
    - [ ] 实现任务历史加载、筛选、分页
    - [ ] 实现视频资源加载、搜索、分页
    - [ ] 实现详情弹窗
    - [ ] 实现创建任务和上传功能（复用现有逻辑）
+   - [ ] 实现 Cookie 加载、保存、验证、清空功能
 
-6. **CSS 样式**
+7. **CSS 样式**
    - [ ] 更新 `src/static/admin/style.css`
    - [ ] 实现 Tab 样式
    - [ ] 实现标签、徽章样式
+   - [ ] 实现 Cookie 编辑器样式
+   - [ ] 实现警告提示和帮助文档样式
    - [ ] 实现响应式布局
 
 ### 阶段 3: 测试和完善（1天）
 
-7. **功能测试**
+8. **功能测试**
    - [ ] 测试所有 Tab 的数据加载
    - [ ] 测试筛选、搜索、分页
    - [ ] 测试删除操作
    - [ ] 测试弹窗和 Toast
+   - [ ] 测试 Cookie 加载、保存、验证功能
+   - [ ] 测试备份创建和错误处理
 
-8. **优化**
+9. **优化**
    - [ ] 错误处理完善
    - [ ] 空状态提示
    - [ ] 性能优化（防抖、懒加载）
@@ -1505,11 +1910,35 @@ curl -H "X-API-Key: your-key" "http://localhost:8000/api/v1/tasks?search=Rick"
 curl -H "X-API-Key: your-key" "http://localhost:8000/api/v1/tasks?status=completed&search=Rick&created_after=2025-01-01T00:00:00Z"
 ```
 
+#### Cookie 管理
+
+```bash
+# 获取 Cookie
+curl -H "X-API-Key: your-key" "http://localhost:8000/api/v1/settings/cookie"
+
+# 更新 Cookie
+curl -X PUT -H "X-API-Key: your-key" \
+  -H "Content-Type: application/json" \
+  -d '{"content": "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t1234567890\tVISITOR_INFO1_LIVE\txxx"}' \
+  "http://localhost:8000/api/v1/settings/cookie"
+
+# 验证格式
+curl -X POST -H "X-API-Key: your-key" \
+  -H "Content-Type: application/json" \
+  -d '{"content": "# Netscape HTTP Cookie File\n..."}' \
+  "http://localhost:8000/api/v1/settings/cookie/validate"
+
+# 验证：
+# 1. 旧文件已备份（cookies.txt.backup.YYYYMMDD_HHMMSS）
+# 2. 新内容已写入 cookies.txt
+# 3. 文件权限为 600（只读写 owner）
+```
+
 ### 7.2 前端测试
 
 #### 功能测试清单
 - [ ] API Key 保存和清除
-- [ ] Tab 切换正常
+- [ ] Tab 切换正常（5 个 Tab）
 - [ ] 任务队列显示正常（pending 和 downloading）
 - [ ] 取消任务功能正常
 - [ ] 任务历史筛选器正常（状态、日期、搜索）
@@ -1521,6 +1950,10 @@ curl -H "X-API-Key: your-key" "http://localhost:8000/api/v1/tasks?status=complet
 - [ ] 删除视频资源功能正常
 - [ ] 创建任务功能正常
 - [ ] 人工上传功能正常
+- [ ] Cookie 加载显示正常
+- [ ] Cookie 保存和备份功能正常
+- [ ] Cookie 格式验证正常（正确和错误情况）
+- [ ] Cookie 清空功能正常
 - [ ] Toast 提示正常
 - [ ] 错误处理正常
 
@@ -1530,6 +1963,11 @@ curl -H "X-API-Key: your-key" "http://localhost:8000/api/v1/tasks?status=complet
 - [ ] 搜索无结果
 - [ ] 网络错误处理
 - [ ] API Key 缺失提示
+- [ ] Cookie 文件不存在时的处理
+- [ ] Cookie 内容为空时的保存拒绝
+- [ ] Cookie 格式错误时的验证提示
+- [ ] Cookie 超大文件（1MB+）保存
+- [ ] 文件权限不足时的错误处理
 
 ---
 
@@ -1559,6 +1997,12 @@ if not video_resource:
 - **API Key 保护**：所有 API 请求都需要 X-API-Key
 - **删除确认**：删除操作需要用户二次确认
 - **XSS 防护**：所有用户输入的内容都需要转义
+- **Cookie 安全**：
+  - Cookie 文件权限设置为 600（仅 owner 可读写）
+  - 备份文件同样限制权限
+  - 生产环境强制使用 HTTPS
+  - 操作日志记录（时间、IP、操作类型）
+  - 敏感数据警告提示
 
 ### 8.4 可扩展性
 
@@ -1584,5 +2028,6 @@ if not video_resource:
 - ✅ 任务历史查询（支持筛选、搜索）
 - ✅ 视频资源管理（查看、删除）
 - ✅ 创建任务和文件上传
+- ✅ Cookie 管理（Web 界面编辑 cookies.txt）
 
 代码量可控，维护成本低，满足临时管理和查看的需求。
