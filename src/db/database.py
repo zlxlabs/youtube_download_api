@@ -130,6 +130,39 @@ class Database:
                 )
                 logger.info("Migration: Added 'failure_details' column to tasks table")
 
+        # Check if files table exists for manual upload migrations
+        cursor = await self.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='files'"
+        )
+        files_table_exists = await cursor.fetchone()
+
+        if files_table_exists:
+            cursor = await self.execute("PRAGMA table_info(files)")
+            columns = await cursor.fetchall()
+            column_names = {col["name"] for col in columns}
+
+            if "upload_source" not in column_names:
+                await self.execute(
+                    "ALTER TABLE files ADD COLUMN upload_source TEXT DEFAULT 'auto'"
+                )
+                logger.info("Migration: Added 'upload_source' column to files table")
+
+            if "original_format" not in column_names:
+                await self.execute(
+                    "ALTER TABLE files ADD COLUMN original_format TEXT"
+                )
+                logger.info("Migration: Added 'original_format' column to files table")
+
+            # Backfill manual uploads when original_format is present
+            await self.execute(
+                """
+                UPDATE files
+                SET upload_source = 'manual'
+                WHERE (upload_source IS NULL OR upload_source = '' OR upload_source = 'auto')
+                AND original_format IS NOT NULL
+                """
+            )
+
         # Create IP ban tables if not exist
         await self._create_ip_ban_tables()
 
@@ -209,6 +242,8 @@ class Database:
                     format TEXT,
                     quality TEXT,
                     language TEXT,
+                    upload_source TEXT DEFAULT 'auto',
+                    original_format TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     last_accessed_at TIMESTAMP,
                     expires_at TIMESTAMP,
@@ -392,8 +427,9 @@ class Database:
                 """
                 INSERT INTO files (
                     id, video_id, file_type, filename, filepath, size, format,
-                    quality, language, created_at, last_accessed_at, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    quality, language, upload_source, original_format,
+                    created_at, last_accessed_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     file.id,
@@ -405,6 +441,8 @@ class Database:
                     file.format,
                     file.quality,
                     file.language,
+                    file.upload_source,
+                    file.original_format,
                     file.created_at or datetime.now(timezone.utc),
                     file.last_accessed_at,
                     file.expires_at,
@@ -887,6 +925,8 @@ class Database:
                 """
                 DELETE FROM video_resources
                 WHERE video_id NOT IN (SELECT DISTINCT video_id FROM files)
+                AND (video_info IS NULL OR video_info = '')
+                AND has_native_transcript IS NULL
                 """
             )
             count = cursor.rowcount
@@ -992,6 +1032,11 @@ class Database:
 
     def _row_to_file(self, row: aiosqlite.Row) -> FileRecord:
         """Convert database row to FileRecord object."""
+        row_keys = set(row.keys())
+        upload_source = row["upload_source"] if "upload_source" in row_keys else "auto"
+        if not upload_source:
+            upload_source = "auto"
+        original_format = row["original_format"] if "original_format" in row_keys else None
         return FileRecord(
             id=row["id"],
             video_id=row["video_id"],
@@ -1002,6 +1047,8 @@ class Database:
             format=row["format"],
             quality=row["quality"],
             language=row["language"],
+            upload_source=upload_source,
+            original_format=original_format,
             created_at=row["created_at"],
             last_accessed_at=row["last_accessed_at"],
             expires_at=row["expires_at"],

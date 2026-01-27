@@ -56,6 +56,8 @@ class FileService:
         quality: Optional[str] = None,
         language: Optional[str] = None,
         video_title: Optional[str] = None,
+        upload_source: Optional[str] = None,
+        original_format: Optional[str] = None,
     ) -> FileRecord:
         """
         Create a file record and move file to storage.
@@ -138,6 +140,8 @@ class FileService:
             format=file_format,
             quality=quality,
             language=language,
+            upload_source=upload_source or "auto",
+            original_format=original_format,
             created_at=now,
             last_accessed_at=now,
             expires_at=get_expiry_time(self.settings.file_retention_days),

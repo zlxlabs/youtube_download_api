@@ -279,3 +279,69 @@ class ValidationErrorResponse(BaseModel):
     """Validation error response."""
 
     detail: list[ValidationErrorDetail]
+
+
+# ==================== Manual Upload Schemas ====================
+
+
+class ManualUploadMetadata(BaseModel):
+    """Optional metadata for manual upload."""
+
+    title: Optional[str] = Field(None, description="Video title")
+    author: Optional[str] = Field(None, description="Video author/channel name")
+    duration: Optional[int] = Field(None, description="Video duration in seconds")
+    channel_id: Optional[str] = Field(None, description="Channel ID")
+    description: Optional[str] = Field(None, description="Video description")
+
+
+class ManualUploadResponse(BaseModel):
+    """Response schema for manual upload."""
+
+    task_id: Optional[str] = None
+    status: str = "completed"
+    video_id: str
+    video_url: Optional[str] = None
+    cache_hit: bool = False
+    upload_source: str = "manual"
+    video_info: Optional[VideoInfoResponse] = None
+    files: Optional[FilesResponse] = None
+    original_format: Optional[str] = None
+    metadata_source: Optional[str] = Field(
+        None, description="'auto' if fetched from YouTube, 'manual' if user-provided"
+    )
+    message: Optional[str] = None
+
+
+class VideoStatusResponse(BaseModel):
+    """Response schema for video status check."""
+
+    video_id: str
+    has_audio: bool
+    has_transcript: bool
+    audio_source: Optional[str] = Field(None, description="'auto' or 'manual'")
+    transcript_source: Optional[str] = Field(None, description="'auto' or 'manual'")
+    audio_created_at: Optional[datetime] = None
+    transcript_created_at: Optional[datetime] = None
+    can_upload_audio: bool = Field(..., description="Whether audio upload is allowed")
+
+
+class ManualUploadItem(BaseModel):
+    """Manual upload item in list."""
+
+    video_id: str
+    file_id: str
+    title: Optional[str] = None
+    author: Optional[str] = None
+    size: Optional[int] = Field(None, description="File size in bytes")
+    format: Optional[str] = Field(None, description="Current format (m4a)")
+    original_format: Optional[str] = Field(None, description="Original uploaded format")
+    created_at: datetime
+
+
+class ManualUploadListResponse(BaseModel):
+    """Response schema for manual upload list."""
+
+    uploads: list[ManualUploadItem]
+    total: int
+    limit: int
+    offset: int

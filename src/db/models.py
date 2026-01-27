@@ -197,6 +197,8 @@ class FileRecord:
     # Extended attributes (for future multi-version support)
     quality: Optional[str] = None  # Audio: 128 / 320
     language: Optional[str] = None  # Transcript: en / zh
+    upload_source: str = "auto"  # 'auto' (downloaded) or 'manual' (uploaded)
+    original_format: Optional[str] = None  # Original format before transcoding
 
     # Lifecycle
     created_at: Optional[datetime] = None

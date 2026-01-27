@@ -269,11 +269,14 @@ class TikHubDownloader(BaseDownloader):
             httpx.HTTPStatusError: HTTP 错误
             DownloaderError: API 返回错误
         """
+        # TikHub API requires at least one resource type; if both audio/transcript
+        # are false (metadata-only), request videos=true to avoid 400.
+        videos_param = "true" if (not include_audio and not include_transcript) else "false"
         params = {
             "video_id": video_id,
             "url_access": "normal",  # 包含音视频直链
             "lang": "zh-CN",
-            "videos": "false",  # 不需要视频
+            "videos": videos_param,
             "audios": "auto" if include_audio else "false",
             "subtitles": "true" if include_transcript else "false",
             "related": "false",  # 不需要相关视频

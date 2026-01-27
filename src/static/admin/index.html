@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Manual Upload Admin</title>
+  <link rel="stylesheet" href="/admin/style.css" />
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>人工上传管理</h1>
+      <p class="sub">上传音频文件并管理手动上传资源</p>
+    </header>
+
+    <section class="card">
+      <h2>API Key</h2>
+      <div class="row">
+        <input id="api-key" type="password" placeholder="X-API-Key" />
+        <button class="btn" onclick="saveApiKey()">保存</button>
+        <button class="btn-secondary" onclick="clearApiKey()">清除</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>上传</h2>
+      <form id="upload-form" onsubmit="handleUpload(event)">
+        <div class="row">
+          <input id="video-url" name="video_url" type="text" placeholder="https://www.youtube.com/watch?v=..." onblur="checkVideoStatus()" />
+          <button class="btn-secondary" type="button" onclick="checkVideoStatus()">检查状态</button>
+        </div>
+        <div id="status-check" class="status-check"><p>✓ 上传前可以先检查视频资源状态</p></div>
+
+        <details class="metadata-section">
+          <summary>可选元数据</summary>
+          <div class="grid">
+            <input name="title" type="text" placeholder="标题" />
+            <input name="author" type="text" placeholder="作者" />
+            <input name="duration" type="number" placeholder="时长(秒)" />
+            <input name="channel_id" type="text" placeholder="频道 ID" />
+          </div>
+          <textarea name="description" placeholder="描述"></textarea>
+        </details>
+
+        <div class="row">
+          <input name="file" type="file" required />
+          <button id="upload-btn" class="btn" type="submit">上传</button>
+        </div>
+
+        <div id="upload-progress" class="progress" style="display:none;">
+          <div class="progress-bar"></div>
+          <span class="progress-text">上传中...</span>
+        </div>
+      </form>
+    </section>
+
+    <section class="card">
+      <h2>统计</h2>
+      <div class="stats">
+        <div class="stat"><span>总上传</span><strong id="total-uploads">-</strong></div>
+        <div class="stat"><span>总大小</span><strong id="total-size">-</strong></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>上传列表</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Video ID</th>
+            <th>标题</th>
+            <th>作者</th>
+            <th>格式</th>
+            <th>大小</th>
+            <th>创建时间</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="uploads-tbody">
+          <tr><td colspan="7" class="loading">加载中...</td></tr>
+        </tbody>
+      </table>
+      <div class="pagination">
+        <button id="prev-btn" class="btn-secondary" onclick="prevPage()">上一页</button>
+        <span id="page-info">-</span>
+        <button id="next-btn" class="btn-secondary" onclick="nextPage()">下一页</button>
+      </div>
+    </section>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script src="/admin/app.js"></script>
+</body>
+</html>

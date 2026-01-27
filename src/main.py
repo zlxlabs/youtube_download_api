@@ -7,24 +7,31 @@ Initializes the application, services, and background workers.
 import asyncio
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import AsyncGenerator
 
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from src import __version__
 from src.api.routes import router as api_router
 from src.api.routes import set_services
+from src.api.manual_upload_routes import router as manual_upload_router
+from src.api.manual_upload_routes import set_manual_upload_service
 from src.api.schemas import ComponentStatus, HealthResponse, QueueStatus
 from src.config import Settings, get_settings
 from src.core.worker import DownloadWorker
 from src.db.database import Database
 from src.services.callback_service import CallbackService
 from src.services.file_service import FileService
+from src.services.manual_upload_service import ManualUploadService
+from src.services.metadata_service import MetadataService
 from src.services.notify import NotificationService
 from src.services.task_service import TaskService
+from src.services.transcode_service import TranscodeService
 from src.utils.logger import logger, setup_logger
 
 
@@ -34,6 +41,9 @@ task_service: TaskService | None = None
 file_service: FileService | None = None
 callback_service: CallbackService | None = None
 notify_service: NotificationService | None = None
+transcode_service: TranscodeService | None = None
+metadata_service: MetadataService | None = None
+manual_upload_service: ManualUploadService | None = None
 download_worker: DownloadWorker | None = None
 worker_task: asyncio.Task | None = None
 scheduler: AsyncIOScheduler | None = None
@@ -48,6 +58,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     Handles startup and shutdown of services, database, and background workers.
     """
     global db, task_service, file_service, callback_service, notify_service
+    global transcode_service, metadata_service, manual_upload_service
     global download_worker, worker_task, scheduler, startup_time
 
     settings = get_settings()
@@ -84,6 +95,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         task_service = TaskService(db, settings, file_service)
         callback_service = CallbackService(db, file_service)
         notify_service = NotificationService(settings, db)
+        if settings.manual_upload_enabled:
+            transcode_service = TranscodeService()
+            metadata_service = MetadataService(settings)
+            manual_upload_service = ManualUploadService(
+                db=db,
+                file_service=file_service,
+                transcode_service=transcode_service,
+                metadata_service=metadata_service,
+                settings=settings,
+            )
     except Exception as e:
         logger.critical(f"Failed to initialize services: {e}")
         await db.disconnect()
@@ -91,6 +112,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Set services for API routes
     set_services(task_service, file_service)
+    if manual_upload_service:
+        set_manual_upload_service(manual_upload_service)
 
     # Initialize download worker
     download_worker = DownloadWorker(
@@ -228,6 +251,13 @@ app.add_middleware(
 
 # Include API routes
 app.include_router(api_router)
+
+# Include manual upload routes and admin UI when enabled
+if get_settings().manual_upload_enabled:
+    app.include_router(manual_upload_router)
+    admin_dir = Path(__file__).resolve().parent / "static" / "admin"
+    if admin_dir.exists():
+        app.mount("/admin", StaticFiles(directory=admin_dir, html=True), name="admin")
 
 
 # ==================== Health Check Endpoint ====================

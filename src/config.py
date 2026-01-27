@@ -148,6 +148,22 @@ class Settings(BaseSettings):
         default=False, description="Dry run mode (skip actual downloads)"
     )
 
+    # ============ Manual Upload Configuration ============
+    manual_upload_enabled: bool = Field(
+        default=True, description="Enable manual upload feature"
+    )
+    manual_upload_max_size_mb: int = Field(
+        default=500, ge=1, description="Maximum upload file size (MB)"
+    )
+    manual_upload_allowed_video_formats: str = Field(
+        default=".mp4,.webm,.mkv,.avi,.mov",
+        description="Allowed video formats (comma-separated)",
+    )
+    manual_upload_allowed_audio_formats: str = Field(
+        default=".m4a,.mp3,.aac,.opus,.wav,.flac,.ogg",
+        description="Allowed audio formats (comma-separated)",
+    )
+
     @field_validator("wecom_moderation_strategy")
     @classmethod
     def validate_moderation_strategy(cls, v: str) -> str:
