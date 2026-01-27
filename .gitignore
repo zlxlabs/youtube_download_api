@@ -81,3 +81,6 @@ build-optimized.bat
 
 # Manual test outputs
 tests/manual/output/
+
+# 企业微信通知缓存
+.wecom_cache/
