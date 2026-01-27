@@ -12,8 +12,23 @@ Always respond in 中文
 - 尽量保证编程语言的唯一性，避免多种编程语言混杂,比如 C++ 和 python 混杂。
 - 涉及 docker，尽量使用现成的编译结果，避免在云端机器上还得重新编译。
 
-# 工作流程  
-- 完成一系列代码修改后，务必进行类型检查  
+# 工作流程
+- 完成一系列代码修改后，务必进行类型检查
 - 出于性能考虑，优先运行单个测试，而非整个测试套件
 - 所有 test 项目请置于 tests 文件夹里面运行
+
+# Git 操作安全规则
+- **🚨 严禁删除 .git 目录**：永远不要使用 `rm -rf .git` 或类似命令删除 git 仓库目录
+- **优先使用 git-filter-repo**：清理 git 历史时，必须使用 `git filter-repo` 工具，不要使用删除重建的方式
+- **操作前二次确认**：执行以下高风险操作前，必须向用户说明后果并等待明确确认：
+  - 删除 .git 目录
+  - 强制推送 (git push --force)
+  - 重写历史 (git filter-repo, git rebase, git reset --hard)
+  - 删除远程分支
+- **必须先备份**：执行任何可能导致数据丢失的操作前，必须先创建备份或确认远程仓库状态
+- **清理 git 历史的正确流程**：
+  1. 使用 `git log` 确认要删除的文件/路径
+  2. 使用 `git filter-repo --path <path> --invert-paths --force` 清理历史
+  3. 重新添加 remote：`git remote add origin <url>`
+  4. 使用 `git push --force` 推送到远程（需要用户确认）
 
