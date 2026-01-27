@@ -18,7 +18,25 @@ window.addEventListener('DOMContentLoaded', () => {
   if (state.apiKey) {
     document.getElementById('api-key').value = state.apiKey;
   }
-  loadTabData(state.currentTab);
+  // 从 URL hash 读取初始 tab
+  const hash = window.location.hash.slice(1);
+  const validTabs = ['queue', 'history', 'resources', 'create', 'settings'];
+  const initialTab = (hash && validTabs.includes(hash)) ? hash : state.currentTab;
+
+  // 初始化 tab（会自动更新 URL）
+  // 强制执行初始化，所以先清空 currentTab
+  state.currentTab = '';
+  doSwitchTab(initialTab);
+});
+
+// 监听 URL hash 变化（支持浏览器前进/后退和直接修改 URL）
+window.addEventListener('hashchange', () => {
+  const hash = window.location.hash.slice(1);
+  const validTabs = ['queue', 'history', 'resources', 'create', 'settings'];
+  if (hash && validTabs.includes(hash) && hash !== state.currentTab) {
+    // URL hash 变化且与当前 tab 不同时，切换 tab
+    doSwitchTab(hash);
+  }
 });
 
 // ==================== API 请求封装 ====================
@@ -79,7 +97,25 @@ function checkApiKey() {
 }
 
 // ==================== Tab 管理 ====================
+/**
+ * 切换 tab（公开函数，从用户交互调用）
+ * @param {string} tabName - tab 名称
+ */
 function switchTab(tabName) {
+  // 更新 URL hash，会自动触发 hashchange 事件
+  window.location.hash = tabName;
+}
+
+/**
+ * 实际执行 tab 切换（内部函数）
+ * @param {string} tabName - tab 名称
+ */
+function doSwitchTab(tabName) {
+  // 如果已经是当前 tab，不重复执行
+  if (state.currentTab === tabName) {
+    return;
+  }
+
   state.currentTab = tabName;
 
   // 更新 Tab 按钮状态
@@ -91,6 +127,11 @@ function switchTab(tabName) {
   document.querySelectorAll('.tab-content').forEach(content => {
     content.classList.toggle('active', content.id === `tab-${tabName}`);
   });
+
+  // 更新 URL hash（如果不一致）
+  if (window.location.hash !== `#${tabName}`) {
+    window.location.hash = tabName;
+  }
 
   // 加载对应数据
   loadTabData(tabName);
