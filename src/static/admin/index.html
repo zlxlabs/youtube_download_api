@@ -1,237 +1,455 @@
 <!doctype html>
 <html lang="zh-CN">
+
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>管理中心</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5, viewport-fit=cover" />
+  <meta name="theme-color" content="#ffffff" />
+  <title>YouTube Download Admin</title>
   <link rel="stylesheet" href="/admin/style.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 </head>
+
 <body>
-  <div class="container">
+  <div class="app-layout">
     <!-- 顶部栏 -->
-    <header>
-      <h1>管理中心</h1>
+    <header class="app-header">
+      <div class="header-brand">
+        <svg class="brand-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path
+            d="M22.54 6.42a2.78 2.78 0 0 0-1.94-2C18.88 4 12 4 12 4s-6.88 0-8.6.46a2.78 2.78 0 0 0-1.94 2A29 29 0 0 0 1 11.75a29 29 0 0 0 .46 5.33A2.78 2.78 0 0 0 3.4 19c1.72.46 8.6.46 8.6.46s6.88 0 8.6-.46a2.78 2.78 0 0 0 1.94-2 29 29 0 0 0 .46-5.25 29 29 0 0 0-.46-5.33z" />
+          <polygon points="9.75 15.02 15.5 11.75 9.75 8.48 9.75 15.02" />
+        </svg>
+        <h1>Admin Console</h1>
+      </div>
+
       <div class="header-actions">
-        <div class="api-key-section">
-          <input id="api-key" type="password" placeholder="X-API-Key" />
-          <button class="btn-sm" onclick="saveApiKey()">保存</button>
-          <button class="btn-secondary-sm" onclick="clearApiKey()">清除</button>
+        <div class="api-key-group">
+          <div class="input-wrapper">
+            <svg class="input-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+              stroke-width="2">
+              <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+              <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+            </svg>
+            <input id="api-key" type="password" placeholder="API Key" autocomplete="off" />
+          </div>
+          <button class="btn btn-primary btn-sm" onclick="saveApiKey()" title="保存 API Key">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
+              <polyline points="17 21 17 13 7 13 7 21"></polyline>
+              <polyline points="7 3 7 8 15 8"></polyline>
+            </svg>
+          </button>
+          <button class="btn btn-ghost btn-sm" onclick="clearApiKey()" title="清除 API Key">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="3 6 5 6 21 6"></polyline>
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+            </svg>
+          </button>
         </div>
-        <button class="btn-secondary-sm" onclick="refreshCurrentTab()">
-          <span>🔄</span> 刷新
+        <div class="separator"></div>
+        <button class="btn btn-ghost btn-sm" onclick="refreshCurrentTab()" title="刷新">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M23 4v6h-6"></path>
+            <path d="M1 20v-6h6"></path>
+            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+          </svg>
+          <span class="btn-text">刷新</span>
         </button>
       </div>
     </header>
 
     <!-- Tab 导航 -->
-    <nav class="tabs">
-      <button class="tab active" data-tab="queue" onclick="switchTab('queue')">
-        任务队列
-      </button>
-      <button class="tab" data-tab="history" onclick="switchTab('history')">
-        任务历史
-      </button>
-      <button class="tab" data-tab="resources" onclick="switchTab('resources')">
-        视频资源
-      </button>
-      <button class="tab" data-tab="create" onclick="switchTab('create')">
-        创建/上传
-      </button>
-      <button class="tab" data-tab="settings" onclick="switchTab('settings')">
-        ⚙️ 设置
-      </button>
+    <nav class="tabs-nav">
+      <div class="tabs-scroll-container">
+        <button class="tab-item active" data-tab="queue" onclick="switchTab('queue')">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="8" y1="6" x2="21" y2="6"></line>
+            <line x1="8" y1="12" x2="21" y2="12"></line>
+            <line x1="8" y1="18" x2="21" y2="18"></line>
+            <line x1="3" y1="6" x2="3.01" y2="6"></line>
+            <line x1="3" y1="12" x2="3.01" y2="12"></line>
+            <line x1="3" y1="18" x2="3.01" y2="18"></line>
+          </svg>
+          任务队列
+        </button>
+        <button class="tab-item" data-tab="history" onclick="switchTab('history')">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"></circle>
+            <polyline points="12 6 12 12 16 14"></polyline>
+          </svg>
+          任务历史
+        </button>
+        <button class="tab-item" data-tab="resources" onclick="switchTab('resources')">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"></rect>
+            <line x1="7" y1="2" x2="7" y2="22"></line>
+            <line x1="17" y1="2" x2="17" y2="22"></line>
+            <line x1="2" y1="12" x2="22" y2="12"></line>
+            <line x1="2" y1="7" x2="7" y2="7"></line>
+            <line x1="2" y1="17" x2="7" y2="17"></line>
+            <line x1="17" y1="17" x2="22" y2="17"></line>
+            <line x1="17" y1="7" x2="22" y2="7"></line>
+          </svg>
+          视频资源
+        </button>
+        <button class="tab-item" data-tab="create" onclick="switchTab('create')">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"></circle>
+            <line x1="12" y1="8" x2="12" y2="16"></line>
+            <line x1="8" y1="12" x2="16" y2="12"></line>
+          </svg>
+          创建/上传
+        </button>
+        <div class="spacer"></div>
+        <button class="tab-item" data-tab="settings" onclick="switchTab('settings')">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3"></circle>
+            <path
+              d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z">
+            </path>
+          </svg>
+          设置
+        </button>
+      </div>
     </nav>
 
     <!-- Tab 内容区 -->
+    <main class="app-content">
 
-    <!-- 任务队列 Tab -->
-    <div id="tab-queue" class="tab-content active">
-      <section class="card">
-        <h2>正在下载</h2>
-        <div id="downloading-tasks" class="task-list">
-          <p class="loading">加载中...</p>
-        </div>
-      </section>
-
-      <section class="card">
-        <h2>等待队列</h2>
-        <div id="pending-tasks" class="task-list">
-          <p class="loading">加载中...</p>
-        </div>
-      </section>
-    </div>
-
-    <!-- 任务历史 Tab -->
-    <div id="tab-history" class="tab-content">
-      <section class="card">
-        <div class="filters-row">
-          <select id="status-filter" onchange="applyHistoryFilters()">
-            <option value="">所有状态</option>
-            <option value="completed">已完成</option>
-            <option value="failed">失败</option>
-            <option value="cancelled">已取消</option>
-          </select>
-          <input id="search-filter" type="text" placeholder="搜索 video_id 或标题" onkeyup="debounceSearch()" />
-          <input id="date-start" type="date" onchange="applyHistoryFilters()" />
-          <input id="date-end" type="date" onchange="applyHistoryFilters()" />
-        </div>
-        <table>
-          <thead>
-            <tr>
-              <th>Video ID</th>
-              <th>标题</th>
-              <th>状态</th>
-              <th>类型</th>
-              <th>缓存</th>
-              <th>创建时间</th>
-              <th>完成时间</th>
-            </tr>
-          </thead>
-          <tbody id="history-tbody">
-            <tr><td colspan="7" class="loading">加载中...</td></tr>
-          </tbody>
-        </table>
-        <div class="pagination">
-          <button class="btn-secondary-sm" onclick="historyPrevPage()">上一页</button>
-          <span id="history-page-info">-</span>
-          <button class="btn-secondary-sm" onclick="historyNextPage()">下一页</button>
-        </div>
-      </section>
-    </div>
-
-    <!-- 视频资源 Tab -->
-    <div id="tab-resources" class="tab-content">
-      <section class="card">
-        <div class="filters-row">
-          <input id="resource-search" type="text" placeholder="搜索 video_id 或标题" onkeyup="debounceResourceSearch()" />
-        </div>
-        <div id="resource-grid" class="resource-grid">
-          <p class="loading">加载中...</p>
-        </div>
-        <div class="pagination">
-          <button class="btn-secondary-sm" onclick="resourcePrevPage()">上一页</button>
-          <span id="resource-page-info">-</span>
-          <button class="btn-secondary-sm" onclick="resourceNextPage()">下一页</button>
-        </div>
-      </section>
-    </div>
-
-    <!-- 创建/上传 Tab -->
-    <div id="tab-create" class="tab-content">
-      <section class="card">
-        <h2>创建下载任务</h2>
-        <form id="create-task-form" onsubmit="handleCreateTask(event)">
-          <input name="video_url" type="text" placeholder="https://www.youtube.com/watch?v=..." required />
-          <div class="row">
-            <label><input name="include_audio" type="checkbox" checked /> 包含音频</label>
-            <label><input name="include_transcript" type="checkbox" checked /> 包含字幕</label>
-          </div>
-          <select name="priority">
-            <option value="normal">普通优先级</option>
-            <option value="high">高优先级</option>
-            <option value="urgent">紧急</option>
-          </select>
-          <button class="btn" type="submit">创建任务</button>
-        </form>
-      </section>
-
-      <section class="card">
-        <h2>人工上传</h2>
-        <form id="upload-form" onsubmit="handleUpload(event)">
-          <div class="row">
-            <input id="video-url" name="video_url" type="text" placeholder="https://www.youtube.com/watch?v=..." onblur="checkVideoStatus()" />
-            <button class="btn-secondary" type="button" onclick="checkVideoStatus()">检查状态</button>
-          </div>
-          <div id="status-check" class="status-check"><p>✓ 上传前可以先检查视频资源状态</p></div>
-
-          <details class="metadata-section">
-            <summary>可选元数据</summary>
-            <div class="grid">
-              <input name="title" type="text" placeholder="标题" />
-              <input name="author" type="text" placeholder="作者" />
-              <input name="duration" type="number" placeholder="时长(秒)" />
-              <input name="channel_id" type="text" placeholder="频道 ID" />
+      <!-- 任务队列 Tab -->
+      <div id="tab-queue" class="tab-content active">
+        <section class="card">
+          <div class="card-header">
+            <h2>正在下载</h2>
+            <div class="card-action">
+              <span class="status-dot status-processing"></span>
+              Running
             </div>
-            <textarea name="description" placeholder="描述"></textarea>
-          </details>
+          </div>
+          <div class="card-body">
+            <div id="downloading-tasks" class="task-list">
+              <div class="empty-state">
+                <p class="loading-state"><span class="spinner"></span> 加载中...</p>
+              </div>
+            </div>
+          </div>
+        </section>
 
-          <div class="row">
-            <input name="file" type="file" required />
-            <button id="upload-btn" class="btn" type="submit">上传</button>
+        <section class="card">
+          <div class="card-header">
+            <h2>等待队列</h2>
           </div>
+          <div class="card-body">
+            <div id="pending-tasks" class="task-list">
+              <div class="empty-state">
+                <p class="loading-state"><span class="spinner"></span> 加载中...</p>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
 
-          <div id="upload-progress" class="progress" style="display:none;">
-            <div class="progress-bar"></div>
-            <span class="progress-text">上传中...</span>
-          </div>
-        </form>
-      </section>
-    </div>
+      <!-- 任务历史 Tab -->
+      <div id="tab-history" class="tab-content">
+        <section class="card">
+          <div class="card-body">
+            <div class="filters-row">
+              <div class="select-wrapper">
+                <label for="status-filter" class="sr-only">状态</label>
+                <select id="status-filter" onchange="applyHistoryFilters()">
+                  <option value="">所有状态</option>
+                  <option value="completed">已完成</option>
+                  <option value="failed">失败</option>
+                  <option value="cancelled">已取消</option>
+                </select>
+              </div>
+              <div class="search-input-group">
+                <label for="search-filter" class="sr-only">搜索</label>
+                <input id="search-filter" type="text" placeholder="搜索 video_id 或标题" onkeyup="debounceSearch()" />
+              </div>
+              <div class="filter-group">
+                <span class="filter-label">开始:</span>
+                <input id="date-start" type="date" onchange="applyHistoryFilters()" aria-label="开始日期" />
+              </div>
+              <div class="filter-group">
+                <span class="filter-label">结束:</span>
+                <input id="date-end" type="date" onchange="applyHistoryFilters()" aria-label="结束日期" />
+              </div>
+            </div>
 
-    <!-- 设置 Tab -->
-    <div id="tab-settings" class="tab-content">
-      <section class="card">
-        <h2>Cookie 管理</h2>
+            <div class="table-responsive">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Video ID</th>
+                    <th>标题</th>
+                    <th>状态</th>
+                    <th>类型</th>
+                    <th>缓存</th>
+                    <th>创建时间</th>
+                    <th>完成时间</th>
+                  </tr>
+                </thead>
+                <tbody id="history-tbody">
+                  <tr>
+                    <td colspan="7" class="loading-state"><span class="spinner"></span> 加载中...</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
 
-        <div class="cookie-info">
-          <div class="info-row">
-            <span>文件路径:</span>
-            <strong id="cookie-path">-</strong>
+            <div class="pagination">
+              <button class="btn btn-secondary btn-sm" onclick="historyPrevPage()">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <polyline points="15 18 9 12 15 6"></polyline>
+                </svg>
+                上一页
+              </button>
+              <span id="history-page-info" class="page-info">-</span>
+              <button class="btn btn-secondary btn-sm" onclick="historyNextPage()">
+                下一页
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <polyline points="9 18 15 12 9 6"></polyline>
+                </svg>
+              </button>
+            </div>
           </div>
-          <div class="info-row">
-            <span>文件大小:</span>
-            <strong id="cookie-size">-</strong>
+        </section>
+      </div>
+
+      <!-- 视频资源 Tab -->
+      <div id="tab-resources" class="tab-content">
+        <section class="card">
+          <div class="card-body">
+            <div class="filters-row">
+              <div class="search-input-group full-width">
+                <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                  stroke-width="2">
+                  <circle cx="11" cy="11" r="8"></circle>
+                  <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                </svg>
+                <input id="resource-search" type="text" placeholder="搜索 video_id 或标题..."
+                  onkeyup="debounceResourceSearch()" />
+              </div>
+            </div>
+            <div id="resource-grid" class="resource-grid">
+              <div class="empty-state">
+                <p class="loading-state"><span class="spinner"></span> 加载中...</p>
+              </div>
+            </div>
+            <div class="pagination">
+              <button class="btn btn-secondary btn-sm" onclick="resourcePrevPage()">上一页</button>
+              <span id="resource-page-info" class="page-info">-</span>
+              <button class="btn btn-secondary btn-sm" onclick="resourceNextPage()">下一页</button>
+            </div>
           </div>
-          <div class="info-row">
-            <span>最后更新:</span>
-            <strong id="cookie-updated">-</strong>
-          </div>
+        </section>
+      </div>
+
+      <!-- 创建/上传 Tab -->
+      <div id="tab-create" class="tab-content">
+        <div class="grid-layout-2">
+          <section class="card">
+            <div class="card-header">
+              <h2>创建下载任务</h2>
+              <p class="card-subtitle">通过 URL 添加新任务到队列</p>
+            </div>
+            <div class="card-body">
+              <form id="create-task-form" onsubmit="handleCreateTask(event)">
+                <div class="form-group">
+                  <label>YouTube URL</label>
+                  <input name="video_url" type="text" placeholder="https://www.youtube.com/watch?v=..." required />
+                </div>
+
+                <div class="form-row">
+                  <div class="checkbox-card">
+                    <label class="checkbox-container">
+                      <input name="include_audio" type="checkbox" checked />
+                      <span class="checkmark"></span>
+                      <span class="label-text">包含音频</span>
+                    </label>
+                  </div>
+                  <div class="checkbox-card">
+                    <label class="checkbox-container">
+                      <input name="include_transcript" type="checkbox" checked />
+                      <span class="checkmark"></span>
+                      <span class="label-text">包含字幕</span>
+                    </label>
+                  </div>
+                </div>
+
+                <div class="form-group">
+                  <label>优先级</label>
+                  <div class="select-wrapper">
+                    <select name="priority">
+                      <option value="normal">普通 (Normal)</option>
+                      <option value="high">高 (High)</option>
+                      <option value="urgent">紧急 (Urgent)</option>
+                    </select>
+                  </div>
+                </div>
+
+                <button class="btn btn-primary btn-block" type="submit">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="12" y1="5" x2="12" y2="19"></line>
+                    <line x1="5" y1="12" x2="19" y2="12"></line>
+                  </svg>
+                  创建任务
+                </button>
+              </form>
+            </div>
+          </section>
+
+          <section class="card">
+            <div class="card-header">
+              <h2>人工上传</h2>
+              <p class="card-subtitle">上传已下载的资源文件</p>
+            </div>
+            <div class="card-body">
+              <form id="upload-form" onsubmit="handleUpload(event)">
+                <div class="form-group">
+                  <label>YouTube URL</label>
+                  <div class="input-with-button">
+                    <input id="video-url" name="video_url" type="text" placeholder="https://www.youtube.com/watch?v=..."
+                      onblur="checkVideoStatus()" />
+                    <button class="btn btn-secondary" type="button" onclick="checkVideoStatus()">检查</button>
+                  </div>
+                </div>
+
+                <div id="status-check" class="status-check-box">
+                  <p class="hint">✓ 上传前建议先检查视频状态</p>
+                </div>
+
+                <details class="metadata-section">
+                  <summary>
+                    <span>可选元数据</span>
+                    <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                      stroke-width="2">
+                      <polyline points="6 9 12 15 18 9"></polyline>
+                    </svg>
+                  </summary>
+                  <div class="metadata-grid">
+                    <input name="title" type="text" placeholder="标题" />
+                    <input name="author" type="text" placeholder="作者" />
+                    <input name="duration" type="number" placeholder="时长(秒)" />
+                    <input name="channel_id" type="text" placeholder="频道 ID" />
+                    <textarea name="description" placeholder="描述" rows="2"></textarea>
+                  </div>
+                </details>
+
+                <div class="form-group">
+                  <label>文件</label>
+                  <div class="file-drop-area">
+                    <input name="file" type="file" required id="file-input" />
+                    <div class="file-msg">点击或拖拽文件至此</div>
+                  </div>
+                </div>
+
+                <button id="upload-btn" class="btn btn-primary btn-block" type="submit">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                    <polyline points="17 8 12 3 7 8"></polyline>
+                    <line x1="12" y1="3" x2="12" y2="15"></line>
+                  </svg>
+                  开始上传
+                </button>
+
+                <div id="upload-progress" class="progress-container" style="display:none;">
+                  <div class="progress-bar"></div>
+                  <span class="progress-text">0%</span>
+                </div>
+              </form>
+            </div>
+          </section>
         </div>
+      </div>
 
-        <div class="cookie-editor">
-          <textarea id="cookie-content" placeholder="# Netscape HTTP Cookie File&#10;.youtube.com&#9;TRUE&#9;/&#9;FALSE&#9;0&#9;name&#9;value"></textarea>
-        </div>
-
-        <div class="cookie-actions">
-          <button class="btn" onclick="saveCookie()">保存 Cookie</button>
-          <button class="btn-secondary" onclick="loadCookie()">重新加载</button>
-          <button class="btn-secondary" onclick="validateCookie()">验证格式</button>
-          <button class="btn-danger" onclick="clearCookieEditor()">清空</button>
-        </div>
-
-        <div id="cookie-warnings" class="warnings"></div>
-
-        <details class="help-section">
-          <summary>帮助文档</summary>
-          <div class="help-content">
-            <h3>Cookie 格式说明</h3>
-            <p>Cookie 文件应遵循 Netscape 格式，每行包含 7 个 Tab 分隔的字段：</p>
-            <pre>域名&#9;标志&#9;路径&#9;安全&#9;过期时间&#9;名称&#9;值</pre>
-            <p>示例：</p>
-            <pre>.youtube.com&#9;TRUE&#9;/&#9;FALSE&#9;1735689600&#9;CONSENT&#9;YES+cb</pre>
-            <h3>如何获取 Cookie</h3>
-            <ol>
-              <li>使用浏览器扩展（如 Get cookies.txt LOCALLY）导出 YouTube Cookie</li>
-              <li>确保 Cookie 包含 .youtube.com 域名</li>
-              <li>将内容粘贴到编辑器中并保存</li>
-            </ol>
+      <!-- 设置 Tab -->
+      <div id="tab-settings" class="tab-content">
+        <section class="card">
+          <div class="card-header">
+            <h2>Cookie 管理</h2>
+            <p class="card-subtitle">YouTube Netscape 格式 Cookie</p>
           </div>
-        </details>
-      </section>
-    </div>
+          <div class="card-body">
+            <div class="cookie-stats-grid">
+              <div class="stat-item">
+                <span class="stat-label">文件路径</span>
+                <strong class="stat-value" id="cookie-path">-</strong>
+              </div>
+              <div class="stat-item">
+                <span class="stat-label">大小</span>
+                <strong class="stat-value" id="cookie-size">-</strong>
+              </div>
+              <div class="stat-item">
+                <span class="stat-label">更新时间</span>
+                <strong class="stat-value" id="cookie-updated">-</strong>
+              </div>
+            </div>
+
+            <div class="cookie-editor-wrapper">
+              <textarea id="cookie-content" class="code-editor"
+                placeholder="# Netscape HTTP Cookie File&#10;.youtube.com&#9;TRUE&#9;/&#9;FALSE&#9;0&#9;name&#9;value"
+                spellcheck="false"></textarea>
+            </div>
+
+            <div class="cookie-toolbar">
+              <button class="btn btn-primary" onclick="saveCookie()">保存 Cookie</button>
+              <button class="btn btn-secondary" onclick="loadCookie()">重新加载</button>
+              <button class="btn btn-secondary" onclick="validateCookie()">验证格式</button>
+              <button class="btn btn-danger" onclick="clearCookieEditor()">清空</button>
+            </div>
+
+            <div id="cookie-warnings" class="alerts-container"></div>
+
+            <details class="help-section">
+              <summary>
+                <span>帮助文档: Cookie 格式说明</span>
+                <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                  stroke-width="2">
+                  <polyline points="6 9 12 15 18 9"></polyline>
+                </svg>
+              </summary>
+              <div class="help-content">
+                <p>Cookie 文件应遵循 Netscape 格式，每行包含 7 个 Tab 分隔的字段：</p>
+                <div class="code-block">域名 标志 路径 安全 过期时间 名称 值</div>
+                <p>示例：</p>
+                <div class="code-block">.youtube.com TRUE / FALSE 1735689600 CONSENT YES+cb</div>
+                <h4>如何获取 Cookie</h4>
+                <ol>
+                  <li>使用浏览器扩展（如 Get cookies.txt LOCALLY）导出 YouTube Cookie</li>
+                  <li>确保 Cookie 包含 <code>.youtube.com</code> 域名</li>
+                  <li>将内容粘贴到编辑器中并保存</li>
+                </ol>
+              </div>
+            </details>
+          </div>
+        </section>
+      </div>
+    </main>
   </div>
 
   <!-- Modal 弹窗 -->
-  <div id="modal" class="modal" onclick="closeModal()">
-    <div class="modal-content" onclick="event.stopPropagation()">
-      <span class="modal-close" onclick="closeModal()">&times;</span>
-      <div id="modal-body"></div>
+  <div id="modal" class="modal-overlay" onclick="closeModal()">
+    <div class="modal-dialog" onclick="event.stopPropagation()">
+      <button class="modal-close-btn" onclick="closeModal()">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="18" y1="6" x2="6" y2="18"></line>
+          <line x1="6" y1="6" x2="18" y2="18"></line>
+        </svg>
+      </button>
+      <div id="modal-body" class="modal-body"></div>
     </div>
   </div>
 
   <!-- Toast 消息 -->
-  <div id="toast" class="toast"></div>
+  <div id="toast-container" class="toast-container"></div>
 
   <script src="/admin/app.js"></script>
 </body>
+
 </html>

@@ -29,12 +29,11 @@ window.addEventListener('DOMContentLoaded', () => {
   doSwitchTab(initialTab);
 });
 
-// 监听 URL hash 变化（支持浏览器前进/后退和直接修改 URL）
+// 监听 URL hash 变化
 window.addEventListener('hashchange', () => {
   const hash = window.location.hash.slice(1);
   const validTabs = ['queue', 'history', 'resources', 'create', 'settings'];
   if (hash && validTabs.includes(hash) && hash !== state.currentTab) {
-    // URL hash 变化且与当前 tab 不同时，切换 tab
     doSwitchTab(hash);
   }
 });
@@ -97,43 +96,29 @@ function checkApiKey() {
 }
 
 // ==================== Tab 管理 ====================
-/**
- * 切换 tab（公开函数，从用户交互调用）
- * @param {string} tabName - tab 名称
- */
 function switchTab(tabName) {
-  // 更新 URL hash，会自动触发 hashchange 事件
   window.location.hash = tabName;
 }
 
-/**
- * 实际执行 tab 切换（内部函数）
- * @param {string} tabName - tab 名称
- */
 function doSwitchTab(tabName) {
-  // 如果已经是当前 tab，不重复执行
-  if (state.currentTab === tabName) {
-    return;
-  }
+  if (state.currentTab === tabName) return;
 
   state.currentTab = tabName;
 
-  // 更新 Tab 按钮状态
-  document.querySelectorAll('.tab').forEach(btn => {
+  // Update Tab Buttons (Matched with new .tab-item class)
+  document.querySelectorAll('.tab-item').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.tab === tabName);
   });
 
-  // 更新内容区显示
+  // Update Content
   document.querySelectorAll('.tab-content').forEach(content => {
     content.classList.toggle('active', content.id === `tab-${tabName}`);
   });
 
-  // 更新 URL hash（如果不一致）
   if (window.location.hash !== `#${tabName}`) {
     window.location.hash = tabName;
   }
 
-  // 加载对应数据
   loadTabData(tabName);
 }
 
@@ -155,7 +140,6 @@ function loadTabData(tabName) {
       loadResources();
       break;
     case 'create':
-      // 创建/上传 Tab 不需要加载数据
       break;
     case 'settings':
       loadCookie();
@@ -181,7 +165,7 @@ async function loadQueue() {
 function renderDownloadingTasks(tasks) {
   const container = document.getElementById('downloading-tasks');
   if (tasks.length === 0) {
-    container.innerHTML = '<p class="empty">暂无正在下载的任务</p>';
+    container.innerHTML = '<div class="empty-state"><p class="loading-state">暂无正在下载的任务</p></div>';
     return;
   }
 
@@ -189,12 +173,12 @@ function renderDownloadingTasks(tasks) {
     <div class="task-item downloading">
       <div class="task-header">
         <span class="badge priority-${task.priority}">${task.priority}</span>
-        <strong>${escapeHtml(task.video_info?.title || task.video_id)}</strong>
+        <strong class="task-title">${escapeHtml(task.video_info?.title || task.video_id)}</strong>
       </div>
       <div class="task-meta">
-        <span>Video ID: ${task.video_id}</span>
-        <span>类型: ${getTaskType(task)}</span>
-        <span>开始时间: ${formatDate(task.started_at)}</span>
+        <span class="meta-item">Video ID: ${task.video_id}</span>
+        <span class="meta-item">类型: ${getTaskType(task)}</span>
+        <span class="meta-item">开始时间: ${formatDate(task.started_at)}</span>
       </div>
     </div>
   `).join('');
@@ -203,22 +187,21 @@ function renderDownloadingTasks(tasks) {
 function renderPendingTasks(tasks) {
   const container = document.getElementById('pending-tasks');
   if (tasks.length === 0) {
-    container.innerHTML = '<p class="empty">队列为空</p>';
+    container.innerHTML = '<div class="empty-state"><p class="loading-state">队列为空</p></div>';
     return;
   }
 
   container.innerHTML = tasks.map((task, index) => `
     <div class="task-item">
       <div class="task-header">
-        <span class="badge queue-position">队列 #${index + 1}</span>
-        <span class="badge priority-${task.priority}">${task.priority}</span>
-        <strong>${escapeHtml(task.video_info?.title || task.video_id)}</strong>
+        <div class="meta-item"><span class="badge priority-${task.priority}">${task.priority}</span> <span style="font-size:0.8em;color:#999">#${index + 1}</span></div>
+        <strong class="task-title" style="flex:1;margin:0 10px">${escapeHtml(task.video_info?.title || task.video_id)}</strong>
         <button class="btn-danger-sm" onclick="cancelTask('${task.task_id}')">取消</button>
       </div>
       <div class="task-meta">
-        <span>Video ID: ${task.video_id}</span>
-        <span>类型: ${getTaskType(task)}</span>
-        <span>创建时间: ${formatDate(task.created_at)}</span>
+        <span class="meta-item">Video ID: ${task.video_id}</span>
+        <span class="meta-item">类型: ${getTaskType(task)}</span>
+        <span class="meta-item">创建时间: ${formatDate(task.created_at)}</span>
       </div>
     </div>
   `).join('');
@@ -265,7 +248,7 @@ async function loadHistory() {
 function renderHistoryTable(tasks) {
   const tbody = document.getElementById('history-tbody');
   if (tasks.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="7" class="empty">暂无记录</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" class="loading-state">暂无记录</td></tr>';
     return;
   }
 
@@ -324,20 +307,20 @@ async function showTaskDetail(taskId) {
     const task = await apiRequest(`/api/v1/tasks/${taskId}`);
     const html = `
       <h2>任务详情</h2>
-      <div class="detail-grid">
-        <div><strong>任务 ID:</strong> ${task.task_id}</div>
-        <div><strong>Video ID:</strong> ${task.video_id}</div>
-        <div><strong>状态:</strong> <span class="badge status-${task.status}">${task.status}</span></div>
-        <div><strong>优先级:</strong> ${task.priority}</div>
-        <div><strong>标题:</strong> ${escapeHtml(task.video_info?.title || '-')}</div>
-        <div><strong>作者:</strong> ${escapeHtml(task.video_info?.author || '-')}</div>
-        <div><strong>时长:</strong> ${formatDuration(task.video_info?.duration)}</div>
-        <div><strong>请求类型:</strong> ${getTaskType(task)}</div>
-        <div><strong>缓存命中:</strong> ${getCacheInfo(task)}</div>
-        ${task.error_message ? `<div class="error-message"><strong>错误:</strong> ${escapeHtml(task.error_message)}</div>` : ''}
-        <div><strong>创建时间:</strong> ${formatDate(task.created_at)}</div>
-        <div><strong>开始时间:</strong> ${formatDate(task.started_at)}</div>
-        <div><strong>完成时间:</strong> ${formatDate(task.completed_at)}</div>
+      <div class="detail-list">
+        <div class="detail-item"><span class="detail-label">任务 ID:</span> <span class="detail-value">${task.task_id}</span></div>
+        <div class="detail-item"><span class="detail-label">Video ID:</span> <span class="detail-value">${task.video_id}</span></div>
+        <div class="detail-item"><span class="detail-label">状态:</span> <span class="detail-value"><span class="badge status-${task.status}">${task.status}</span></span></div>
+        <div class="detail-item"><span class="detail-label">优先级:</span> <span class="detail-value">${task.priority}</span></div>
+        <div class="detail-item"><span class="detail-label">标题:</span> <span class="detail-value">${escapeHtml(task.video_info?.title || '-')}</span></div>
+        <div class="detail-item"><span class="detail-label">作者:</span> <span class="detail-value">${escapeHtml(task.video_info?.author || '-')}</span></div>
+        <div class="detail-item"><span class="detail-label">时长:</span> <span class="detail-value">${formatDuration(task.video_info?.duration)}</span></div>
+        <div class="detail-item"><span class="detail-label">请求类型:</span> <span class="detail-value">${getTaskType(task)}</span></div>
+        <div class="detail-item"><span class="detail-label">缓存命中:</span> <span class="detail-value">${getCacheInfo(task)}</span></div>
+        ${task.error_message ? `<div class="detail-item error-box"><span class="detail-label">错误:</span> <span class="detail-value">${escapeHtml(task.error_message)}</span></div>` : ''}
+        <div class="detail-item"><span class="detail-label">创建时间:</span> <span class="detail-value">${formatDate(task.created_at)}</span></div>
+        <div class="detail-item"><span class="detail-label">开始时间:</span> <span class="detail-value">${formatDate(task.started_at)}</span></div>
+        <div class="detail-item"><span class="detail-label">完成时间:</span> <span class="detail-value">${formatDate(task.completed_at)}</span></div>
       </div>
       ${task.files ? `
         <h3>文件列表</h3>
@@ -379,7 +362,7 @@ async function loadResources() {
 function renderResourceGrid(resources) {
   const grid = document.getElementById('resource-grid');
   if (resources.length === 0) {
-    grid.innerHTML = '<p class="empty">暂无视频资源</p>';
+    grid.innerHTML = '<div class="empty-state"><p class="loading-state">暂无视频资源</p></div>';
     return;
   }
 
@@ -387,20 +370,24 @@ function renderResourceGrid(resources) {
     const title = res.video_info?.title || res.video_id;
     const author = res.video_info?.author || '未知';
     const thumbnail = res.video_info?.thumbnail || `https://i.ytimg.com/vi/${res.video_id}/default.jpg`;
+    const duration = formatDuration(res.video_info?.duration);
 
     return `
       <div class="resource-card">
-        <img src="${thumbnail}" alt="${escapeHtml(title)}" loading="lazy" onerror="this.src='data:image/svg+xml,%3Csvg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'120\\' height=\\'90\\'%3E%3Crect fill=\\'%23ddd\\' width=\\'120\\' height=\\'90\\'/%3E%3C/svg%3E'" />
+        <div class="thumbnail-wrapper">
+          <img src="${thumbnail}" alt="${escapeHtml(title)}" loading="lazy" onerror="this.src='/admin/placeholder.svg'" />
+          <span class="duration-badge">${duration}</span>
+        </div>
         <div class="resource-info">
-          <h3>${escapeHtml(title)}</h3>
-          <p>${escapeHtml(author)}</p>
-          <div class="resource-meta">
-            <span class="badge source-${res.upload_source}">${res.upload_source}</span>
-            <span>${res.audio_count} 音频</span>
-            <span>${res.transcript_count} 字幕</span>
+          <h3 class="resource-title" title="${escapeHtml(title)}">${escapeHtml(title)}</h3>
+          <p class="resource-author">${escapeHtml(author)}</p>
+          <div class="resource-tags">
+             <span class="tag-pill">${res.upload_source}</span>
+             <span class="tag-pill">${res.audio_count} 音频</span>
+             <span class="tag-pill">${res.transcript_count} 字幕</span>
           </div>
-          <div class="resource-actions">
-            <button class="btn-sm" onclick="showResourceDetail('${res.video_id}')">详情</button>
+          <div class="resource-footer">
+            <button class="btn-sm btn-secondary" onclick="showResourceDetail('${res.video_id}')">详情</button>
             <button class="btn-danger-sm" onclick="deleteResource('${res.video_id}')">删除</button>
           </div>
         </div>
@@ -446,61 +433,42 @@ async function showResourceDetail(videoId) {
     const resource = await apiRequest(`/api/v1/video-resources/${videoId}`);
     const html = `
       <h2>视频资源详情</h2>
-      <div class="detail-grid">
-        <div><strong>Video ID:</strong> ${resource.video_id}</div>
-        <div><strong>标题:</strong> ${escapeHtml(resource.video_info?.title || '-')}</div>
-        <div><strong>作者:</strong> ${escapeHtml(resource.video_info?.author || '-')}</div>
-        <div><strong>时长:</strong> ${formatDuration(resource.video_info?.duration)}</div>
-        <div><strong>有原生字幕:</strong> ${resource.has_native_transcript ? '是' : '否'}</div>
-        <div><strong>创建时间:</strong> ${formatDate(resource.created_at)}</div>
-        <div><strong>更新时间:</strong> ${formatDate(resource.updated_at)}</div>
+      <div class="detail-list">
+        <div class="detail-item"><span class="detail-label">Video ID:</span> <span class="detail-value">${resource.video_id}</span></div>
+        <div class="detail-item"><span class="detail-label">标题:</span> <span class="detail-value">${escapeHtml(resource.video_info?.title || '-')}</span></div>
+        <div class="detail-item"><span class="detail-label">作者:</span> <span class="detail-value">${escapeHtml(resource.video_info?.author || '-')}</span></div>
+        <div class="detail-item"><span class="detail-label">时长:</span> <span class="detail-value">${formatDuration(resource.video_info?.duration)}</span></div>
+        <div class="detail-item"><span class="detail-label">有原生字幕:</span> <span class="detail-value">${resource.has_native_transcript ? '是' : '否'}</span></div>
+        <div class="detail-item"><span class="detail-label">创建时间:</span> <span class="detail-value">${formatDate(resource.created_at)}</span></div>
+        <div class="detail-item"><span class="detail-label">更新时间:</span> <span class="detail-value">${formatDate(resource.updated_at)}</span></div>
       </div>
       <h3>文件列表 (${resource.files.length})</h3>
-      <table class="modal-table">
-        <thead>
-          <tr>
-            <th>类型</th>
-            <th>文件名</th>
-            <th>大小</th>
-            <th>格式</th>
-            <th>来源</th>
-            <th>创建时间</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${resource.files.map(f => `
+      <div class="table-responsive">
+        <table>
+          <thead>
             <tr>
-              <td>${f.file_type}</td>
-              <td>${escapeHtml(f.filename)}</td>
-              <td>${formatBytes(f.size)}</td>
-              <td>${f.format || '-'}</td>
-              <td><span class="badge source-${f.upload_source}">${f.upload_source}</span></td>
-              <td>${formatDate(f.created_at)}</td>
+              <th>类型</th>
+              <th>文件名</th>
+              <th>大小</th>
+              <th>格式</th>
+              <th>来源</th>
+              <th>创建时间</th>
             </tr>
-          `).join('')}
-        </tbody>
-      </table>
-      <h3>最近任务 (${resource.recent_tasks.length})</h3>
-      <table class="modal-table">
-        <thead>
-          <tr>
-            <th>任务 ID</th>
-            <th>状态</th>
-            <th>缓存命中</th>
-            <th>创建时间</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${resource.recent_tasks.map(t => `
-            <tr>
-              <td>${t.id.slice(0, 8)}</td>
-              <td><span class="badge status-${t.status}">${t.status}</span></td>
-              <td>${t.reused_audio || t.reused_transcript ? '是' : '否'}</td>
-              <td>${formatDate(t.created_at)}</td>
-            </tr>
-          `).join('')}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            ${resource.files.map(f => `
+              <tr>
+                <td>${f.file_type}</td>
+                <td>${escapeHtml(f.filename)}</td>
+                <td>${formatBytes(f.size)}</td>
+                <td>${f.format || '-'}</td>
+                <td><span class="badge source-${f.upload_source}">${f.upload_source}</span></td>
+                <td>${formatDate(f.created_at)}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
     `;
     showModal(html);
   } catch (error) {
@@ -546,7 +514,7 @@ async function handleCreateTask(event) {
   }
 }
 
-// ==================== 人工上传（复用原有逻辑）====================
+// ==================== 人工上传 ====================
 async function checkVideoStatus() {
   const videoUrl = document.getElementById('video-url').value.trim();
   if (!videoUrl) return;
@@ -588,6 +556,7 @@ function displayVideoStatus(status) {
 
 function showStatusCheck(message, type) {
   const el = document.getElementById('status-check');
+  el.className = `status-check-box ${type}`; // Update class for styling
   el.innerHTML = `<p class="${type}">${message}</p>`;
 }
 
@@ -619,11 +588,15 @@ async function handleUpload(event) {
       if (xhr.status === 200 || xhr.status === 201) {
         showToast('上传成功', 'success');
         form.reset();
-        showStatusCheck('✓ 上传前可以先检查视频资源状态', 'info');
+        showStatusCheck('✓ 上传前建议先检查视频状态', 'info');
         switchTab('resources');
       } else {
-        const error = JSON.parse(xhr.responseText);
-        showToast('上传失败: ' + error.detail, 'error');
+        try {
+          const error = JSON.parse(xhr.responseText);
+          showToast('上传失败: ' + error.detail, 'error');
+        } catch (e) {
+          showToast('上传失败: ' + xhr.responseText, 'error');
+        }
       }
       progressDiv.style.display = 'none';
       uploadBtn.disabled = false;
@@ -761,6 +734,7 @@ function formatDate(dateString) {
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
+    second: '2-digit'
   });
 }
 
@@ -773,6 +747,7 @@ function formatDuration(seconds) {
 }
 
 function escapeHtml(text) {
+  if (!text) return '';
   const div = document.createElement('div');
   div.textContent = text;
   return div.innerHTML;
@@ -794,20 +769,52 @@ function getCacheInfo(task) {
 
 // ==================== Modal 和 Toast ====================
 function showModal(html) {
-  document.getElementById('modal-body').innerHTML = html;
-  document.getElementById('modal').style.display = 'flex';
+  const modal = document.getElementById('modal');
+  const body = document.getElementById('modal-body');
+
+  if (html) {
+    body.innerHTML = html;
+  }
+
+  modal.style.display = 'flex';
+  document.body.style.overflow = 'hidden'; // Prevent scrolling
 }
 
 function closeModal() {
   document.getElementById('modal').style.display = 'none';
+  document.body.style.overflow = '';
 }
 
-function showToast(message, type = 'info') {
-  const toast = document.getElementById('toast');
-  toast.textContent = message;
-  toast.className = `toast ${type} show`;
+// Close Modal on Esc key
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    closeModal();
+  }
+});
 
+function showToast(message, type = 'info') {
+  const container = document.getElementById('toast-container');
+  if (!container) return;
+
+  const toast = document.createElement('div');
+  toast.className = `toast ${type}`;
+
+  // Icon based on type
+  let icon = '';
+  switch (type) {
+    case 'success': icon = '<svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"></polyline></svg>'; break;
+    case 'error': icon = '<svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>'; break;
+    case 'warning': icon = '<svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>'; break;
+    default: icon = '<svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>';
+  }
+
+  toast.innerHTML = `${icon}<span>${escapeHtml(message)}</span>`;
+  container.appendChild(toast);
+
+  // Auto remove
   setTimeout(() => {
-    toast.classList.remove('show');
+    toast.style.opacity = '0';
+    toast.style.transform = 'translateY(10px)'; // Fall down
+    setTimeout(() => toast.remove(), 300);
   }, 3000);
 }
