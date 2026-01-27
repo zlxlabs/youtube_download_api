@@ -201,6 +201,37 @@ def cleanup_old_backups(cookie_path: Path, keep: int = 10) -> None:
         logger.error(f"Failed to cleanup old backups: {e}")
 
 
+# ==================== Settings Endpoints ====================
+
+
+class ConfigResponse(BaseModel):
+    """系统配置响应模型。"""
+
+    timezone: str = Field(description="系统时区配置")
+    debug: bool = Field(description="调试模式")
+    file_retention_days: int = Field(description="文件保留天数")
+
+
+@router.get(
+    "/config",
+    response_model=ConfigResponse,
+    summary="获取系统配置",
+    description="获取系统配置信息（公开接口，无需鉴权）。",
+)
+async def get_config() -> ConfigResponse:
+    """
+    获取系统配置信息。
+
+    返回时区、调试模式、文件保留期等配置。
+    """
+    settings = get_settings()
+    return ConfigResponse(
+        timezone=settings.tz,
+        debug=settings.debug,
+        file_retention_days=settings.file_retention_days,
+    )
+
+
 # ==================== Cookie Endpoints ====================
 
 

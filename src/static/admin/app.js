@@ -11,10 +11,14 @@ const state = {
     resources: { search: '' },
   },
   searchDebounceTimer: null,
+  timezone: 'Asia/Shanghai', // 默认时区，将从服务器加载
 };
 
 // ==================== 初始化 ====================
-window.addEventListener('DOMContentLoaded', () => {
+window.addEventListener('DOMContentLoaded', async () => {
+  // 加载服务器配置（时区等）
+  await loadServerConfig();
+
   if (state.apiKey) {
     document.getElementById('api-key').value = state.apiKey;
   }
@@ -28,6 +32,20 @@ window.addEventListener('DOMContentLoaded', () => {
   state.currentTab = '';
   doSwitchTab(initialTab);
 });
+
+// 加载服务器配置
+async function loadServerConfig() {
+  try {
+    const response = await fetch('/api/v1/settings/config');
+    if (response.ok) {
+      const config = await response.json();
+      state.timezone = config.timezone;
+      console.log(`Loaded server timezone: ${state.timezone}`);
+    }
+  } catch (error) {
+    console.warn('Failed to load server config, using default timezone:', error);
+  }
+}
 
 // 监听 URL hash 变化
 window.addEventListener('hashchange', () => {
@@ -728,13 +746,16 @@ function formatBytes(bytes) {
 function formatDate(dateString) {
   if (!dateString) return '-';
   const date = new Date(dateString);
+
+  // 使用服务器配置的时区格式化时间
   return date.toLocaleString('zh-CN', {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
-    second: '2-digit'
+    second: '2-digit',
+    timeZone: state.timezone,
   });
 }
 
