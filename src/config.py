@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
     model_config = SettingsConfigDict(
-        env_file=os.getenv("ENV_FILE", ".env"),
+        env_file=os.getenv("ENV_FILE", str(Path(__file__).parent.parent / ".env")),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
@@ -31,10 +31,10 @@ class Settings(BaseSettings):
 
     # ============ Service Configuration ============
     host: str = Field(default="0.0.0.0", description="Server host")
-    port: int = Field(default=8000, description="Server port")
+    port: int = Field(default=8011, description="Server port")
     debug: bool = Field(default=False, description="Debug mode")
     base_url: str = Field(
-        default="http://localhost:8000",
+        default="http://localhost:8011",
         description="Base URL for file download links (e.g., https://your-domain.com)",
     )
 

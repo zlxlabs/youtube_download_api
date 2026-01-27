@@ -40,6 +40,19 @@ try {
     Write-Host "Warning: pot-provider may not be ready yet" -ForegroundColor Yellow
 }
 
-# Start the development server
+# Load .env file and start the development server
 Write-Host "Starting development server..." -ForegroundColor Green
-uv run uvicorn src.main:app --reload --host 127.0.0.1 --port 8000
+
+# Load environment variables from .env file
+Get-Content .env | ForEach-Object {
+    if ($_ -match '^([^#].+?)=(.*)$') {
+        $name = $matches[1].Trim()
+        $value = $matches[2].Trim()
+        [Environment]::SetEnvironmentVariable($name, $value, "Process")
+    }
+}
+
+# Get port from environment or use default
+$port = if ($env:PORT) { $env:PORT } else { "8011" }
+
+uv run uvicorn src.main:app --reload --host 127.0.0.1 --port $port

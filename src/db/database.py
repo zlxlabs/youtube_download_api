@@ -413,6 +413,228 @@ class Database:
         await self.create_video_resource(resource)
         return resource
 
+    async def list_video_resources(
+        self,
+        search: Optional[str] = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """
+        列出视频资源，支持搜索和分页。
+
+        Args:
+            search: 搜索关键词（匹配 video_id 或标题）
+            limit: 每页数量
+            offset: 偏移量
+
+        Returns:
+            元组 (资源列表, 总数)
+            资源列表中每项包含：
+            - video_id: 视频 ID
+            - video_info: 视频信息字典
+            - has_native_transcript: 是否有原生字幕
+            - audio_count: 音频文件数
+            - transcript_count: 字幕文件数
+            - upload_source: 上传来源 (manual/auto)
+            - created_at: 创建时间
+            - updated_at: 更新时间
+        """
+        # 构建查询条件
+        where_clause = "WHERE 1=1"
+        params: list[Any] = []
+
+        if search:
+            where_clause += " AND (vr.video_id LIKE ? OR json_extract(vr.video_info, '$.title') LIKE ?)"
+            search_pattern = f"%{search}%"
+            params.extend([search_pattern, search_pattern])
+
+        # 获取总数
+        count_sql = f"""
+            SELECT COUNT(*)
+            FROM video_resources vr
+            {where_clause}
+        """
+        count_cursor = await self.execute(count_sql, tuple(params))
+        total = (await count_cursor.fetchone())[0]
+
+        # 获取分页数据（使用 LEFT JOIN 聚合文件统计）
+        params.extend([limit, offset])
+        query_sql = f"""
+            SELECT
+                vr.video_id,
+                vr.video_info,
+                vr.has_native_transcript,
+                vr.created_at,
+                vr.updated_at,
+                COUNT(CASE WHEN f.file_type = 'audio' THEN 1 END) as audio_count,
+                COUNT(CASE WHEN f.file_type = 'transcript' THEN 1 END) as transcript_count,
+                MAX(CASE WHEN f.upload_source = 'manual' THEN 'manual' ELSE 'auto' END) as upload_source
+            FROM video_resources vr
+            LEFT JOIN files f ON vr.video_id = f.video_id
+            {where_clause}
+            GROUP BY vr.video_id
+            ORDER BY vr.updated_at DESC
+            LIMIT ? OFFSET ?
+        """
+        cursor = await self.execute(query_sql, tuple(params))
+        rows = await cursor.fetchall()
+
+        # 转换为字典列表
+        resources = []
+        for row in rows:
+            video_info_dict = None
+            if row["video_info"]:
+                video_info_dict = json.loads(row["video_info"])
+
+            has_native = row["has_native_transcript"]
+            has_native_transcript = None
+            if has_native is not None:
+                has_native_transcript = bool(has_native)
+
+            # 将 datetime 转换为 ISO 格式字符串以便序列化
+            # SQLite 可能返回字符串或 datetime 对象
+            created_at_val = row["created_at"]
+            updated_at_val = row["updated_at"]
+
+            if created_at_val:
+                created_at_str = created_at_val.isoformat() if hasattr(created_at_val, 'isoformat') else str(created_at_val)
+            else:
+                created_at_str = None
+
+            if updated_at_val:
+                updated_at_str = updated_at_val.isoformat() if hasattr(updated_at_val, 'isoformat') else str(updated_at_val)
+            else:
+                updated_at_str = None
+
+            resources.append({
+                "video_id": row["video_id"],
+                "video_info": video_info_dict,
+                "has_native_transcript": has_native_transcript,
+                "audio_count": row["audio_count"],
+                "transcript_count": row["transcript_count"],
+                "upload_source": row["upload_source"],
+                "created_at": created_at_str,
+                "updated_at": updated_at_str,
+            })
+
+        logger.debug(f"Listed {len(resources)} video resources (total: {total})")
+        return resources, total
+
+    async def get_video_resource_detail(self, video_id: str) -> Optional[dict[str, Any]]:
+        """
+        获取视频资源完整信息。
+
+        Args:
+            video_id: YouTube 视频 ID
+
+        Returns:
+            包含视频信息、文件列表、任务历史的字典，或 None（如果不存在）
+        """
+        # 获取视频资源基本信息
+        resource = await self.get_video_resource(video_id)
+        if not resource:
+            return None
+
+        # 获取关联的文件列表
+        files = await self.get_files_by_video(video_id)
+
+        # 获取相关任务历史（最近 10 条）
+        cursor = await self.execute(
+            """
+            SELECT * FROM tasks
+            WHERE video_id = ?
+            ORDER BY created_at DESC
+            LIMIT 10
+            """,
+            (video_id,),
+        )
+        task_rows = await cursor.fetchall()
+        tasks = [self._row_to_task(row) for row in task_rows]
+
+        # 构建返回结构（将 datetime 转换为 ISO 格式字符串）
+        # 辅助函数：安全地转换 datetime 为字符串
+        def to_iso_string(dt):
+            if not dt:
+                return None
+            return dt.isoformat() if hasattr(dt, 'isoformat') else str(dt)
+
+        result = {
+            "video_id": resource.video_id,
+            "video_info": resource.video_info.to_dict() if resource.video_info else None,
+            "has_native_transcript": resource.has_native_transcript,
+            "created_at": to_iso_string(resource.created_at),
+            "updated_at": to_iso_string(resource.updated_at),
+            "files": [
+                {
+                    "id": f.id,
+                    "file_type": f.file_type.value,
+                    "filename": f.filename,
+                    "filepath": f.filepath,
+                    "size": f.size,
+                    "format": f.format,
+                    "quality": f.quality,
+                    "language": f.language,
+                    "upload_source": f.upload_source,
+                    "original_format": f.original_format,
+                    "created_at": to_iso_string(f.created_at),
+                }
+                for f in files
+            ],
+            "recent_tasks": [
+                {
+                    "id": t.id,
+                    "status": t.status.value,
+                    "priority": t.priority.value,
+                    "include_audio": t.include_audio,
+                    "include_transcript": t.include_transcript,
+                    "reused_audio": t.reused_audio,
+                    "reused_transcript": t.reused_transcript,
+                    "error_code": t.error_code.value if t.error_code else None,
+                    "error_message": t.error_message,
+                    "created_at": to_iso_string(t.created_at),
+                    "completed_at": to_iso_string(t.completed_at),
+                }
+                for t in tasks
+            ],
+        }
+
+        logger.debug(f"Fetched video resource detail: {video_id}")
+        return result
+
+    async def delete_video_resource(self, video_id: str) -> list[str]:
+        """
+        删除视频资源（使用事务）。
+
+        级联删除 files 表记录，保留 tasks 表记录作为审计日志。
+
+        Args:
+            video_id: YouTube 视频 ID
+
+        Returns:
+            被删除文件的路径列表（用于后续物理删除）
+        """
+        # 先获取所有关联的文件路径
+        files = await self.get_files_by_video(video_id)
+        file_paths = [f.filepath for f in files]
+
+        async with self.transaction():
+            # 删除关联的文件记录
+            await self.execute(
+                "DELETE FROM files WHERE video_id = ?",
+                (video_id,)
+            )
+
+            # 删除视频资源记录
+            await self.execute(
+                "DELETE FROM video_resources WHERE video_id = ?",
+                (video_id,)
+            )
+
+            # 注意：不删除 tasks 表记录，保留作为审计日志
+
+        logger.info(f"Deleted video resource: {video_id} (removed {len(file_paths)} files)")
+        return file_paths
+
     # ==================== File Operations ====================
 
     async def create_file(self, file: FileRecord) -> None:
@@ -641,14 +863,20 @@ class Database:
     async def list_tasks(
         self,
         status: Optional[TaskStatus] = None,
+        search: Optional[str] = None,
+        created_after: Optional[datetime] = None,
+        created_before: Optional[datetime] = None,
         limit: int = 20,
         offset: int = 0,
     ) -> tuple[list[Task], int]:
         """
-        List tasks with pagination.
+        List tasks with pagination and filters.
 
         Args:
             status: Filter by status.
+            search: Search keyword (matches video_id or video title from video_info).
+            created_after: Filter tasks created after this datetime.
+            created_before: Filter tasks created before this datetime.
             limit: Maximum number of results.
             offset: Number of results to skip.
 
@@ -661,6 +889,28 @@ class Database:
         if status:
             where_clause += " AND status = ?"
             params.append(status.value)
+
+        if search:
+            # 搜索 video_id 或从 video_resources 表中获取标题
+            where_clause += """
+                AND (
+                    tasks.video_id LIKE ?
+                    OR tasks.video_id IN (
+                        SELECT video_id FROM video_resources
+                        WHERE json_extract(video_info, '$.title') LIKE ?
+                    )
+                )
+            """
+            search_pattern = f"%{search}%"
+            params.extend([search_pattern, search_pattern])
+
+        if created_after:
+            where_clause += " AND created_at >= ?"
+            params.append(created_after)
+
+        if created_before:
+            where_clause += " AND created_at <= ?"
+            params.append(created_before)
 
         count_cursor = await self.execute(
             f"SELECT COUNT(*) FROM tasks {where_clause}", tuple(params)
@@ -681,6 +931,7 @@ class Database:
         rows = await cursor.fetchall()
         tasks = [self._row_to_task(row) for row in rows]
 
+        logger.debug(f"Listed {len(tasks)} tasks (total: {total}, filters: status={status}, search={search})")
         return tasks, total
 
     async def get_pending_tasks(self, limit: int = 10) -> list[Task]:
@@ -1057,6 +1308,17 @@ class Database:
 
 # Global database instance (initialized in main.py)
 db: Optional[Database] = None
+
+
+def set_database(database: Database) -> None:
+    """
+    设置全局数据库实例。
+
+    Args:
+        database: 数据库实例
+    """
+    global db
+    db = database
 
 
 async def get_database() -> Database:

@@ -47,7 +47,7 @@ cp .env.example .env
 # 4. 启动开发环境 (Windows)
 .\scripts\dev.ps1
 # 或者手动运行
-uv sync && uv run uvicorn src.main:app --host 127.0.0.1 --port 8000
+uv sync && uv run uvicorn src.main:app --host 127.0.0.1 --port 8011
 
 # Linux/Mac
 chmod +x scripts/dev.sh

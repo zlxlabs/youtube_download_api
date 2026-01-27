@@ -143,16 +143,54 @@ async def list_tasks(
     status_filter: Optional[TaskStatus] = Query(
         None, alias="status", description="Filter by task status"
     ),
+    search: Optional[str] = Query(
+        None, description="Search keyword (matches video_id or video title)"
+    ),
+    created_after: Optional[str] = Query(
+        None, description="Filter tasks created after this datetime (ISO 8601 format)"
+    ),
+    created_before: Optional[str] = Query(
+        None, description="Filter tasks created before this datetime (ISO 8601 format)"
+    ),
     limit: int = Query(20, ge=1, le=100, description="Maximum results"),
     offset: int = Query(0, ge=0, description="Number of results to skip"),
 ) -> TaskListResponse:
-    """List tasks with pagination."""
+    """List tasks with pagination and filters."""
     try:
+        # Parse datetime strings
+        created_after_dt = None
+        created_before_dt = None
+
+        if created_after:
+            try:
+                from datetime import datetime
+                created_after_dt = datetime.fromisoformat(created_after.replace("Z", "+00:00"))
+            except ValueError as e:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid created_after format: {e}",
+                )
+
+        if created_before:
+            try:
+                from datetime import datetime
+                created_before_dt = datetime.fromisoformat(created_before.replace("Z", "+00:00"))
+            except ValueError as e:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid created_before format: {e}",
+                )
+
         return await task_service.list_tasks(
             status=status_filter,
+            search=search,
+            created_after=created_after_dt,
+            created_before=created_before_dt,
             limit=limit,
             offset=offset,
         )
+    except HTTPException:
+        raise
     except aiosqlite.Error as e:
         logger.error(f"Database error during task listing: {e}")
         raise HTTPException(

@@ -309,6 +309,9 @@ class TaskService:
     async def list_tasks(
         self,
         status: Optional[TaskStatus] = None,
+        search: Optional[str] = None,
+        created_after: Optional[datetime] = None,
+        created_before: Optional[datetime] = None,
         limit: int = 20,
         offset: int = 0,
     ) -> TaskListResponse:
@@ -317,6 +320,9 @@ class TaskService:
 
         Args:
             status: Filter by task status.
+            search: Search keyword (matches video_id or video title).
+            created_after: Filter tasks created after this datetime.
+            created_before: Filter tasks created before this datetime.
             limit: Maximum number of results (max 100).
             offset: Number of results to skip.
 
@@ -326,7 +332,14 @@ class TaskService:
         # Enforce limit
         limit = min(limit, 100)
 
-        tasks, total = await self.db.list_tasks(status=status, limit=limit, offset=offset)
+        tasks, total = await self.db.list_tasks(
+            status=status,
+            search=search,
+            created_after=created_after,
+            created_before=created_before,
+            limit=limit,
+            offset=offset,
+        )
 
         task_responses = []
         for task in tasks:
