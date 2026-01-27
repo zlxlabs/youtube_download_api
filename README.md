@@ -41,13 +41,13 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # 3. 复制配置文件
-cp .env.example .env.development
-# 编辑 .env.development，填入必要配置
+cp .env.example .env
+# 编辑 .env，填入必要配置
 
 # 4. 启动开发环境 (Windows)
 .\scripts\dev.ps1
 # 或者手动运行
-uv sync && $env:ENV_FILE=".env.development"; uv run uvicorn src.main:app --host 127.0.0.1 --port 8000
+uv sync && uv run uvicorn src.main:app --host 127.0.0.1 --port 8000
 
 # Linux/Mac
 chmod +x scripts/dev.sh
@@ -58,8 +58,8 @@ chmod +x scripts/dev.sh
 
 ```bash
 # 1. 复制生产配置
-cp .env.example .env.production
-# 编辑 .env.production
+cp .env.example .env
+# 编辑 .env
 
 # 2. 构建并启动
 docker-compose up -d --build
@@ -579,7 +579,7 @@ def verify_signature(body: bytes, signature: str, secret: str) -> bool:
 ### 开发环境配置示例
 
 ```bash
-# .env.development
+# .env
 DEBUG=true
 API_KEY=dev-test-key-12345
 POT_SERVER_URL=http://localhost:4416

@@ -19,11 +19,11 @@ fi
 echo -e "\033[33mSyncing dependencies with uv...\033[0m"
 uv sync --prerelease=allow
 
-# Check if .env.development exists
-if [ ! -f ".env.development" ]; then
-    echo -e "\033[33mCreating .env.development from template...\033[0m"
-    cp .env.example .env.development
-    echo -e "\033[31mPlease edit .env.development with your configuration\033[0m"
+# Check if .env exists
+if [ ! -f ".env" ]; then
+    echo -e "\033[33mCreating .env from template...\033[0m"
+    cp .env.example .env
+    echo -e "\033[31mPlease edit .env with your configuration\033[0m"
     exit 1
 fi
 
@@ -41,9 +41,6 @@ if curl -s -f http://localhost:4416/health > /dev/null 2>&1; then
 else
     echo -e "\033[33mWarning: pot-provider may not be ready yet\033[0m"
 fi
-
-# Set environment file
-export ENV_FILE=".env.development"
 
 # Start the development server
 echo -e "\033[32mStarting development server...\033[0m"

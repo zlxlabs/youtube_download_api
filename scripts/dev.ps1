@@ -16,11 +16,11 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
 Write-Host "Syncing dependencies with uv..." -ForegroundColor Yellow
 uv sync --prerelease=allow
 
-# Check if .env.development exists
-if (-not (Test-Path ".\.env.development")) {
-    Write-Host "Creating .env.development from template..." -ForegroundColor Yellow
-    Copy-Item ".\.env.example" ".\.env.development"
-    Write-Host "Please edit .env.development with your configuration" -ForegroundColor Red
+# Check if .env exists
+if (-not (Test-Path ".\.env")) {
+    Write-Host "Creating .env from template..." -ForegroundColor Yellow
+    Copy-Item ".\.env.example" ".\.env"
+    Write-Host "Please edit .env with your configuration" -ForegroundColor Red
     exit 1
 }
 
@@ -39,9 +39,6 @@ try {
 } catch {
     Write-Host "Warning: pot-provider may not be ready yet" -ForegroundColor Yellow
 }
-
-# Set environment file
-$env:ENV_FILE = ".env.development"
 
 # Start the development server
 Write-Host "Starting development server..." -ForegroundColor Green

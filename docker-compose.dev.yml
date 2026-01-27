@@ -1,12 +1,15 @@
 version: "3.8"
 
-# Development compose file - only runs pot-provider
-# The main app runs locally for easier debugging
-
 services:
   pot-provider:
     image: brainicism/bgutil-ytdlp-pot-provider
     container_name: pot-provider-dev
     restart: unless-stopped
     ports:
-      - "4416:4416"
+      - "${POT_PORT:-4416}:4416"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4416/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
