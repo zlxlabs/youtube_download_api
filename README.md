@@ -101,6 +101,7 @@ docker-compose -f docker-compose.dev.yml up -d
 | GET | `/api/v1/video-resources` | 列出视频资源 | 需要 |
 | GET | `/api/v1/video-resources/{video_id}` | 视频资源详情 | 需要 |
 | DELETE | `/api/v1/video-resources/{video_id}` | 删除视频资源 | 需要 |
+| GET | `/api/v1/videos/{video_id}/info` | 查询视频元数据 | 需要 |
 | GET | `/api/v1/settings/config` | 获取系统配置 | 公开 |
 | GET | `/api/v1/settings/cookie` | 获取 Cookie 信息 | 需要 |
 | PUT | `/api/v1/settings/cookie` | 更新 Cookie | 需要 |
@@ -335,6 +336,113 @@ curl -H "X-API-Key: your-api-key" \
 curl -X DELETE -H "X-API-Key: your-api-key" \
   "http://localhost:8000/api/v1/video-resources/dQw4w9WgXcQ"
 ```
+
+---
+
+## 视频元数据查询
+
+快速获取 YouTube 视频元数据（标题、作者、时长等），无需下载文件。
+
+### 功能特性
+
+- ✅ **快速响应**：< 1 秒返回（相比下载任务的 30-120 秒）
+- ✅ **数据库缓存**：元数据永久缓存，重复查询无需 API 调用
+- ✅ **智能降级**：优先使用 YouTube Data API，自动降级到 ytdlp/tikhub
+- ✅ **无需下载**：仅获取元数据，不占用存储空间
+
+### 配置 YouTube Data API（可选）
+
+配置官方 API 可获得更快的响应速度和更高的稳定性：
+
+```bash
+# .env
+YOUTUBE_DATA_API_KEY=AIzaSy...  # 从 Google Cloud Console 获取
+
+# 未配置时自动降级到 ytdlp（免费但可能较慢）
+```
+
+**获取 API Key**：
+1. 访问 [Google Cloud Console](https://console.cloud.google.com/apis/credentials)
+2. 创建项目并启用 YouTube Data API v3
+3. 创建 API Key
+4. 配额：10,000 units/天（videos.list = 1 unit）
+
+### 查询视频元数据
+
+```bash
+curl -H "X-API-Key: your-api-key" \
+  "http://localhost:8000/api/v1/videos/dQw4w9WgXcQ/info"
+```
+
+**响应示例**：
+```json
+{
+  "video_id": "dQw4w9WgXcQ",
+  "video_info": {
+    "title": "Rick Astley - Never Gonna Give You Up",
+    "author": "Rick Astley",
+    "channel_id": "UCuAXFkgsw1L7xaCfnd5JJOw",
+    "duration": 213,
+    "description": "Official music video...",
+    "upload_date": "20091025",
+    "view_count": 1500000000,
+    "thumbnail": "https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg"
+  },
+  "cached": false,
+  "metadata_source": "youtube_data_api",
+  "fetched_at": "2026-01-28T12:00:00Z"
+}
+```
+
+**响应字段说明**：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `video_id` | string | YouTube 视频 ID |
+| `video_info` | object | 视频元数据对象 |
+| `cached` | boolean | `true` = 从数据库缓存读取，`false` = 实时获取 |
+| `metadata_source` | string | 元数据来源：`cached` / `youtube_data_api` / `ytdlp` / `tikhub` |
+| `fetched_at` | datetime | 元数据获取/更新时间 |
+
+### 使用场景
+
+**场景1：批量视频信息采集**
+```bash
+# 快速获取多个视频的元数据
+for video_id in dQw4w9WgXcQ abc123xyz; do
+  curl -H "X-API-Key: your-api-key" \
+    "http://localhost:8000/api/v1/videos/$video_id/info" | jq '.video_info.title'
+done
+```
+
+**场景2：预检查视频可用性**
+```bash
+# 下载前先检查视频是否存在
+VIDEO_ID="dQw4w9WgXcQ"
+if curl -s -H "X-API-Key: your-api-key" \
+  "http://localhost:8000/api/v1/videos/$VIDEO_ID/info" | jq -e '.video_info.title'; then
+  echo "Video exists, proceed to download"
+else
+  echo "Video not found"
+fi
+```
+
+**场景3：获取视频时长**
+```bash
+# 获取视频时长（秒）
+curl -s -H "X-API-Key: your-api-key" \
+  "http://localhost:8000/api/v1/videos/dQw4w9WgXcQ/info" | jq '.video_info.duration'
+```
+
+### 与下载任务的区别
+
+| 特性 | 元数据查询 `/videos/{id}/info` | 下载任务 `/tasks` |
+|------|-------------------------------|------------------|
+| 用途 | 查询视频信息 | 下载音频/字幕 |
+| 响应时间 | < 1 秒 | 30-120 秒 |
+| 返回内容 | 仅元数据 | 元数据 + 文件下载链接 |
+| 存储占用 | 无 | 有（音频/字幕文件） |
+| 适用场景 | 信息查询、批量采集 | 实际下载文件 |
 
 ---
 

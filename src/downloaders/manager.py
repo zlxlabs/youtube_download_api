@@ -654,6 +654,20 @@ class DownloaderManager:
             return
 
         try:
+            # 将字典转换为 VideoInfo 对象
+            from src.db.models import VideoInfo
+
+            video_info = VideoInfo(
+                title=metadata.get("title"),
+                author=metadata.get("author"),
+                channel_id=metadata.get("channel_id"),
+                duration=metadata.get("duration"),
+                description=metadata.get("description"),
+                upload_date=metadata.get("upload_date"),
+                view_count=metadata.get("view_count"),
+                thumbnail=metadata.get("thumbnail"),
+            )
+
             # 检查是否已存在
             existing = await self.db.get_video_resource(video_id)
 
@@ -661,15 +675,16 @@ class DownloaderManager:
                 # 更新现有记录
                 await self.db.update_video_resource(
                     video_id=video_id,
-                    video_info=metadata,
+                    video_info=video_info,
                 )
                 logger.debug(f"Updated metadata in database: {video_id}")
             else:
                 # 创建新记录
                 from src.db.models import VideoResource
+
                 resource = VideoResource(
                     video_id=video_id,
-                    video_info=metadata,
+                    video_info=video_info,
                     has_native_transcript=False,  # 暂时未知
                 )
                 await self.db.create_video_resource(resource)

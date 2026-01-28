@@ -345,3 +345,22 @@ class ManualUploadListResponse(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+# ==================== Video Info Schemas ====================
+
+
+class VideoInfoDetailResponse(BaseModel):
+    """Response schema for video metadata query."""
+
+    video_id: str = Field(..., description="YouTube video ID")
+    video_info: VideoInfoResponse = Field(..., description="Video metadata")
+    cached: bool = Field(
+        ...,
+        description="True if metadata retrieved from database cache, False if fetched from API"
+    )
+    metadata_source: str = Field(
+        ...,
+        description="Metadata source: cached / youtube_data_api / ytdlp / tikhub"
+    )
+    fetched_at: datetime = Field(..., description="Metadata fetch/update timestamp")

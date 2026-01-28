@@ -290,21 +290,36 @@ async function loadHistory() {
 function renderHistoryTable(tasks) {
   const tbody = document.getElementById('history-tbody');
   if (tasks.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="7" class="loading-state">暂无记录</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" class="loading-state">暂无记录</td></tr>';
     return;
   }
 
-  tbody.innerHTML = tasks.map(task => `
-    <tr onclick="showTaskDetail('${task.task_id}')" style="cursor:pointer;">
-      <td>${task.video_id}</td>
-      <td>${escapeHtml(task.video_info?.title || '-')}</td>
-      <td><span class="badge status-${task.status}">${task.status}</span></td>
-      <td>${getTaskType(task)}</td>
-      <td>${getCacheInfo(task)}</td>
-      <td>${formatDate(task.created_at)}</td>
-      <td>${formatDate(task.completed_at)}</td>
-    </tr>
-  `).join('');
+  tbody.innerHTML = tasks.map(task => {
+    // 获取请求参数
+    const includeAudio = task.request_mode?.include_audio ?? false;
+    const includeTranscript = task.request_mode?.include_transcript ?? false;
+
+    // 图标：✓ 表示请求了该资源，✗ 表示未请求
+    const audioIcon = includeAudio ? '✓' : '✗';
+    const transcriptIcon = includeTranscript ? '✓' : '✗';
+
+    // 根据是否请求添加不同的样式
+    const audioStyle = includeAudio ? 'color: #10b981; font-weight: bold;' : 'color: #9ca3af;';
+    const transcriptStyle = includeTranscript ? 'color: #10b981; font-weight: bold;' : 'color: #9ca3af;';
+
+    return `
+      <tr onclick="showTaskDetail('${task.task_id}')" style="cursor:pointer;">
+        <td>${task.video_id}</td>
+        <td>${escapeHtml(task.video_info?.title || '-')}</td>
+        <td><span class="badge status-${task.status}">${task.status}</span></td>
+        <td style="${audioStyle}" title="${includeAudio ? '请求音频' : '未请求音频'}">${audioIcon}</td>
+        <td style="${transcriptStyle}" title="${includeTranscript ? '请求字幕' : '未请求字幕'}">${transcriptIcon}</td>
+        <td>${getCacheInfo(task)}</td>
+        <td>${formatDate(task.created_at)}</td>
+        <td>${formatDate(task.completed_at)}</td>
+      </tr>
+    `;
+  }).join('');
 }
 
 function updateHistoryPagination() {
