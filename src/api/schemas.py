@@ -323,6 +323,7 @@ class VideoStatusResponse(BaseModel):
     audio_created_at: Optional[datetime] = None
     transcript_created_at: Optional[datetime] = None
     can_upload_audio: bool = Field(..., description="Whether audio upload is allowed")
+    video_info: Optional[VideoInfoResponse] = Field(None, description="Video metadata if available")
 
 
 class ManualUploadItem(BaseModel):

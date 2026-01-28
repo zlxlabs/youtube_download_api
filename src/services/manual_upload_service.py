@@ -403,9 +403,48 @@ class ManualUploadService:
                 logger.warning(f"[ManualUpload] Failed to cleanup temp dir: {e}")
 
     async def get_video_status(self, video_id: str) -> dict:
+        """
+        获取视频资源状态，包括元数据信息。
+
+        如果数据库中没有元数据，会主动从 YouTube 获取并缓存。
+
+        Args:
+            video_id: YouTube 视频 ID
+
+        Returns:
+            包含资源状态和视频元数据的字典
+        """
         files = await self.file_service.get_all_files_for_video(video_id)
         audio_file = files.get("audio")
         transcript_file = files.get("transcript")
+
+        # 获取 video_info（如果存在）
+        video_resource = await self.db.get_video_resource(video_id)
+        video_info_dict = None
+
+        if video_resource and video_resource.video_info:
+            # 数据库有缓存，直接使用
+            video_info_dict = video_resource.video_info.to_dict()
+            logger.debug(f"[VideoStatus] Using cached metadata for {video_id}")
+        else:
+            # 数据库没有元数据，主动获取
+            logger.info(f"[VideoStatus] No cached metadata for {video_id}, fetching from API")
+            try:
+                video_url = f"https://www.youtube.com/watch?v={video_id}"
+                metadata = await self.downloader_manager.get_metadata(video_url, video_id)
+
+                if metadata:
+                    # 成功获取元数据，保存到数据库
+                    video_info_dict = metadata
+                    logger.info(
+                        f"[VideoStatus] Fetched metadata for {video_id}: "
+                        f"{metadata.get('title', 'N/A')[:50]}"
+                    )
+                else:
+                    logger.warning(f"[VideoStatus] Failed to fetch metadata for {video_id}")
+            except Exception as e:
+                # 获取元数据失败不影响主流程
+                logger.warning(f"[VideoStatus] Error fetching metadata for {video_id}: {e}")
 
         return {
             "video_id": video_id,
@@ -416,6 +455,7 @@ class ManualUploadService:
             "audio_created_at": audio_file.created_at if audio_file else None,
             "transcript_created_at": transcript_file.created_at if transcript_file else None,
             "can_upload_audio": audio_file is None,
+            "video_info": video_info_dict,
         }
 
     async def list_manual_uploads(

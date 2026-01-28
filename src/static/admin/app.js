@@ -687,6 +687,9 @@ async function checkVideoStatus() {
     return;
   }
 
+  // 显示加载状态
+  showStatusCheck('<span class="spinner"></span> 正在检查视频信息...', 'info');
+
   try {
     const response = await apiRequest(`/api/v1/video-status/${videoId}`);
     displayVideoStatus(response);
@@ -698,20 +701,33 @@ async function checkVideoStatus() {
 function displayVideoStatus(status) {
   const uploadBtn = document.getElementById('upload-btn');
 
+  // 构建视频标题信息（如果可用）
+  let videoTitle = '';
+  if (status.video_info && status.video_info.title) {
+    const title = status.video_info.title;
+    const author = status.video_info.author ? ` - ${status.video_info.author}` : '';
+    videoTitle = `<div style="margin-bottom: 8px; padding: 8px; background: rgba(99, 102, 241, 0.1); border-radius: 4px; border-left: 3px solid #6366f1;">
+      <strong style="color: #4f46e5;">📺 ${title}${author}</strong>
+    </div>`;
+  }
+
   if (status.has_audio) {
     showStatusCheck(
-      `⚠️ 此视频已有音频文件<br>来源：${status.audio_source === 'manual' ? '人工上传' : '自动下载'}<br>上传时间：${formatDate(status.audio_created_at)}<br><strong>无法上传新的音频文件</strong>`,
+      `${videoTitle}⚠️ 此视频已有音频文件<br>来源：${status.audio_source === 'manual' ? '人工上传' : '自动下载'}<br>上传时间：${formatDate(status.audio_created_at)}<br><strong>无法上传新的音频文件</strong>`,
       'error'
     );
     uploadBtn.disabled = true;
   } else if (status.has_transcript) {
     showStatusCheck(
-      `ℹ️ 此视频已有字幕文件<br>来源：${status.transcript_source === 'manual' ? '人工上传' : '自动下载'}<br>上传音频后将形成完整资源（音频+字幕）`,
+      `${videoTitle}ℹ️ 此视频已有字幕文件<br>来源：${status.transcript_source === 'manual' ? '人工上传' : '自动下载'}<br>上传音频后将形成完整资源（音频+字幕）`,
       'info'
     );
     uploadBtn.disabled = false;
   } else {
-    showStatusCheck('✓ 此视频尚无资源，可以上传', 'success');
+    showStatusCheck(
+      `${videoTitle}✓ 此视频尚无资源，可以上传`,
+      'success'
+    );
     uploadBtn.disabled = false;
   }
 }
