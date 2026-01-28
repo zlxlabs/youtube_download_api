@@ -704,12 +704,30 @@ tr:hover td {
 .resource-author {
   font-size: 0.75rem;
   color: var(--text-muted);
-  margin-bottom: 1rem;
+  margin: 0 0 0.25rem;
+}
+
+.resource-upload-date {
+  font-size: 0.75rem;
+  color: #6c757d;
+  margin: 0.25rem 0;
+}
+
+.resource-description {
+  font-size: 0.8rem;
+  color: #868e96;
+  margin: 0.5rem 0;
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .resource-tags {
   display: flex;
   gap: 0.5rem;
+  margin-top: 0.75rem;
   margin-bottom: auto;
 }
 
@@ -1033,4 +1051,111 @@ tr:hover td {
 
 .toast.warning {
   border-left: 4px solid var(--warning);
+}
+
+/* 自定义滚动条样式 */
+.detail-value::-webkit-scrollbar {
+  width: 8px;
+}
+
+.detail-value::-webkit-scrollbar-track {
+  background: #e9ecef;
+  border-radius: 4px;
+}
+
+.detail-value::-webkit-scrollbar-thumb {
+  background: #adb5bd;
+  border-radius: 4px;
+}
+
+.detail-value::-webkit-scrollbar-thumb:hover {
+  background: #868e96;
+}
+
+/* 文件列表样式 */
+.file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
+.file-item {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.875rem;
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  transition: all 0.2s;
+}
+
+.file-item:hover {
+  background: #f1f5f9;
+  border-color: var(--primary);
+}
+
+.file-icon {
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-md);
+  background: white;
+  border: 1px solid var(--border);
+}
+
+.file-icon.audio {
+  color: var(--primary);
+  background: var(--primary-light);
+}
+
+.file-icon.transcript {
+  color: var(--success);
+  background: #d1fae5;
+}
+
+.file-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.file-name {
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--text-main);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.file-meta .badge {
+  font-size: 0.7rem;
+}
+
+.file-actions {
+  flex-shrink: 0;
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.file-actions .btn-sm {
+  white-space: nowrap;
+  min-width: 60px;
+  justify-content: center;
 }

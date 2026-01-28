@@ -389,9 +389,11 @@ function renderResourceGrid(resources) {
     const author = res.video_info?.author || '未知';
     const thumbnail = res.video_info?.thumbnail || `https://i.ytimg.com/vi/${res.video_id}/default.jpg`;
     const duration = formatDuration(res.video_info?.duration);
+    const uploadDate = res.video_info?.upload_date ? formatUploadDate(res.video_info.upload_date) : null;
+    const description = res.video_info?.description ? truncateText(res.video_info.description, 80) : null;
 
     return `
-      <div class="resource-card">
+      <div class="resource-card" onclick="showResourceDetail('${res.video_id}')" style="cursor: pointer;">
         <div class="thumbnail-wrapper">
           <img src="${thumbnail}" alt="${escapeHtml(title)}" loading="lazy" onerror="this.src='/admin/placeholder.svg'" />
           <span class="duration-badge">${duration}</span>
@@ -399,12 +401,14 @@ function renderResourceGrid(resources) {
         <div class="resource-info">
           <h3 class="resource-title" title="${escapeHtml(title)}">${escapeHtml(title)}</h3>
           <p class="resource-author">${escapeHtml(author)}</p>
+          ${uploadDate ? `<p class="resource-upload-date" style="font-size: 0.85em; color: #6c757d; margin: 4px 0;">上传: ${uploadDate}</p>` : ''}
+          ${description ? `<p class="resource-description" style="font-size: 0.85em; color: #868e96; margin: 6px 0; line-height: 1.4;" title="${escapeHtml(res.video_info.description)}">${escapeHtml(description)}</p>` : ''}
           <div class="resource-tags">
              <span class="tag-pill">${res.upload_source}</span>
              <span class="tag-pill">${res.audio_count} 音频</span>
              <span class="tag-pill">${res.transcript_count} 字幕</span>
           </div>
-          <div class="resource-footer">
+          <div class="resource-footer" onclick="event.stopPropagation()">
             <button class="btn-sm btn-secondary" onclick="showResourceDetail('${res.video_id}')">详情</button>
             <button class="btn-danger-sm" onclick="deleteResource('${res.video_id}')">删除</button>
           </div>
@@ -449,43 +453,110 @@ function resourceNextPage() {
 async function showResourceDetail(videoId) {
   try {
     const resource = await apiRequest(`/api/v1/video-resources/${videoId}`);
+    const youtubeUrl = `https://www.youtube.com/watch?v=${resource.video_id}`;
+    const thumbnail = resource.video_info?.thumbnail || `https://i.ytimg.com/vi/${resource.video_id}/maxresdefault.jpg`;
+
     const html = `
       <h2>视频资源详情</h2>
+      ${resource.video_info?.thumbnail ? `
+        <div style="text-align: center; margin: 16px 0;">
+          <img src="${thumbnail}" alt="视频缩略图" style="max-width: 100%; max-height: 320px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);" onerror="this.style.display='none'" />
+        </div>
+      ` : ''}
       <div class="detail-list">
-        <div class="detail-item"><span class="detail-label">Video ID:</span> <span class="detail-value">${resource.video_id}</span></div>
+        <div class="detail-item">
+          <span class="detail-label">Video ID:</span>
+          <span class="detail-value">
+            ${resource.video_id}
+            <a href="${youtubeUrl}" target="_blank" rel="noopener noreferrer" style="margin-left: 8px; color: #5865F2; text-decoration: none; font-weight: 500;">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle; margin-right: 2px;">
+                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+                <polyline points="15 3 21 3 21 9"></polyline>
+                <line x1="10" y1="14" x2="21" y2="3"></line>
+              </svg>
+              在 YouTube 查看
+            </a>
+          </span>
+        </div>
         <div class="detail-item"><span class="detail-label">标题:</span> <span class="detail-value">${escapeHtml(resource.video_info?.title || '-')}</span></div>
         <div class="detail-item"><span class="detail-label">作者:</span> <span class="detail-value">${escapeHtml(resource.video_info?.author || '-')}</span></div>
         <div class="detail-item"><span class="detail-label">时长:</span> <span class="detail-value">${formatDuration(resource.video_info?.duration)}</span></div>
+        ${resource.video_info?.upload_date ? `
+          <div class="detail-item"><span class="detail-label">上传日期:</span> <span class="detail-value">${formatUploadDate(resource.video_info.upload_date)}</span></div>
+        ` : ''}
+        ${resource.video_info?.view_count ? `
+          <div class="detail-item"><span class="detail-label">观看次数:</span> <span class="detail-value">${formatNumber(resource.video_info.view_count)}</span></div>
+        ` : ''}
+        ${resource.video_info?.description ? `
+          <div class="detail-item">
+            <span class="detail-label">描述:</span>
+            <div class="detail-value" style="max-height: 150px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; padding: 8px; background: #f8f9fa; border-radius: 6px; border: 1px solid #e9ecef;">${escapeHtml(resource.video_info.description)}</div>
+          </div>
+        ` : ''}
         <div class="detail-item"><span class="detail-label">有原生字幕:</span> <span class="detail-value">${resource.has_native_transcript ? '是' : '否'}</span></div>
         <div class="detail-item"><span class="detail-label">创建时间:</span> <span class="detail-value">${formatDate(resource.created_at)}</span></div>
         <div class="detail-item"><span class="detail-label">更新时间:</span> <span class="detail-value">${formatDate(resource.updated_at)}</span></div>
       </div>
       <h3>文件列表 (${resource.files.length})</h3>
-      <div class="table-responsive">
-        <table>
-          <thead>
-            <tr>
-              <th>类型</th>
-              <th>文件名</th>
-              <th>大小</th>
-              <th>格式</th>
-              <th>来源</th>
-              <th>创建时间</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${resource.files.map(f => `
-              <tr>
-                <td>${f.file_type}</td>
-                <td>${escapeHtml(f.filename)}</td>
-                <td>${formatBytes(f.size)}</td>
-                <td>${f.format || '-'}</td>
-                <td><span class="badge source-${f.upload_source}">${f.upload_source}</span></td>
-                <td>${formatDate(f.created_at)}</td>
-              </tr>
-            `).join('')}
-          </tbody>
-        </table>
+      <div class="file-list">
+        ${resource.files.map(f => {
+          const fileIcon = f.file_type === 'audio' ?
+            '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg>' :
+            '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>';
+
+          // 生成下载文件名：videoid_title_author.ext
+          const customFilenameSrt = generateDownloadFilename(
+            resource.video_id,
+            resource.video_info?.title,
+            resource.video_info?.author,
+            'srt'
+          );
+
+          const customFilenameTxt = generateDownloadFilename(
+            resource.video_id,
+            resource.video_info?.title,
+            resource.video_info?.author,
+            'txt'
+          );
+
+          return `
+            <div class="file-item">
+              <div class="file-icon ${f.file_type}">${fileIcon}</div>
+              <div class="file-info">
+                <div class="file-name" title="${escapeHtml(f.filename)}">${escapeHtml(truncateText(f.filename, 40))}</div>
+                <div class="file-meta">
+                  <span class="badge source-${f.upload_source}">${f.upload_source}</span>
+                  <span>${formatBytes(f.size)}</span>
+                  <span>${f.format || '-'}</span>
+                </div>
+              </div>
+              <div class="file-actions">
+                ${f.file_type === 'transcript' ? `
+                  <div style="display: flex; gap: 0.5rem;">
+                    <a href="/api/v1/files/${f.id}?filename=${encodeURIComponent(customFilenameSrt)}" class="btn-sm btn-secondary" style="text-decoration: none; display: inline-flex; align-items: center; gap: 4px;" title="下载为 SRT 格式">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                        <polyline points="7 10 12 15 17 10"></polyline>
+                        <line x1="12" y1="15" x2="12" y2="3"></line>
+                      </svg>
+                      SRT
+                    </a>
+                    <a href="/api/v1/files/${f.id}?filename=${encodeURIComponent(customFilenameTxt)}" class="btn-sm btn-ghost" style="text-decoration: none; display: inline-flex; align-items: center; gap: 4px;" title="下载为 TXT 格式">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                        <polyline points="7 10 12 15 17 10"></polyline>
+                        <line x1="12" y1="15" x2="12" y2="3"></line>
+                      </svg>
+                      TXT
+                    </a>
+                  </div>
+                ` : `
+                  <span style="color: #adb5bd; font-size: 0.85rem;">音频文件</span>
+                `}
+              </div>
+            </div>
+          `;
+        }).join('')}
       </div>
     `;
     showModal(html);
@@ -765,6 +836,67 @@ function formatDuration(seconds) {
   const m = Math.floor((seconds % 3600) / 60);
   const s = seconds % 60;
   return h > 0 ? `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}` : `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+function formatUploadDate(uploadDate) {
+  if (!uploadDate) return '-';
+  // uploadDate 格式为 YYYYMMDD，转换为 YYYY-MM-DD
+  if (typeof uploadDate === 'string' && uploadDate.length === 8) {
+    const year = uploadDate.slice(0, 4);
+    const month = uploadDate.slice(4, 6);
+    const day = uploadDate.slice(6, 8);
+    return `${year}-${month}-${day}`;
+  }
+  return uploadDate;
+}
+
+function formatNumber(num) {
+  if (!num) return '-';
+  // 格式化数字，添加千位分隔符
+  return num.toLocaleString('zh-CN');
+}
+
+function truncateText(text, maxLength) {
+  if (!text) return '';
+  if (text.length <= maxLength) return text;
+  return text.substring(0, maxLength) + '...';
+}
+
+function sanitizeFilename(text) {
+  if (!text) return '';
+  // 移除或替换非法字符：\ / : * ? " < > |
+  return text
+    .replace(/[\\/:*?"<>|]/g, '_')  // 替换为下划线
+    .replace(/\s+/g, '_')            // 空格替换为下划线
+    .replace(/_+/g, '_')             // 多个下划线合并为一个
+    .replace(/^_|_$/g, '')           // 移除首尾下划线
+    .trim();
+}
+
+function generateDownloadFilename(videoId, title, author, extension) {
+  // 清理各个部分
+  const cleanVideoId = videoId || 'unknown';
+  const cleanTitle = sanitizeFilename(title) || 'untitled';
+  const cleanAuthor = sanitizeFilename(author) || 'unknown';
+  const cleanExt = extension.startsWith('.') ? extension : '.' + extension;
+
+  // 拼接文件名：videoid_title_author.ext
+  let filename = `${cleanVideoId}_${cleanTitle}_${cleanAuthor}${cleanExt}`;
+
+  // 限制文件名长度（不包括扩展名），最多 200 字符
+  const maxLength = 200;
+  if (filename.length > maxLength + cleanExt.length) {
+    const availableLength = maxLength - cleanVideoId.length - cleanExt.length - 2; // 2 for underscores
+    const titleLength = Math.floor(availableLength * 0.6);
+    const authorLength = availableLength - titleLength;
+
+    const truncatedTitle = cleanTitle.substring(0, titleLength);
+    const truncatedAuthor = cleanAuthor.substring(0, authorLength);
+
+    filename = `${cleanVideoId}_${truncatedTitle}_${truncatedAuthor}${cleanExt}`;
+  }
+
+  return filename;
 }
 
 function escapeHtml(text) {

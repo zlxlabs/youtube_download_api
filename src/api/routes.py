@@ -315,12 +315,13 @@ async def cancel_task(
         404: {"model": ErrorResponse, "description": "File not found"},
     },
     summary="Download file",
-    description="Download an audio or transcript file by ID. Supports URL with extension (e.g., /files/uuid.m4a). No authentication required.",
+    description="Download an audio or transcript file by ID. Supports URL with extension (e.g., /files/uuid.m4a). No authentication required. Use ?filename=custom_name.ext to specify custom download filename.",
     tags=["Files"],
 )
 async def download_file(
     file_id_with_ext: str,
     file_service: FileServiceDep,
+    filename: Optional[str] = Query(None, description="Custom download filename"),
 ) -> FileResponse:
     """
     Download a file by ID.
@@ -329,6 +330,9 @@ async def download_file(
     - /files/{uuid}
     - /files/{uuid}.m4a
     - /files/{uuid}.srt
+
+    Optional query parameter:
+    - filename: Custom download filename (e.g., ?filename=video_title.srt)
 
     This endpoint is public (no API key required) but uses UUID file IDs
     to prevent enumeration attacks.
@@ -360,9 +364,12 @@ async def download_file(
         elif file_record.format == "webm":
             media_type = "audio/webm"
 
+        # Use custom filename if provided, otherwise use original filename
+        download_filename = filename if filename else file_record.filename
+
         return FileResponse(
             path=file_path,
-            filename=file_record.filename,
+            filename=download_filename,
             media_type=media_type,
         )
     except HTTPException:
