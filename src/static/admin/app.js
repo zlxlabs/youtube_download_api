@@ -12,6 +12,8 @@ const state = {
   },
   searchDebounceTimer: null,
   timezone: 'Asia/Shanghai', // 默认时区，将从服务器加载
+  version: '',  // 系统版本号
+  buildTime: '',  // 构建时间
 };
 
 // ==================== 初始化 ====================
@@ -40,10 +42,32 @@ async function loadServerConfig() {
     if (response.ok) {
       const config = await response.json();
       state.timezone = config.timezone;
-      console.log(`Loaded server timezone: ${state.timezone}`);
+      state.version = config.version;
+      state.buildTime = config.build_time;
+      console.log(`Loaded server config - timezone: ${state.timezone}, version: ${state.version}, build: ${state.buildTime}`);
+
+      // 更新页面底部的构建信息显示
+      updateBuildInfo();
     }
   } catch (error) {
     console.warn('Failed to load server config, using default timezone:', error);
+  }
+}
+
+// 更新页面底部的构建信息
+function updateBuildInfo() {
+  const buildInfoElement = document.getElementById('build-info');
+  if (buildInfoElement && state.buildTime) {
+    // 格式化构建时间显示
+    let buildTimeDisplay = state.buildTime;
+    if (state.buildTime !== 'development') {
+      try {
+        buildTimeDisplay = formatDate(state.buildTime);
+      } catch (e) {
+        // 如果解析失败，使用原始字符串
+      }
+    }
+    buildInfoElement.textContent = `v${state.version} | 构建时间: ${buildTimeDisplay}`;
   }
 }
 

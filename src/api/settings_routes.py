@@ -17,6 +17,7 @@ from src.api.deps import ApiKeyDep
 from src.api.schemas import ErrorResponse
 from src.config import get_settings
 from src.utils.logger import logger
+import src
 
 
 # Router for settings management
@@ -210,6 +211,8 @@ class ConfigResponse(BaseModel):
     timezone: str = Field(description="系统时区配置")
     debug: bool = Field(description="调试模式")
     file_retention_days: int = Field(description="文件保留天数")
+    version: str = Field(description="系统版本号")
+    build_time: str = Field(description="构建时间（ISO 8601 格式）")
 
 
 @router.get(
@@ -222,13 +225,21 @@ async def get_config() -> ConfigResponse:
     """
     获取系统配置信息。
 
-    返回时区、调试模式、文件保留期等配置。
+    返回时区、调试模式、文件保留期、版本号、构建时间等配置。
     """
     settings = get_settings()
+
+    # 获取构建时间，如果是占位符则返回 "development"
+    build_time = src.__build_time__
+    if "PLACEHOLDER" in build_time:
+        build_time = "development"
+
     return ConfigResponse(
         timezone=settings.tz,
         debug=settings.debug,
         file_retention_days=settings.file_retention_days,
+        version=src.__version__,
+        build_time=build_time,
     )
 
 

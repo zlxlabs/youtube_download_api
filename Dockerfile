@@ -87,6 +87,12 @@ COPY --from=builder /app/deps /usr/local/lib/python3.11/site-packages/
 # Copy source code
 COPY src/ ./src/
 
+# 注入构建时间到 __init__.py
+# 使用 ISO 8601 格式的 UTC 时间戳
+RUN BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
+    sed -i "s/BUILD_TIMESTAMP_PLACEHOLDER/${BUILD_TIME}/g" ./src/__init__.py && \
+    echo "Build time injected: ${BUILD_TIME}"
+
 # Create data directories
 RUN mkdir -p /app/data/files/audio /app/data/files/transcript /app/data/logs
 
