@@ -652,10 +652,9 @@ class YouTubeDownloader:
             video_id = info["id"]
             video_info = self._extract_video_info(info)
 
-            # Check if subtitles are available
-            has_subtitle = bool(
-                info.get("subtitles") or info.get("automatic_captions")
-            )
+            # Check if subtitles are available (exclude non-transcript items like live_chat)
+            subtitle_infos = self._tikhub_service.extract_subtitle_urls(info)
+            has_subtitle = bool(subtitle_infos)
 
             logger.info(
                 f"[POT] Video {video_id}: has_subtitle={has_subtitle}, "

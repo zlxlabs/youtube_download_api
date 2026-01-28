@@ -50,24 +50,35 @@ def _convert_timestamp(val: bytes) -> datetime:
     将 SQLite TIMESTAMP 字符串转换为 UTC datetime 对象（用于读取）。
 
     支持多种格式：
-    - ISO 8601: "2026-01-28T15:07:47.123456+00:00" 或 "2026-01-28T15:07:47Z"
-    - SQLite 默认: "2026-01-28 15:07:47.123456"
+    - ISO 8601 with T: "2026-01-28T15:07:47.123456+00:00" 或 "2026-01-28T15:07:47Z"
+    - ISO 8601 with space: "2026-01-28 15:07:47.123456+00:00"
+    - SQLite 默认: "2026-01-28 15:07:47.123456" 或 "2026-01-28 15:07:47"
 
     返回带 UTC 时区信息的 datetime 对象。
     """
     val_str = val.decode("utf-8")
 
-    # 尝试解析 ISO 8601 格式（带时区）
-    if "T" in val_str:
-        try:
-            # 处理 'Z' 后缀（表示 UTC）
-            if val_str.endswith("Z"):
-                val_str = val_str[:-1] + "+00:00"
-            return datetime.fromisoformat(val_str)
-        except ValueError:
-            pass
+    # 优先尝试 fromisoformat（支持多种格式，包括带时区的）
+    try:
+        # 处理 'Z' 后缀（表示 UTC）
+        if val_str.endswith("Z"):
+            val_str = val_str[:-1] + "+00:00"
+        # fromisoformat 支持 "T" 和空格分隔符
+        # 但不直接支持空格+时区格式，需要替换为 T
+        if " " in val_str and ("+" in val_str or val_str.endswith("Z")):
+            # 格式: "2026-01-28 15:07:47.123456+00:00"
+            # 替换第一个空格为 T
+            val_str = val_str.replace(" ", "T", 1)
 
-    # 解析 SQLite 默认格式（假设为 UTC）
+        dt = datetime.fromisoformat(val_str)
+        # 如果解析成功但没有时区信息，手动添加 UTC
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except ValueError:
+        pass
+
+    # 降级：解析不带时区的格式，然后手动添加 UTC 时区
     try:
         # 支持微秒
         if "." in val_str:
@@ -77,9 +88,9 @@ def _convert_timestamp(val: bytes) -> datetime:
         # 标记为 UTC 时区
         return dt.replace(tzinfo=timezone.utc)
     except ValueError as e:
-        logger.warning(f"Failed to parse timestamp: {val_str}, error: {e}")
-        # 降级：返回当前 UTC 时间
-        return datetime.now(timezone.utc)
+        logger.error(f"Failed to parse timestamp: {val_str}, error: {e}")
+        # 最后降级：返回 Unix epoch（而不是当前时间，避免混淆）
+        return datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
 # 注册类型转换器（模块级别，只注册一次）

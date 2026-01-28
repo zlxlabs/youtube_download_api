@@ -27,6 +27,12 @@ SUBTITLE_PRIORITY = [
     "en",       # English
 ]
 
+# Non-transcript subtitle "languages" exposed by yt-dlp
+NON_TRANSCRIPT_LANGS = {
+    "live_chat",
+    "live_chat_replay",
+}
+
 
 @dataclass
 class SubtitleInfo:
@@ -84,6 +90,8 @@ class TikHubService:
         # Extract manual subtitles
         if info.get("subtitles"):
             for lang, formats in info["subtitles"].items():
+                if not self._is_valid_subtitle_lang(lang):
+                    continue
                 url = self._find_best_subtitle_url(formats)
                 if url:
                     subtitles.append(SubtitleInfo(lang=lang, url=url, is_auto=False))
@@ -91,6 +99,8 @@ class TikHubService:
         # Extract automatic captions
         if info.get("automatic_captions"):
             for lang, formats in info["automatic_captions"].items():
+                if not self._is_valid_subtitle_lang(lang):
+                    continue
                 # Skip if we already have manual subtitle for this language
                 if any(s.lang == lang and not s.is_auto for s in subtitles):
                     continue
@@ -110,6 +120,21 @@ class TikHubService:
 
         subtitles.sort(key=priority_key)
         return subtitles
+
+    def _is_valid_subtitle_lang(self, lang: str) -> bool:
+        """
+        Determine whether a subtitle language represents a real transcript.
+
+        Filters out non-transcript streams like live chat replays.
+        """
+        if not lang:
+            return False
+        normalized = lang.strip().lower()
+        if normalized in NON_TRANSCRIPT_LANGS:
+            return False
+        if normalized.startswith("live_chat"):
+            return False
+        return True
 
     def _find_best_subtitle_url(self, formats: list[dict[str, Any]]) -> Optional[str]:
         """
