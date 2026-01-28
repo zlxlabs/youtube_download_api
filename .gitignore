@@ -90,3 +90,6 @@ tests/manual/output/
 # 企业微信通知缓存
 .wecom_cache/
 .mypy_cache
+
+extracted_videos
+downloads

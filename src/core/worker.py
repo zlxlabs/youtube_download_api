@@ -393,19 +393,30 @@ class DownloadWorker:
                 )
                 audio_fallback = True
 
-                # 重新下载音频
-                result = await self.downloader_manager.download_with_fallback(
-                    video_url=task.video_url,
-                    video_id=task.video_id,
-                    output_dir=output_dir,
-                    include_audio=True,  # 强制下载音频
-                    include_transcript=False,  # 已经确认没有字幕了
-                )
+                # 先检查数据库中是否已经存在音频文件（可能是人工上传的）
+                if existing_audio is not None:
+                    logger.info(
+                        f"Task {task.id}: Audio already exists in database (reusing), "
+                        f"no need to download"
+                    )
+                    # 不需要下载，后续会从数据库读取 existing_audio
+                else:
+                    # 数据库中没有音频，重新下载
+                    logger.info(
+                        f"Task {task.id}: Audio not found in database, downloading..."
+                    )
+                    result = await self.downloader_manager.download_with_fallback(
+                        video_url=task.video_url,
+                        video_id=task.video_id,
+                        output_dir=output_dir,
+                        include_audio=True,  # 强制下载音频
+                        include_transcript=False,  # 已经确认没有字幕了
+                    )
 
-                logger.info(
-                    f"Task {task.id}: Audio fallback completed with {result.downloader} "
-                    f"(audio={result.audio_path is not None})"
-                )
+                    logger.info(
+                        f"Task {task.id}: Audio fallback completed with {result.downloader} "
+                        f"(audio={result.audio_path is not None})"
+                    )
 
             # 将 VideoMetadata 转换为 VideoInfo（兼容现有代码）
             from src.db.models import VideoInfo as DbVideoInfo
