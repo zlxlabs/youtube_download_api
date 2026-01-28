@@ -11,12 +11,15 @@ Docker 部署的 YouTube 音频下载服务，提供 RESTful API 接口，支持
 - **智能资源复用** - 文件级缓存，同视频资源跨任务共享
 - **多下载器降级** - yt-dlp + TikHub API 双重保障，自动降级切换
 - **熔断器保护** - 智能熔断机制，避免持续性故障影响服务
+- **IP 熔断机制** - 被动探测型分级 IP 熔断，智能应对 YouTube 风控
 - **风控绕过** - TLS 指纹模拟 + PO Token 机制
 - **任务队列** - 异步处理，支持并发控制和错误重试
 - **双模式通知** - Webhook 回调 + 轮询查询
-- **企业微信** - 任务状态实时通知
+- **企业微信** - 任务状态实时通知，支持敏感词审核
 - **自动清理** - 文件 60 天自动过期清理
 - **人工上传** - 手动上传音频/视频，自动封装/转码并管理
+- **Cookie 管理** - 支持 YouTube Cookie 文件动态管理
+- **视频资源管理** - 完整的视频资源 CRUD 操作
 
 ## 快速开始
 
@@ -61,11 +64,21 @@ chmod +x scripts/dev.sh
 cp .env.example .env
 # 编辑 .env
 
-# 2. 构建并启动
-docker-compose up -d --build
+# 2. 构建镜像（如果需要）
+docker build -t youtube-api:latest .
 
-# 3. 查看日志
-docker-compose logs -f youtube-api
+# 3. 启动服务
+docker-compose -f docker/docker-compose.prod.yml up -d
+
+# 4. 查看日志
+docker-compose -f docker/docker-compose.prod.yml logs -f youtube-api
+```
+
+### 开发环境 Docker
+
+```bash
+# 启动开发环境（包含热重载）
+docker-compose -f docker-compose.dev.yml up -d
 ```
 
 ## API 文档
@@ -83,10 +96,17 @@ docker-compose logs -f youtube-api
 | GET | `/api/v1/files/{file_id}` | 下载文件 | 公开 |
 | POST | `/api/v1/manual-upload` | 人工上传音频 | 需要 |
 | GET | `/api/v1/manual-uploads` | 列出人工上传 | 需要 |
-| GET | `/api/v1/video-status/{video_id}` | 视频资源状态 | 需要 |
+| GET | `/api/v1/manual-uploads/{video_id}` | 查看上传详情 | 需要 |
 | DELETE | `/api/v1/manual-uploads/{video_id}` | 删除人工上传 | 需要 |
+| GET | `/api/v1/video-resources` | 列出视频资源 | 需要 |
+| GET | `/api/v1/video-resources/{video_id}` | 视频资源详情 | 需要 |
+| DELETE | `/api/v1/video-resources/{video_id}` | 删除视频资源 | 需要 |
+| GET | `/api/v1/settings/config` | 获取系统配置 | 公开 |
+| GET | `/api/v1/settings/cookie` | 获取 Cookie 信息 | 需要 |
+| PUT | `/api/v1/settings/cookie` | 更新 Cookie | 需要 |
+| POST | `/api/v1/settings/cookie/validate` | 验证 Cookie 格式 | 需要 |
 | GET | `/health` | 健康检查 | 公开 |
-| GET | `/admin` | 管理界面（人工上传） | 公开 |
+| GET | `/admin` | 管理界面 | 公开 |
 
 ### 鉴权方式
 
@@ -203,6 +223,8 @@ curl -X POST http://localhost:8000/api/v1/tasks \
 |------|------|
 | `reused_audio` | 音频是否来自缓存 |
 | `reused_transcript` | 字幕是否来自缓存 |
+| `partial_success` | 是否为部分成功（音频失败但字幕成功） |
+| `failure_details` | 详细的成功/失败信息（部分成功时） |
 
 **缓存命中判断**
 
@@ -210,6 +232,14 @@ curl -X POST http://localhost:8000/api/v1/tasks \
 - `task_id: null` - 没有创建新任务
 - `cache_hit: true` - 明确标识为缓存命中
 - `status: "completed"` - 直接返回完成状态
+
+**部分成功说明**
+
+当请求音频和字幕，但仅部分成功时（例如：音频失败但字幕成功），系统会：
+- 将任务标记为 `completed`（非 failed）
+- `result.partial_success = true`
+- `result.failure_details` 包含详细的成功/失败信息
+- 成功的资源可以被后续请求复用
 
 ---
 
@@ -220,12 +250,20 @@ curl -X POST http://localhost:8000/api/v1/tasks \
 ### 功能说明
 
 - 支持上传音频或视频文件，统一输出为 `m4a`
-- 如果原始音频为 **AAC**（常见于 mp4），将优先 **直接封装（copy）**，速度更快
+- 如果原始音频为 **AAC**（常见于 mp4），将优先 **直接封装（remux）**，速度更快
 - 上传后自动写入 `video_resources`，并可在管理界面查看/删除
+- 自动从 YouTube 获取视频元数据（可选手动提供）
 
 ### 管理界面
 
 浏览器访问：`http://localhost:8000/admin`
+
+管理界面包含以下功能模块：
+- **任务管理** - 查看所有下载任务，支持搜索和状态筛选
+- **视频资源** - 管理所有视频资源，查看详情和删除
+- **人工上传** - 手动上传音频/视频文件
+- **Cookie 管理** - 查看和更新 YouTube Cookie 文件
+- **系统配置** - 查看系统配置和状态
 
 ### 支持格式
 
@@ -239,7 +277,9 @@ curl -X POST http://localhost:8000/api/v1/tasks \
 curl -X POST http://localhost:8000/api/v1/manual-upload \
   -H "X-API-Key: your-api-key" \
   -F "video_url=https://www.youtube.com/watch?v=dQw4w9WgXcQ" \
-  -F "file=@/path/to/video.mp4"
+  -F "file=@/path/to/video.mp4" \
+  -F "title=Custom Title" \
+  -F "author=Channel Name"
 ```
 
 **列出上传**
@@ -254,43 +294,517 @@ curl -X DELETE -H "X-API-Key: your-api-key" \
   "http://localhost:8000/api/v1/manual-uploads/dQw4w9WgXcQ"
 ```
 
+**查看上传详情**
+```bash
+curl -H "X-API-Key: your-api-key" \
+  "http://localhost:8000/api/v1/manual-uploads/dQw4w9WgXcQ"
+```
+
 **响应**
 ```json
 {
-  "task_id": "550e8400-e29b-41d4-a716-446655440000",
-  "status": "pending",
   "video_id": "dQw4w9WgXcQ",
-  "video_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-  "priority": "normal",
-  "video_info": null,
-  "files": null,
-  "error": null,
-  "cache_hit": false,
-  "request": {
-    "include_audio": true,
-    "include_transcript": true
-  },
-  "result": null,
-  "position": 3,
-  "estimated_wait": 180,
-  "progress": null,
-  "created_at": "2025-12-12T10:00:00Z",
-  "started_at": null,
-  "completed_at": null,
-  "expires_at": null,
-  "message": null
+  "file_id": "abc123-4567-89ef-0123-456789abcdef",
+  "title": "Custom Title",
+  "author": "Channel Name",
+  "size": 3456789,
+  "format": "m4a",
+  "original_format": "mp4",
+  "created_at": "2026-01-28T12:00:00Z"
 }
 ```
 
-### 查询任务状态
+### 视频资源管理
 
-**请求**
+视频资源管理 API 提供完整的 CRUD 操作，用于管理所有已下载的视频资源。
+
+**列出视频资源**
+```bash
+curl -H "X-API-Key: your-api-key" \
+  "http://localhost:8000/api/v1/video-resources?search=keyword&limit=20&offset=0"
+```
+
+**获取视频资源详情**
+```bash
+curl -H "X-API-Key: your-api-key" \
+  "http://localhost:8000/api/v1/video-resources/dQw4w9WgXcQ"
+```
+
+**删除视频资源**
+```bash
+curl -X DELETE -H "X-API-Key: your-api-key" \
+  "http://localhost:8000/api/v1/video-resources/dQw4w9WgXcQ"
+```
+
+---
+
+## Cookie 管理
+
+系统支持 YouTube Cookie 文件的动态管理，提高下载成功率。
+
+### Cookie 获取方式
+
+推荐使用浏览器扩展导出 Cookies：
+
+1. **使用浏览器扩展**
+   - 推荐扩展：[Get cookies.txt LOCALLY](https://chrome.google.com/webstore/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldkbehn)
+   - 访问 YouTube 并登录
+   - 导出 `youtube.com` 的 cookies 到文件
+
+2. **使用无痕模式（推荐）**
+   - 打开新的无痕窗口并登录 YouTube
+   - 在同一标签页访问 `https://www.youtube.com/robots.txt`
+   - 导出 cookies，然后关闭无痕窗口
+   - 这样可以避免 cookies 被浏览器轮换
+
+**注意事项**：
+- 使用账户的 cookies 可能导致账户被临时或永久封禁
+- 请谨慎使用下载频率和数量
+- 仅在必要时使用，或使用临时账户
+- 更多详情请参考：[yt-dlp Wiki - Cookies](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp)
+
+### API 示例
+
+**获取 Cookie 信息**
+```bash
+curl -H "X-API-Key: your-api-key" \
+  "http://localhost:8000/api/v1/settings/cookie"
+```
+
+**更新 Cookie**
+```bash
+curl -X PUT http://localhost:8000/api/v1/settings/cookie \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-api-key" \
+  -d '{
+    "content": "# Netscape HTTP Cookie File\n...\n",
+    "create_backup": true
+  }'
+```
+
+**验证 Cookie 格式**
+```bash
+curl -X POST http://localhost:8000/api/v1/settings/cookie/validate \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-api-key" \
+  -d '{
+    "content": "# Netscape HTTP Cookie File\n...\n"
+  }'
+```
+
+**Cookie 验证响应**
+```json
+{
+  "valid": true,
+  "errors": [],
+  "warnings": ["缺少 Netscape HTTP Cookie File header"],
+  "line_count": 15
+}
+```
+
+---
+
+## IP 熔断机制
+
+系统采用被动探测型 IP 熔断机制，智能应对 YouTube 风控，提高下载成功率。
+
+### 工作原理
+
+```
+YouTube 风控检测
+    ↓
+检测到 403 错误
+    ↓
+┌─────────────────────────────────┐
+│   IP 熔断器状态机            │
+│                             │
+│  NORMAL (正常)                │
+│    ↓ 音频任务 403             │
+│  AUDIO_BANNED (音频熔断)      │
+│    ↓ 字幕任务也 403           │
+│  FULLY_BANNED (全局熔断)      │
+│                             │
+│  恢复机制：                   │
+│  - 等待 MIN_WAIT_BEFORE_RETRY │
+│  - 被动探测（利用实际任务）    │
+│  - 探测成功 → 降级/恢复       │
+└─────────────────────────────────┘
+```
+
+### 熔断级别
+
+| 级别 | 说明 | 允许任务 | 探测策略 |
+|------|------|----------|----------|
+| `NORMAL` | 正常状态 | 所有任务 | - |
+| `AUDIO_BANNED` | 音频熔断 | 仅字幕任务 | 利用字幕任务探测 |
+| `FULLY_BANNED` | 全局熔断 | 无任务 | 等待时间到期后探测 |
+
+### 被动探测机制
+
+IP 熔断器采用**被动探测**策略：
+- **不主动发起测试请求**，避免额外的风控风险
+- **利用实际任务**进行探测恢复
+- 智能决策：
+  - `AUDIO_BANNED` 时：允许字幕任务执行，作为探测
+  - `FULLY_BANNED` 时：等待时间到期后，允许下一个任务作为探测
+  - 探测成功：降级或恢复到正常状态
+  - 探测失败：延长熔断时间，避免频繁尝试
+
+### 配置参数
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `MIN_WAIT_BEFORE_RETRY` | 3600 | 最小等待时间（秒），触发熔断后必须等待这么久才允许重试 |
+| `MAX_RETRY_INTERVAL` | 1800 | 重试间隔（秒），失败后至少等待这么久才允许下次尝试 |
+
+### 实际效果
+
+```
+场景：YouTube 检测到自动化下载
+
+时刻 10:00 - 音频任务返回 403
+           → 触发 AUDIO_BANNED
+
+时刻 10:00-11:00 - 仅允许字幕任务
+                  → 字幕任务成功执行
+                  → 说明 IP 没有完全被封
+
+时刻 11:00 - 音频任务再次 403
+           → 升级到 FULLY_BANNED
+
+时刻 11:00-12:00 - 等待 60 分钟
+                  → 所有任务暂停
+
+时刻 12:00 - 允许字幕任务探测
+           → 字幕成功
+           → 降级到 AUDIO_BANNED
+
+时刻 12:30 - 字幕任务失败
+           → 延长熔断时间
+```
+
+---
+
+## 系统配置
+
+### 环境变量
+
+| 变量 | 必填 | 默认值 | 说明 |
+|------|------|--------|------|
+| `API_KEY` | 是 | - | API 鉴权密钥 |
+| `WECOM_WEBHOOK_URL` | 否 | - | 企业微信 Webhook URL |
+| `WECOM_MODERATION_ENABLED` | 否 | false | 启用敏感词审核 |
+| `WECOM_MODERATION_URLS` | 否 | - | 敏感词库 URL 列表（逗号分隔） |
+| `WECOM_MODERATION_STRATEGY` | 否 | pinyin_reverse | 审核策略：block/replace/pinyin_reverse |
+| `HOST` | 否 | 0.0.0.0 | 服务监听地址 |
+| `PORT` | 否 | 8000 | 服务监听端口 |
+| `DEBUG` | 否 | false | 调试模式 |
+| `BASE_URL` | 否 | http://localhost:8000 | 文件下载链接基础URL（通知中使用） |
+| `POT_SERVER_URL` | 否 | http://pot-provider:4416 | PO Token 服务地址 |
+| `HTTP_PROXY` | 否 | - | HTTP 代理（开发环境） |
+| `HTTPS_PROXY` | 否 | - | HTTPS 代理（开发环境） |
+| `DOWNLOAD_CONCURRENCY` | 否 | 1 | 下载并发数（预留，暂未实现） |
+| `TRANSCRIPT_INTERVAL_MIN` | 否 | 20 | 字幕任务最小间隔（秒） |
+| `TRANSCRIPT_INTERVAL_MAX` | 否 | 40 | 字幕任务最大间隔（秒） |
+| `AUDIO_INTERVAL_MIN` | 否 | 60 | 音频/混合任务最小间隔（秒） |
+| `AUDIO_INTERVAL_MAX` | 否 | 600 | 音频/混合任务最大间隔（秒） |
+| `TASK_INTERVAL_MIN` | 否 | 60 | 任务最小间隔（秒）**[已弃用]** |
+| `TASK_INTERVAL_MAX` | 否 | 600 | 任务最大间隔（秒）**[已弃用]** |
+| `AUDIO_QUALITY` | 否 | 128 | 音频比特率 (kbps) |
+| `DATA_DIR` | 否 | ./data | 数据存储目录 |
+| `FILE_RETENTION_DAYS` | 否 | 60 | 文件保留天数 |
+| `TZ` | 否 | Asia/Shanghai | 时区配置 |
+| `TIKHUB_API_KEY` | 否 | - | TikHub API 密钥（用于下载降级） |
+| `DOWNLOADER_PRIORITY` | 否 | ytdlp,tikhub | 下载器优先级顺序 |
+| `CIRCUIT_BREAKER_ENABLED` | 否 | true | 启用熔断器保护 |
+| `CIRCUIT_BREAKER_THRESHOLD` | 否 | 5 | 熔断器失败阈值 |
+| `CIRCUIT_BREAKER_TIMEOUT` | 否 | 1800 | 熔断器超时（秒） |
+| `CIRCUIT_BREAKER_HALF_OPEN_CALLS` | 否 | 3 | 半开状态最大调用次数 |
+| `COOKIE_FILE` | 否 | - | Cookie 文件路径 |
+| `DRY_RUN` | 否 | false | 干跑模式（跳过下载） |
+
+### 开发环境配置示例
+
+```bash
+# .env
+DEBUG=true
+API_KEY=dev-test-key-12345
+POT_SERVER_URL=http://localhost:4416
+HTTP_PROXY=http://127.0.0.1:7890
+HTTPS_PROXY=http://127.0.0.1:7890
+WECOM_WEBHOOK_URL=
+
+TRANSCRIPT_INTERVAL_MIN=10
+TRANSCRIPT_INTERVAL_MAX=30
+AUDIO_INTERVAL_MIN=30
+AUDIO_INTERVAL_MAX=180
+FILE_RETENTION_DAYS=1
+TZ=Asia/Shanghai
+BASE_URL=http://localhost:8011
+```
+
+### 获取系统配置
+
+```bash
+curl "http://localhost:8000/api/v1/settings/config"
+```
+
+**响应**
+```json
+{
+  "timezone": "Asia/Shanghai",
+  "debug": false,
+  "file_retention_days": 60
+}
+```
+
+---
+
+## 多下载器配置
+
+系统支持多种下载方式，并提供自动降级机制，以提高下载成功率和服务可靠性。
+
+### 支持的下载器
+
+| 下载器 | 说明 | 优点 | 缺点 | 成本 |
+|--------|------|------|------|------|
+| **yt-dlp** | 本地 yt-dlp 库 | 免费、功能强大 | 可能遇到 YouTube 限流 | 免费 |
+| **TikHub** | TikHub API 服务 | 稳定、不受限流影响 | 需要 API key | 0.002$/次 |
+
+### 工作原理
+
+```
+请求下载
+  │
+  ├─> 1. 尝试 yt-dlp（优先）
+  │   ├─ 成功 → 返回结果
+  │   ├─ HTTP 403（本地 IP 问题）→ 直接失败，不降级
+  │   └─ 其他失败（限流/网络）→ 继续降级
+  │
+  ├─> 2. 尝试 TikHub（降级）
+  │   ├─ 成功 → 返回结果
+  │   ├─ HTTP 403（本地 IP 问题）→ 直接失败
+  │   └─ 失败 → 返回错误
+  │
+  └─ 所有下载器都失败 → 任务失败
+```
+
+### 智能降级策略
+
+- **403 错误优化**：当任意下载器报 HTTP 403 错误时，说明本地网络 IP 有问题（被封禁或地区限制），此时系统会立即停止尝试其他下载器，因为所有渠道都会检测目的地 IP，继续尝试也必然失败，这样可以：
+  - 节省时间：避免无意义的重试和降级
+  - 降低成本：避免浪费 API 调用配额（如 TikHub）
+  - 明确问题：快速识别是本地网络环境问题而非下载器问题
+
+- **其他错误降级**：对于网络超时、连接失败等临时性错误，系统会继续尝试下一个下载器，提高成功率
+
+### 熔断器保护
+
+系统采用熔断器模式保护下载器，避免持续性故障影响服务：
+
+**熔断器状态机**
+
+```
+CLOSED（正常）
+  ├─ 连续失败 5 次 → OPEN（熔断）
+  │
+OPEN（熔断）
+  ├─ 拒绝所有请求，直接跳过该下载器
+  ├─ 等待 30 分钟 → HALF_OPEN（半开）
+  │
+HALF_OPEN（半开）
+  ├─ 允许 3 次测试请求
+  ├─ 连续成功 2 次 → CLOSED（恢复）
+  └─ 失败 → OPEN（重新熔断）
+```
+
+**实际效果**
+
+```
+场景：yt-dlp 遇到 YouTube 限流
+
+时刻 10:00 - yt-dlp 连续失败 5 次
+           → 熔断器开启
+
+时刻 10:00-10:30 - 所有任务直接使用 TikHub
+                 → 跳过 yt-dlp，节省时间
+
+时刻 10:30 - 熔断器恢复，重新尝试 yt-dlp
+```
+
+### 配置示例
+
+**场景 1：仅使用 yt-dlp（免费）**
+
+```bash
+DOWNLOADER_PRIORITY=ytdlp
+TIKHUB_API_KEY=  # 不配置
+```
+
+**场景 2：yt-dlp + TikHub 双重保障（推荐）**
+
+```bash
+DOWNLOADER_PRIORITY=ytdlp,tikhub
+TIKHUB_API_KEY=your-api-key-here
+```
+
+**场景 3：仅使用 TikHub（最稳定）**
+
+```bash
+DOWNLOADER_PRIORITY=tikhub
+TIKHUB_API_KEY=your-api-key-here
+```
+
+**场景 4：自定义熔断器参数**
+
+```bash
+# 更激进的熔断策略（适合频繁限流的环境）
+CIRCUIT_BREAKER_THRESHOLD=3        # 3 次失败即熔断
+CIRCUIT_BREAKER_TIMEOUT=900        # 15 分钟后恢复
+
+# 更保守的熔断策略（适合偶尔限流的环境）
+CIRCUIT_BREAKER_THRESHOLD=10       # 10 次失败才熔断
+CIRCUIT_BREAKER_TIMEOUT=3600       # 1 小时后恢复
+```
+
+**场景 5：禁用熔断器（不推荐）**
+
+```bash
+CIRCUIT_BREAKER_ENABLED=false
+```
+
+---
+
+## 敏感词审核配置
+
+企业微信通知支持敏感词审核功能，可以自动处理消息中的敏感内容。
+
+### 审核策略说明
+
+| 策略 | 说明 |
+|------|------|
+| `block` | 检测到敏感词时拒绝发送，发送告警消息 |
+| `replace` | 将敏感词替换为 `[敏感词]` |
+| `pinyin_reverse` | 将敏感词转换为拼音混淆形式（默认） |
+
+### 配置示例
+
+```bash
+# 启用敏感词审核
+WECOM_MODERATION_ENABLED=true
+# 敏感词库 URL（支持多个，逗号分隔）
+WECOM_MODERATION_URLS=https://example.com/words1.txt,https://example.com/words2.txt
+# 审核策略：pinyin_reverse（拼音混淆）
+WECOM_MODERATION_STRATEGY=pinyin_reverse
+```
+
+### 敏感词文件格式
+
+每行一个敏感词，支持注释（以 `#` 开头）：
+
+```text
+# 这是注释
+敏感词1
+敏感词2
+```
+
+---
+
+## PO Token 配置
+
+YouTube 使用 PO (Proof of Origin) Token 来验证请求来源。本项目集成了 `bgutil-ytdlp-pot-provider` 来自动获取 PO Token。
+
+### 工作原理
+
+```
+┌─────────────┐    请求 PO Token    ┌─────────────────┐
+│   yt-dlp    │ ──────────────────> │  bgutil HTTP    │
+│  (下载器)   │ <────────────────── │  (POT Provider) │
+└─────────────┘    返回 Token       └─────────────────┘
+                                            │
+                                            v
+                                    ┌───────────────┐
+                                    │   YouTube     │
+                                    │   BotGuard    │
+                                    └───────────────┘
+```
+
+### 配置方式
+
+#### 方式一：仅 PO Token Provider（当前默认）
+
+无需额外配置，系统会自动通过 `POT_SERVER_URL` 获取 PO Token。
+
+```bash
+# .env
+POT_SERVER_URL=http://localhost:4416  # 开发环境
+POT_SERVER_URL=http://pot-provider:4416  # Docker 生产环境
+```
+
+#### 方式二：Cookies + PO Token（推荐）
+
+使用 Cookies 可以大幅提高下载成功率：
+
+```bash
+# 1. 导出 YouTube Cookies（参考上文 Cookie 获取方式）
+
+# 2. 配置环境变量
+COOKIE_FILE=./cookies.txt
+```
+
+### 配置逻辑
+
+| 场景 | Cookies | PO Token 请求 | 成功率 |
+|------|---------|---------------|--------|
+| 有 Cookies | 是 | 按需自动 | 高 |
+| 无 Cookies | 否 | 强制请求 | 中 |
+
+### 本地开发 POT Provider
+
+开发环境需要单独启动 POT Provider 服务：
+
+```bash
+# 使用 Docker 启动 bgutil POT Provider
+docker run -d -p 4416:4416 brainicism/bgutil-ytdlp-pot-provider
+
+# 验证服务
+curl http://localhost:4416/ping
+```
+
+### 常见问题
+
+**Q: 日志显示 "Sign in to confirm you're not a bot"**
+
+A: 这表示 YouTube 检测到自动化请求。解决方案：
+1. 确保 POT Provider 服务正常运行
+2. 配置有效的 Cookies 文件
+3. 降低下载频率（增大间隔配置）
+4. 检查 IP 熔断器状态
+
+**Q: PO Token 请求失败**
+
+A: 检查 POT Provider 服务：
+```bash
+# 测试 POT Provider
+curl -X POST http://localhost:4416/get_pot \
+  -H "Content-Type: application/json" \
+  -d '{"client": "web", "video_id": "dQw4w9WgXcQ"}'
+```
+
+---
+
+## 查询任务状态
+
+### 请求
+
 ```bash
 curl http://localhost:8000/api/v1/tasks/{task_id} \
   -H "X-API-Key: your-api-key"
 ```
 
-**响应 - 已完成（音频+字幕模式）**
+### 响应示例
+
+**已完成（音频+字幕模式）**
 ```json
 {
   "task_id": "550e8400-e29b-41d4-a716-446655440000",
@@ -334,7 +848,8 @@ curl http://localhost:8000/api/v1/tasks/{task_id} \
     "has_transcript": true,
     "audio_fallback": false,
     "reused_audio": false,
-    "reused_transcript": false
+    "reused_transcript": false,
+    "partial_success": false
   },
   "position": null,
   "estimated_wait": null,
@@ -347,22 +862,30 @@ curl http://localhost:8000/api/v1/tasks/{task_id} \
 }
 ```
 
-**响应 - 已完成（仅字幕模式，视频有字幕）**
+**部分成功（音频失败，字幕成功）**
 ```json
 {
   "task_id": "550e8400-e29b-41d4-a716-446655440000",
   "status": "completed",
-  "video_id": "dQw4w9WgXcQ",
-  "video_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-  "video_info": {
-    "title": "Rick Astley - Never Gonna Give You Up",
-    "author": "Rick Astley",
-    "channel_id": "UCuAXFkgsw1L7xaCfnd5JJOw",
-    "duration": 213,
-    "description": "Official music video...",
-    "upload_date": "20091025",
-    "view_count": 1500000000,
-    "thumbnail": "https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg"
+  "result": {
+    "has_transcript": true,
+    "audio_fallback": false,
+    "reused_audio": false,
+    "reused_transcript": false,
+    "partial_success": true,
+    "failure_details": {
+      "audio": {
+        "success": false,
+        "error": {
+          "code": "RATE_LIMITED",
+          "message": "Rate limited by YouTube",
+          "retry_count": 1
+        }
+      },
+      "transcript": {
+        "success": true
+      }
+    }
   },
   "files": {
     "audio": null,
@@ -373,81 +896,11 @@ curl http://localhost:8000/api/v1/tasks/{task_id} \
       "bitrate": null,
       "language": "en"
     }
-  },
-  "error": null,
-  "cache_hit": false,
-  "request": {
-    "include_audio": false,
-    "include_transcript": true
-  },
-  "result": {
-    "has_transcript": true,
-    "audio_fallback": false,
-    "reused_audio": false,
-    "reused_transcript": false
-  },
-  "position": null,
-  "estimated_wait": null,
-  "progress": null,
-  "created_at": "2025-12-12T10:00:00Z",
-  "started_at": "2025-12-12T10:00:05Z",
-  "completed_at": "2025-12-12T10:00:10Z",
-  "expires_at": "2025-02-10T10:00:10Z",
-  "message": null
+  }
 }
 ```
 
-**响应 - 已完成（仅字幕模式，视频无字幕，自动下载音频）**
-```json
-{
-  "task_id": "550e8400-e29b-41d4-a716-446655440000",
-  "status": "completed",
-  "video_id": "dQw4w9WgXcQ",
-  "video_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-  "video_info": {
-    "title": "Rick Astley - Never Gonna Give You Up",
-    "author": "Rick Astley",
-    "channel_id": "UCuAXFkgsw1L7xaCfnd5JJOw",
-    "duration": 213,
-    "description": "Official music video...",
-    "upload_date": "20091025",
-    "view_count": 1500000000,
-    "thumbnail": "https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg"
-  },
-  "files": {
-    "audio": {
-      "url": "/api/v1/files/abc123.m4a",
-      "size": 3456789,
-      "format": "m4a",
-      "bitrate": 128,
-      "language": null
-    },
-    "transcript": null
-  },
-  "error": null,
-  "cache_hit": false,
-  "request": {
-    "include_audio": false,
-    "include_transcript": true
-  },
-  "result": {
-    "has_transcript": false,
-    "audio_fallback": true,
-    "reused_audio": false,
-    "reused_transcript": false
-  },
-  "position": null,
-  "estimated_wait": null,
-  "progress": null,
-  "created_at": "2025-12-12T10:00:00Z",
-  "started_at": "2025-12-12T10:00:05Z",
-  "completed_at": "2025-12-12T10:01:30Z",
-  "expires_at": "2025-02-10T10:01:30Z",
-  "message": null
-}
-```
-
-**响应 - 缓存命中（资源已存在，立即返回）**
+**缓存命中（资源已存在，立即返回）**
 ```json
 {
   "task_id": null,
@@ -503,7 +956,7 @@ curl http://localhost:8000/api/v1/tasks/{task_id} \
 }
 ```
 
-**客户端处理建议**
+### 客户端处理建议
 
 ```python
 response = create_task(video_url)
@@ -519,7 +972,9 @@ else:
         time.sleep(5)
 ```
 
-### Webhook 回调
+---
+
+## Webhook 回调
 
 下载完成/失败后，系统会 POST 到指定的 `callback_url`：
 
@@ -531,7 +986,8 @@ X-Task-Id: 550e8400-e29b-41d4-a716-446655440000
 X-Timestamp: 1702357425
 ```
 
-**签名验证**（Python 示例）
+### 签名验证（Python 示例）
+
 ```python
 import hmac
 import hashlib
@@ -541,373 +997,73 @@ def verify_signature(body: bytes, signature: str, secret: str) -> bool:
     return hmac.compare_digest(f"sha256={expected}", signature)
 ```
 
-## 配置说明
-
-### 环境变量
-
-| 变量 | 必填 | 默认值 | 说明 |
-|------|------|--------|------|
-| `API_KEY` | 是 | - | API 鉴权密钥 |
-| `WECOM_WEBHOOK_URL` | 否 | - | 企业微信 Webhook URL |
-| `WECOM_MODERATION_ENABLED` | 否 | false | 启用敏感词审核 |
-| `WECOM_MODERATION_URLS` | 否 | - | 敏感词库 URL 列表（逗号分隔） |
-| `WECOM_MODERATION_STRATEGY` | 否 | pinyin_reverse | 审核策略：block/replace/pinyin_reverse |
-| `HOST` | 否 | 0.0.0.0 | 服务监听地址 |
-| `PORT` | 否 | 8000 | 服务监听端口 |
-| `DEBUG` | 否 | false | 调试模式 |
-| `POT_SERVER_URL` | 否 | http://pot-provider:4416 | PO Token 服务地址 |
-| `HTTP_PROXY` | 否 | - | HTTP 代理（开发环境） |
-| `DOWNLOAD_CONCURRENCY` | 否 | 1 | 下载并发数（预留，暂未实现） |
-| `TRANSCRIPT_INTERVAL_MIN` | 否 | 20 | 字幕任务最小间隔（秒） |
-| `TRANSCRIPT_INTERVAL_MAX` | 否 | 40 | 字幕任务最大间隔（秒） |
-| `AUDIO_INTERVAL_MIN` | 否 | 60 | 音频/混合任务最小间隔（秒） |
-| `AUDIO_INTERVAL_MAX` | 否 | 600 | 音频/混合任务最大间隔（秒） |
-| `TASK_INTERVAL_MIN` | 否 | 60 | 任务最小间隔（秒）**[已弃用]** |
-| `TASK_INTERVAL_MAX` | 否 | 600 | 任务最大间隔（秒）**[已弃用]** |
-| `AUDIO_QUALITY` | 否 | 128 | 音频比特率 (kbps) |
-| `DATA_DIR` | 否 | ./data | 数据存储目录 |
-| `FILE_RETENTION_DAYS` | 否 | 60 | 文件保留天数 |
-| `TIKHUB_API_KEY` | 否 | - | TikHub API 密钥（用于下载降级） |
-| `DOWNLOADER_PRIORITY` | 否 | ytdlp,tikhub | 下载器优先级顺序 |
-| `CIRCUIT_BREAKER_ENABLED` | 否 | true | 启用熔断器保护 |
-| `CIRCUIT_BREAKER_THRESHOLD` | 否 | 5 | 熔断器失败阈值 |
-| `CIRCUIT_BREAKER_TIMEOUT` | 否 | 1800 | 熔断器超时（秒） |
-| `CIRCUIT_BREAKER_HALF_OPEN_CALLS` | 否 | 3 | 半开状态最大调用次数 |
-| `COOKIE_FILE` | 否 | - | Cookie 文件路径 |
-| `DRY_RUN` | 否 | false | 干跑模式（跳过下载） |
-
-### 开发环境配置示例
-
-```bash
-# .env
-DEBUG=true
-API_KEY=dev-test-key-12345
-POT_SERVER_URL=http://localhost:4416
-HTTP_PROXY=http://127.0.0.1:7890
-HTTPS_PROXY=http://127.0.0.1:7890
-WECOM_WEBHOOK_URL=
-
-TASK_INTERVAL_MIN=10
-TASK_INTERVAL_MAX=30
-FILE_RETENTION_DAYS=1
-```
-
-### 敏感词审核配置
-
-企业微信通知支持敏感词审核功能，可以自动处理消息中的敏感内容。
-
-**审核策略说明**
-
-| 策略 | 说明 |
-|------|------|
-| `block` | 检测到敏感词时拒绝发送，发送告警消息 |
-| `replace` | 将敏感词替换为 `[敏感词]` |
-| `pinyin_reverse` | 将敏感词转换为拼音混淆形式（默认） |
-
-**配置示例**
-
-```bash
-# 启用敏感词审核
-WECOM_MODERATION_ENABLED=true
-# 敏感词库 URL（支持多个，逗号分隔）
-WECOM_MODERATION_URLS=https://example.com/words1.txt,https://example.com/words2.txt
-# 审核策略：pinyin_reverse（拼音混淆）
-WECOM_MODERATION_STRATEGY=pinyin_reverse
-```
-
-**敏感词文件格式**
-
-每行一个敏感词，支持注释（以 `#` 开头）：
-
-```text
-# 这是注释
-敏感词1
-敏感词2
-```
-
-### 多下载器配置
-
-系统支持多种下载方式，并提供自动降级机制，以提高下载成功率和服务可靠性。
-
-#### 支持的下载器
-
-| 下载器 | 说明 | 优点 | 缺点 | 成本 |
-|--------|------|------|------|------|
-| **yt-dlp** | 本地 yt-dlp 库 | 免费、功能强大 | 可能遇到 YouTube 限流 | 免费 |
-| **TikHub** | TikHub API 服务 | 稳定、不受限流影响 | 需要 API key | 0.002$/次 |
-
-#### 工作原理
-
-```
-请求下载
-  │
-  ├─> 1. 尝试 yt-dlp（优先）
-  │   ├─ 成功 → 返回结果
-  │   ├─ HTTP 403（本地 IP 问题）→ 直接失败，不降级
-  │   └─ 其他失败（限流/网络）→ 继续降级
-  │
-  ├─> 2. 尝试 TikHub（降级）
-  │   ├─ 成功 → 返回结果
-  │   ├─ HTTP 403（本地 IP 问题）→ 直接失败
-  │   └─ 失败 → 返回错误
-  │
-  └─ 所有下载器都失败 → 任务失败
-```
-
-**智能降级策略**
-
-- **403 错误优化**：当任意下载器报 HTTP 403 错误时，说明本地网络 IP 有问题（被封禁或地区限制），此时系统会立即停止尝试其他下载器，因为所有渠道都会检测目的地 IP，继续尝试也必然失败，这样可以：
-  - 节省时间：避免无意义的重试和降级
-  - 降低成本：避免浪费 API 调用配额（如 TikHub）
-  - 明确问题：快速识别是本地网络环境问题而非下载器问题
-
-- **其他错误降级**：对于网络超时、连接失败等临时性错误，系统会继续尝试下一个下载器，提高成功率
-
-#### 熔断器保护
-
-系统采用熔断器模式保护下载器，避免持续性故障影响服务：
-
-**熔断器状态机**
-
-```
-CLOSED（正常）
-  ├─ 连续失败 5 次 → OPEN（熔断）
-  │
-OPEN（熔断）
-  ├─ 拒绝所有请求，直接跳过该下载器
-  ├─ 等待 30 分钟 → HALF_OPEN（半开）
-  │
-HALF_OPEN（半开）
-  ├─ 允许 3 次测试请求
-  ├─ 连续成功 2 次 → CLOSED（恢复）
-  └─ 失败 → OPEN（重新熔断）
-```
-
-**实际效果**
-
-```
-场景：yt-dlp 遇到 YouTube 限流
-
-时刻 10:00 - yt-dlp 连续失败 5 次
-           → 熔断器开启
-
-时刻 10:00-10:30 - 所有任务直接使用 TikHub
-                 → 跳过 yt-dlp，节省时间
-
-时刻 10:30 - 熔断器恢复，重新尝试 yt-dlp
-```
-
-#### 配置示例
-
-**场景 1：仅使用 yt-dlp（免费）**
-
-```bash
-DOWNLOADER_PRIORITY=ytdlp
-TIKHUB_API_KEY=  # 不配置
-```
-
-**场景 2：yt-dlp + TikHub 双重保障（推荐）**
-
-```bash
-DOWNLOADER_PRIORITY=ytdlp,tikhub
-TIKHUB_API_KEY=your-api-key-here
-```
-
-**场景 3：仅使用 TikHub（最稳定）**
-
-```bash
-DOWNLOADER_PRIORITY=tikhub
-TIKHUB_API_KEY=your-api-key-here
-```
-
-**场景 4：自定义熔断器参数**
-
-```bash
-# 更激进的熔断策略（适合频繁限流的环境）
-CIRCUIT_BREAKER_THRESHOLD=3        # 3 次失败即熔断
-CIRCUIT_BREAKER_TIMEOUT=900        # 15 分钟后恢复
-
-# 更保守的熔断策略（适合偶尔限流的环境）
-CIRCUIT_BREAKER_THRESHOLD=10       # 10 次失败才熔断
-CIRCUIT_BREAKER_TIMEOUT=3600       # 1 小时后恢复
-```
-
-**场景 5：禁用熔断器（不推荐）**
-
-```bash
-CIRCUIT_BREAKER_ENABLED=false
-```
-
-#### 监控和统计
-
-系统会记录每个下载器的成功/失败情况，可通过日志查看：
-
-```
-[INFO] DownloaderManager initialized with 2 downloader(s): ['ytdlp', 'tikhub']
-[INFO] Trying downloader: ytdlp (circuit: closed)
-[WARNING] ✗ ytdlp failed: RATE_LIMITED - Rate limited by YouTube
-[INFO] Falling back to next downloader...
-[INFO] Trying downloader: tikhub (circuit: closed)
-[INFO] ✓ Download succeeded with tikhub (success rate: 98.5%)
-```
-
-熔断器状态可通过健康检查接口查询（TODO：待实现）。
-
-## PO Token 配置
-
-YouTube 使用 PO (Proof of Origin) Token 来验证请求来源。本项目集成了 `bgutil-ytdlp-pot-provider` 来自动获取 PO Token。
-
-### 工作原理
-
-```
-┌─────────────┐    请求 PO Token    ┌─────────────────┐
-│   yt-dlp    │ ──────────────────> │  bgutil HTTP    │
-│  (下载器)   │ <────────────────── │  (POT Provider) │
-└─────────────┘    返回 Token       └─────────────────┘
-                                            │
-                                            v
-                                    ┌───────────────┐
-                                    │   YouTube     │
-                                    │   BotGuard    │
-                                    └───────────────┘
-```
-
-### 配置方式
-
-#### 方式一：仅 PO Token Provider（当前默认）
-
-无需额外配置，系统会自动通过 `POT_SERVER_URL` 获取 PO Token。
-
-```bash
-# .env
-POT_SERVER_URL=http://localhost:4416  # 开发环境
-POT_SERVER_URL=http://pot-provider:4416  # Docker 生产环境
-```
-
-#### 方式二：Cookies + PO Token（推荐）
-
-使用 Cookies 可以大幅提高下载成功率：
-
-```bash
-# 1. 导出 YouTube Cookies
-yt-dlp --cookies-from-browser chrome --cookies cookies.txt "https://www.youtube.com"
-
-# 2. 配置环境变量
-COOKIE_FILE=./cookies.txt
-```
-
-### youtube cookie 获取方式
-Extractors · yt-dlp/yt-dlp Wiki:  https://github.com/yt-dlp/yt-dlp/wiki/extractors
-
-Caution
-
 ---
-
-By using your account with yt-dlp, you run the risk of it being banned (temporarily or permanently). Be mindful with the request rate and amount of downloads you make with an account.  
-Use it only when necessary, or consider using a throwaway account.
-
----
-
-Note
-
-This is only necessary for content that requires an account to access, such as private playlists, age-restricted videos and members-only content.
-
-If you are unfamiliar with the basics of exporting cookies and passing them to yt-dlp, then first see [How do I pass cookies to yt-dlp?](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp)
-
----
-
-YouTube rotates account cookies frequently on open YouTube browser tabs as a security measure.  
-To export cookies that will remain working with yt-dlp, you will need to export cookies in such a way that they are never rotated.
-
----
-
-One way to do this is through a private browsing/incognito window:
-
-1. Open a new private browsing/incognito window and log into YouTube
-2. In same window and same tab from step 1, navigate to `https://www.youtube.com/robots.txt` (this should be the **only** private/incognito browsing tab open)
-3. Export `youtube.com` cookies from the browser, then **close the private browsing/incognito window** so that the session is never opened in the browser again.
-
-Note
-
-Do **NOT** use the `--cookies COOKIEFILE --cookies-from-browser BROWSER` method (as described in the above FAQ link) to export your cookies to a cookiefile. This will export **all** of your regular browser cookies, but **not** the cookies from this private/incognito YouTube session. Instead, use one of the browser extensions recommended in the [FAQ](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp).
-
-
-### 配置逻辑
-
-| 场景 | Cookies | PO Token 请求 | 成功率 |
-|------|---------|---------------|--------|
-| 有 Cookies | 是 | 按需自动 | 高 |
-| 无 Cookies | 否 | 强制请求 | 中 |
-
-### 本地开发 POT Provider
-
-开发环境需要单独启动 POT Provider 服务：
-
-```bash
-# 使用 Docker 启动 bgutil POT Provider
-docker run -d -p 4416:4416 brainicism/bgutil-ytdlp-pot-provider
-
-# 验证服务
-curl http://localhost:4416/ping
-```
-
-### 常见问题
-
-**Q: 日志显示 "Sign in to confirm you're not a bot"**
-
-A: 这表示 YouTube 检测到自动化请求。解决方案：
-1. 确保 POT Provider 服务正常运行
-2. 配置有效的 Cookies 文件
-3. 降低下载频率（增大 `TASK_INTERVAL_MIN/MAX`）
-
-**Q: PO Token 请求失败**
-
-A: 检查 POT Provider 服务：
-```bash
-# 测试 POT Provider
-curl -X POST http://localhost:4416/get_pot \
-  -H "Content-Type: application/json" \
-  -d '{"client": "web", "video_id": "dQw4w9WgXcQ"}'
-```
 
 ## 项目结构
 
 ```
 youtube-audio-api/
-├── docker-compose.yml          # 生产部署
-├── docker-compose.dev.yml      # 开发环境
+├── docker/                          # Docker 配置
+│   ├── docker-compose.prod.yml      # 生产环境
+│   └── docker-compose.dev.yml      # 开发环境
 ├── Dockerfile
-├── requirements.txt
+├── pyproject.toml                   # 项目配置（使用 uv）
+├── uv.lock                         # 依赖锁定文件
 ├── .env.example
 ├── scripts/
-│   ├── dev.ps1                 # Windows 开发脚本
-│   └── dev.sh                  # Linux/Mac 开发脚本
+│   ├── dev.ps1                    # Windows 开发脚本
+│   └── dev.sh                     # Linux/Mac 开发脚本
 ├── src/
-│   ├── main.py                 # FastAPI 入口
-│   ├── config.py               # 配置管理
+│   ├── main.py                    # FastAPI 入口
+│   ├── config.py                  # 配置管理
+│   ├── __init__.py                 # 版本信息
 │   ├── api/
-│   │   ├── routes.py           # API 路由
-│   │   ├── deps.py             # 依赖注入
-│   │   └── schemas.py          # 数据模型
+│   │   ├── routes.py              # 主要 API 路由
+│   │   ├── deps.py                # 依赖注入
+│   │   ├── schemas.py             # 数据模型
+│   │   ├── settings_routes.py      # Settings API
+│   │   ├── manual_upload_routes.py # 人工上传 API
+│   │   └── video_resource_routes.py # 视频资源 API
 │   ├── core/
-│   │   ├── downloader.py       # yt-dlp 封装
-│   │   └── worker.py           # 下载 Worker
+│   │   ├── downloader.py          # 下载器入口
+│   │   ├── worker.py              # 下载 Worker
+│   │   ├── ip_ban_breaker.py      # IP 熔断器
+│   │   └── ip_ban_models.py       # IP 熔断模型
+│   ├── downloaders/                # 多下载器实现
+│   │   ├── base.py               # 下载器基类
+│   │   ├── manager.py            # 下载器管理器
+│   │   ├── circuit_breaker.py     # 下载器熔断器
+│   │   ├── ytdlp_downloader.py   # yt-dlp 实现
+│   │   ├── tikhub_downloader.py  # TikHub 实现
+│   │   ├── models.py             # 下载器模型
+│   │   └── exceptions.py         # 下载器异常
 │   ├── db/
-│   │   ├── database.py         # SQLite 操作
-│   │   └── models.py           # 数据模型
+│   │   ├── database.py            # SQLite 操作
+│   │   └── models.py             # 数据模型
 │   ├── services/
-│   │   ├── task_service.py     # 任务服务
-│   │   ├── file_service.py     # 文件服务
-│   │   ├── callback_service.py # 回调服务
-│   │   └── notify.py           # 通知服务
+│   │   ├── task_service.py        # 任务服务
+│   │   ├── file_service.py        # 文件服务
+│   │   ├── callback_service.py    # 回调服务
+│   │   ├── notify.py             # 通知服务
+│   │   ├── manual_upload_service.py # 人工上传服务
+│   │   ├── transcode_service.py   # 转码服务
+│   │   ├── metadata_service.py    # 元数据服务
+│   │   └── tikhub_service.py     # TikHub 服务
+│   ├── static/                    # 静态资源
+│   │   └── admin/                # 管理界面
 │   └── utils/
-│       ├── logger.py           # 日志
-│       └── helpers.py          # 工具函数
-├── data/                       # 运行时数据
+│       ├── logger.py              # 日志
+│       └── helpers.py             # 工具函数
+├── data/                           # 运行时数据
 │   ├── db.sqlite
-│   └── files/
+│   ├── files/
+│   │   ├── audio/
+│   │   └── transcript/
+│   └── logs/
 └── tests/
 ```
+
+---
 
 ## 任务状态
 
@@ -918,6 +1074,8 @@ youtube-audio-api/
 | `completed` | 已完成 |
 | `failed` | 失败（已重试） |
 | `cancelled` | 已取消 |
+
+---
 
 ## 错误码
 
@@ -933,6 +1091,8 @@ youtube-audio-api/
 | `NETWORK_ERROR` | 网络错误 | 是 |
 | `POT_TOKEN_FAILED` | PO Token 失败 | 是 |
 
+---
+
 ## 测试
 
 ```bash
@@ -946,20 +1106,26 @@ pytest --cov=src --cov-report=html
 pytest -m "not integration"
 ```
 
+---
+
 ## 技术栈
 
 | 组件 | 技术 | 版本 |
 |------|------|------|
 | Web 框架 | FastAPI | ≥0.104 |
 | ASGI 服务器 | uvicorn | ≥0.24 |
-| 下载核心 | yt-dlp | ≥2025.05.22 |
-| TLS 指纹 | curl_cffi | ≥0.6 |
+| 下载核心 | yt-dlp | ≥2026.1.19 |
+| TLS 指纹 | curl_cffi | ≥0.14.0 |
 | PO Token | bgutil-ytdlp-pot-provider | latest |
 | 数据库 | SQLite + aiosqlite | ≥0.19 |
 | 配置管理 | pydantic-settings | ≥2.0 |
 | 定时任务 | APScheduler | ≥3.10 |
 | 日志 | loguru | ≥0.7 |
 | HTTP 客户端 | httpx | ≥0.25 |
+| 包管理 | uv | latest |
+| 通知 | wecom-notifier | ≥0.2.0 |
+
+---
 
 ## 注意事项
 
@@ -968,18 +1134,23 @@ pytest -m "not integration"
 - API Key 不要提交到代码仓库
 - 文件使用 UUID 防止枚举攻击
 - 客户端需验证 Webhook HMAC 签名
+- Cookie 文件包含敏感信息，注意保护
 
 ### 性能
 
 - 默认单并发，避免触发 YouTube 风控
 - 任务间隔随机，模拟人类行为
 - SQLite 足够处理日均 60 次下载
+- IP 熔断机制避免频繁请求
 
 ### 可靠性
 
 - 服务重启自动恢复未完成任务
 - 可重试错误自动指数退避重试
 - Webhook 失败自动重试 3 次
+- 部分成功场景支持资源复用
+
+---
 
 ## License
 
