@@ -28,6 +28,65 @@ from src.db.models import (
 from src.utils.logger import logger
 
 
+# ==================== SQLite DateTime Type Converters ====================
+# 注册 datetime 类型转换器，让 SQLite 自动将 TIMESTAMP 列解析为 datetime 对象
+
+
+def _adapt_datetime_iso(val: datetime) -> str:
+    """
+    将 datetime 对象转换为 ISO 8601 格式字符串（用于存储）。
+
+    始终存储为 UTC 时间。
+    """
+    # 如果是 naive datetime，假设为 UTC
+    if val.tzinfo is None:
+        val = val.replace(tzinfo=timezone.utc)
+    # 转换为 UTC 并格式化为 ISO 8601（带 'Z' 后缀表示 UTC）
+    return val.astimezone(timezone.utc).isoformat()
+
+
+def _convert_timestamp(val: bytes) -> datetime:
+    """
+    将 SQLite TIMESTAMP 字符串转换为 UTC datetime 对象（用于读取）。
+
+    支持多种格式：
+    - ISO 8601: "2026-01-28T15:07:47.123456+00:00" 或 "2026-01-28T15:07:47Z"
+    - SQLite 默认: "2026-01-28 15:07:47.123456"
+
+    返回带 UTC 时区信息的 datetime 对象。
+    """
+    val_str = val.decode("utf-8")
+
+    # 尝试解析 ISO 8601 格式（带时区）
+    if "T" in val_str:
+        try:
+            # 处理 'Z' 后缀（表示 UTC）
+            if val_str.endswith("Z"):
+                val_str = val_str[:-1] + "+00:00"
+            return datetime.fromisoformat(val_str)
+        except ValueError:
+            pass
+
+    # 解析 SQLite 默认格式（假设为 UTC）
+    try:
+        # 支持微秒
+        if "." in val_str:
+            dt = datetime.strptime(val_str, "%Y-%m-%d %H:%M:%S.%f")
+        else:
+            dt = datetime.strptime(val_str, "%Y-%m-%d %H:%M:%S")
+        # 标记为 UTC 时区
+        return dt.replace(tzinfo=timezone.utc)
+    except ValueError as e:
+        logger.warning(f"Failed to parse timestamp: {val_str}, error: {e}")
+        # 降级：返回当前 UTC 时间
+        return datetime.now(timezone.utc)
+
+
+# 注册类型转换器（模块级别，只注册一次）
+sqlite3.register_adapter(datetime, _adapt_datetime_iso)
+sqlite3.register_converter("TIMESTAMP", _convert_timestamp)
+
+
 class Database:
     """Async SQLite database manager."""
 
