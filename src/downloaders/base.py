@@ -53,6 +53,19 @@ class BaseDownloader(ABC):
         """
         pass
 
+    @property
+    def supports_resource_download(self) -> bool:
+        """
+        检查下载器是否支持资源下载（音频/字幕）。
+
+        某些下载器（如 YouTube Data API v3）只提供元数据，不支持资源下载。
+        这类下载器应该返回 False，以便在资源下载流程中被跳过。
+
+        Returns:
+            True 表示支持资源下载，False 表示仅支持元数据获取
+        """
+        return True  # 默认支持资源下载
+
     @abstractmethod
     async def download_resources(
         self,

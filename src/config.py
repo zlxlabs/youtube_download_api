@@ -100,6 +100,11 @@ class Settings(BaseSettings):
         default=None, description="TikHub API key for subtitle fetching"
     )
 
+    # ============ YouTube Data API v3 Configuration ============
+    youtube_data_api_key: Optional[str] = Field(
+        default=None, description="YouTube Data API v3 key for metadata fetching"
+    )
+
     # ============ Downloader Configuration ============
     downloader_priority: str = Field(
         default="ytdlp,tikhub",

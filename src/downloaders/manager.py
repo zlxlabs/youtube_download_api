@@ -17,6 +17,7 @@ from src.downloaders.circuit_breaker import CircuitBreaker, CircuitBreakerOpen
 from src.downloaders.exceptions import AllDownloadersFailed, DownloaderError
 from src.downloaders.models import DownloaderResult, VideoMetadata
 from src.downloaders.tikhub_downloader import TikHubDownloader
+from src.downloaders.youtube_data_api_downloader import YoutubeDataApiDownloader
 from src.downloaders.ytdlp_downloader import YtdlpDownloader
 from src.utils.logger import logger
 
@@ -118,20 +119,33 @@ class DownloaderManager:
         """
         初始化下载器列表。
 
-        根据配置的优先级顺序初始化下载器。
+        从所有优先级配置中收集下载器名称（去重），然后初始化。
+        这样确保元数据专用下载器（如 youtube_data_api）也能被加载。
 
         Returns:
             下载器列表
         """
         downloaders: List[BaseDownloader] = []
 
-        # 从配置读取优先级顺序
-        priority_str = getattr(
-            self.settings, "downloader_priority", "ytdlp,tikhub"
-        )
-        priority_list = [name.strip() for name in priority_str.split(",")]
+        # 从多个配置中收集下载器名称
+        priority_configs = [
+            getattr(self.settings, "metadata_priority", "ytdlp,tikhub"),
+            getattr(self.settings, "transcript_only_priority", "tikhub,ytdlp"),
+            getattr(self.settings, "audio_download_priority", "ytdlp,tikhub"),
+            getattr(self.settings, "downloader_priority", "ytdlp,tikhub"),  # 兜底配置
+        ]
 
-        logger.info(f"Downloader priority: {priority_list}")
+        # 收集所有下载器名称（去重，保持顺序）
+        seen = set()
+        priority_list = []
+        for config in priority_configs:
+            for name in config.split(","):
+                name = name.strip()
+                if name and name not in seen:
+                    seen.add(name)
+                    priority_list.append(name)
+
+        logger.info(f"Initializing downloaders: {priority_list}")
 
         for name in priority_list:
             try:
@@ -145,6 +159,14 @@ class DownloaderManager:
 
                 elif name == "tikhub":
                     downloader = TikHubDownloader(self.settings)
+                    if downloader.is_available:
+                        downloaders.append(downloader)
+                        logger.info(f"  ✓ {name} enabled (API key configured)")
+                    else:
+                        logger.warning(f"  ✗ {name} not available (API key not configured)")
+
+                elif name == "youtube_data_api":
+                    downloader = YoutubeDataApiDownloader(self.settings)
                     if downloader.is_available:
                         downloaders.append(downloader)
                         logger.info(f"  ✓ {name} enabled (API key configured)")
@@ -238,6 +260,14 @@ class DownloaderManager:
         last_error: Optional[Exception] = None
 
         for downloader in self.downloaders:
+            # 跳过不支持资源下载的下载器（如 YouTube Data API v3）
+            if not downloader.supports_resource_download:
+                logger.debug(
+                    f"Skipping {downloader.name} - does not support resource downloads "
+                    f"(metadata-only downloader)"
+                )
+                continue
+
             circuit_breaker = self.circuit_breakers.get(downloader.name)
 
             try:

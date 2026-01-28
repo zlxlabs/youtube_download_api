@@ -15,6 +15,7 @@ class DownloaderType(str, Enum):
 
     YTDLP = "ytdlp"
     TIKHUB = "tikhub"
+    YOUTUBE_DATA_API = "youtube_data_api"
 
 
 @dataclass
