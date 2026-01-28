@@ -33,6 +33,9 @@ window.addEventListener('DOMContentLoaded', async () => {
   // 强制执行初始化，所以先清空 currentTab
   state.currentTab = '';
   doSwitchTab(initialTab);
+
+  // 初始化文件输入监听器
+  initFileInput();
 });
 
 // 加载服务器配置
@@ -68,6 +71,27 @@ function updateBuildInfo() {
       }
     }
     buildInfoElement.textContent = `v${state.version} | 构建时间: ${buildTimeDisplay}`;
+  }
+}
+
+// 初始化文件输入框，显示选中的文件信息
+function initFileInput() {
+  const fileInput = document.getElementById('file-input');
+  const fileMsg = document.querySelector('.file-msg');
+
+  if (fileInput && fileMsg) {
+    fileInput.addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (file) {
+        // 显示文件名和大小
+        fileMsg.innerHTML = `<strong>${escapeHtml(file.name)}</strong><br><span style="font-size: 0.9em; color: var(--text-secondary);">${formatBytes(file.size)}</span>`;
+        fileMsg.style.color = 'var(--primary)';
+      } else {
+        // 重置为默认提示
+        fileMsg.textContent = '点击或拖拽文件至此';
+        fileMsg.style.color = '';
+      }
+    });
   }
 }
 
@@ -726,6 +750,12 @@ async function handleUpload(event) {
       if (xhr.status === 200 || xhr.status === 201) {
         showToast('上传成功', 'success');
         form.reset();
+        // 重置文件输入显示
+        const fileMsg = document.querySelector('.file-msg');
+        if (fileMsg) {
+          fileMsg.textContent = '点击或拖拽文件至此';
+          fileMsg.style.color = '';
+        }
         showStatusCheck('✓ 上传前建议先检查视频状态', 'info');
         switchTab('resources');
       } else {
