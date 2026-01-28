@@ -261,6 +261,9 @@ class ManualUploadService:
                     video_url, video_id
                 )
                 auto_metadata = self._dict_to_video_info(metadata_dict) if metadata_dict else None
+
+                # 重新获取 video_resource，因为 get_metadata 可能已经更新了它
+                video_resource = await self.db.get_video_resource(video_id)
         else:
             logger.info(
                 f"[ManualUpload] No existing video_resource found, "
@@ -271,6 +274,9 @@ class ManualUploadService:
                 video_url, video_id
             )
             auto_metadata = self._dict_to_video_info(metadata_dict) if metadata_dict else None
+
+            # 重新获取 video_resource，因为 get_metadata 可能已经创建了它
+            video_resource = await self.db.get_video_resource(video_id)
 
         merged_metadata = self._merge_metadata(
             auto_metadata, manual_metadata
