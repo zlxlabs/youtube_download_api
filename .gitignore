@@ -76,8 +76,13 @@ tmp/
 temp/
 *.tmp
 *.temp
+nul
 docker/output
 build-optimized.bat
+
+# Test scripts (root level only)
+/test_*.py
+/test_*.sh
 
 # Manual test outputs
 tests/manual/output/
