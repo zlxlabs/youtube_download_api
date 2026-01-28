@@ -74,8 +74,8 @@ class DownloadWorker:
         self.callback_service = callback_service
         self.notify_service = notify_service
 
-        # 使用下载器管理器（支持多下载器降级）
-        self.downloader_manager = DownloaderManager(settings)
+        # 使用下载器管理器（支持多下载器降级 + 元数据缓存）
+        self.downloader_manager = DownloaderManager(settings, db)
         self._running = False
         self._current_task: Optional[Task] = None
 

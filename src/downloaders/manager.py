@@ -5,15 +5,17 @@
 """
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from src.config import Settings
 from src.core.downloader import DownloadCancelledError
+from src.db.database import Database
 from src.downloaders.base import BaseDownloader
 from src.downloaders.circuit_breaker import CircuitBreaker, CircuitBreakerOpen
 from src.downloaders.exceptions import AllDownloadersFailed, DownloaderError
-from src.downloaders.models import DownloaderResult
+from src.downloaders.models import DownloaderResult, VideoMetadata
 from src.downloaders.tikhub_downloader import TikHubDownloader
 from src.downloaders.ytdlp_downloader import YtdlpDownloader
 from src.utils.logger import logger
@@ -90,17 +92,22 @@ class DownloaderManager:
     4. 统计监控
     """
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, db: Optional[Database] = None):
         """
         初始化下载器管理器。
 
         Args:
             settings: 应用配置
+            db: 数据库实例（可选，用于元数据缓存）
         """
         self.settings = settings
+        self.db = db
         self.downloaders = self._init_downloaders()
         self.circuit_breakers = self._init_circuit_breakers()
         self.stats = DownloaderStats()
+
+        # 并发锁：防止同一视频的重复 API 调用
+        self._metadata_locks: Dict[str, asyncio.Lock] = {}
 
         logger.info(
             f"DownloaderManager initialized with {len(self.downloaders)} downloader(s): "
@@ -414,7 +421,7 @@ class DownloaderManager:
 
         for attempt in range(default_max_retries + 1):  # 0, 1, 2
             try:
-                result = await downloader.download(
+                result = await downloader.download_resources(
                     video_url=video_url,
                     video_id=video_id,
                     output_dir=output_dir,
@@ -495,6 +502,152 @@ class DownloaderManager:
             统计摘要字典
         """
         return self.stats.get_summary()
+
+    async def get_metadata(
+        self,
+        video_url: str,
+        video_id: str,
+        priority: Optional[str] = None,
+        force_refresh: bool = False,
+    ) -> Optional[dict]:
+        """
+        获取视频元数据（仅元数据，不下载资源）。
+
+        缓存策略：
+        1. 优先从数据库读取（永久有效，除非手动删除）
+        2. 数据库未命中，按优先级调用下载器
+        3. 成功后写入数据库
+
+        并发控制：
+        - 使用视频级别的锁，防止同一视频重复 API 调用
+        - 双重检查模式（获取锁后再次检查缓存）
+
+        Args:
+            video_url: YouTube 视频 URL
+            video_id: YouTube 视频 ID
+            priority: 自定义优先级（如 "ytdlp,tikhub"），默认使用 metadata_priority
+            force_refresh: 强制刷新（跳过数据库缓存）
+
+        Returns:
+            视频元数据字典，失败返回 None
+
+        Example:
+            # 使用默认优先级
+            metadata = await manager.get_metadata(url, video_id)
+
+            # 自定义优先级
+            metadata = await manager.get_metadata(url, video_id, priority="tikhub,ytdlp")
+
+            # 强制刷新
+            metadata = await manager.get_metadata(url, video_id, force_refresh=True)
+        """
+        # 获取或创建锁
+        if video_id not in self._metadata_locks:
+            self._metadata_locks[video_id] = asyncio.Lock()
+
+        async with self._metadata_locks[video_id]:
+            # 1. 检查数据库缓存（双重检查）
+            if not force_refresh and self.db:
+                try:
+                    resource = await self.db.get_video_resource(video_id)
+                    if resource and resource.video_info:
+                        logger.info(
+                            f"✓ Metadata from database cache: {video_id} "
+                            f"(title: {resource.video_info.get('title', 'N/A')[:50]})"
+                        )
+                        return json.loads(resource.video_info) if isinstance(resource.video_info, str) else resource.video_info
+                except Exception as e:
+                    logger.warning(f"Failed to read metadata from database: {e}")
+
+            # 2. 数据库未命中，按优先级调用下载器
+            effective_priority = priority or getattr(self.settings, "metadata_priority", "ytdlp,tikhub")
+            downloader_names = [name.strip() for name in effective_priority.split(",")]
+
+            logger.info(
+                f"Metadata cache miss, fetching from API: {video_id} "
+                f"(priority: {effective_priority})"
+            )
+
+            errors: List[str] = []
+
+            for name in downloader_names:
+                # 查找下载器
+                downloader = next((d for d in self.downloaders if d.name == name), None)
+                if not downloader:
+                    logger.debug(f"Downloader {name} not available, skipping")
+                    continue
+
+                try:
+                    # 调用下载器获取元数据
+                    logger.debug(f"Trying downloader: {downloader.name}")
+                    metadata = await downloader.fetch_metadata(video_url, video_id)
+
+                    if metadata:
+                        logger.info(
+                            f"✓ Metadata fetched from {downloader.name}: {video_id} "
+                            f"(title: {metadata.get('title', 'N/A')[:50]})"
+                        )
+
+                        # 3. 写入数据库（永久保存）
+                        if self.db:
+                            try:
+                                # 确保 metadata 是字典
+                                metadata_dict = metadata if isinstance(metadata, dict) else metadata.__dict__
+                                await self._save_metadata_to_db(video_id, metadata_dict)
+                            except Exception as e:
+                                logger.warning(f"Failed to save metadata to database: {e}")
+
+                        return metadata
+
+                except Exception as e:
+                    error_msg = f"{downloader.name}: {str(e)}"
+                    errors.append(error_msg)
+                    logger.warning(f"Failed to fetch metadata with {downloader.name}: {e}")
+                    continue
+
+            # 所有下载器都失败
+            logger.error(f"All downloaders failed to fetch metadata for {video_id}")
+            if errors:
+                logger.error(f"Errors:\n" + "\n".join(f"  - {e}" for e in errors))
+
+            return None
+
+    async def _save_metadata_to_db(self, video_id: str, metadata: dict) -> None:
+        """
+        保存元数据到数据库。
+
+        Args:
+            video_id: 视频 ID
+            metadata: 元数据字典
+        """
+        if not self.db:
+            return
+
+        try:
+            # 检查是否已存在
+            existing = await self.db.get_video_resource(video_id)
+
+            if existing:
+                # 更新现有记录
+                await self.db.update_video_resource(
+                    video_id=video_id,
+                    video_info=metadata,
+                )
+                logger.debug(f"Updated metadata in database: {video_id}")
+            else:
+                # 创建新记录
+                from src.db.models import VideoResource
+                resource = VideoResource(
+                    video_id=video_id,
+                    video_info=metadata,
+                    has_native_transcript=False,  # 暂时未知
+                )
+                await self.db.create_video_resource(resource)
+                logger.debug(f"Saved metadata to database: {video_id}")
+
+        except Exception as e:
+            logger.error(f"Failed to save metadata to database: {e}", exc_info=True)
+            # 不抛出异常，元数据获取成功就行
 
     def cancel_all(self) -> None:
         """取消所有下载器的当前操作。"""

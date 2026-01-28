@@ -54,7 +54,7 @@ class BaseDownloader(ABC):
         pass
 
     @abstractmethod
-    async def download(
+    async def download_resources(
         self,
         video_url: str,
         video_id: str,
@@ -63,7 +63,16 @@ class BaseDownloader(ABC):
         include_transcript: bool = True,
     ) -> DownloaderResult:
         """
-        下载视频音频和字幕。
+        下载视频音频和/或字幕。
+
+        此方法执行实际的资源下载操作，包括：
+        - 下载音频文件（如果 include_audio=True）
+        - 获取字幕文件（如果 include_transcript=True）
+        - 提取视频元数据
+
+        与 fetch_metadata() 的区别：
+        - fetch_metadata(): 仅获取元数据，不下载任何文件（快速）
+        - download_resources(): 下载资源 + 获取元数据（耗时）
 
         Args:
             video_url: YouTube 视频 URL
@@ -113,21 +122,33 @@ class BaseDownloader(ABC):
         pass
 
     @abstractmethod
-    async def get_video_metadata(
+    async def fetch_metadata(
         self,
         video_url: str,
         video_id: str,
     ) -> Optional[dict]:
         """
-        仅获取视频元数据（不下载）。
+        仅获取视频元数据（不下载任何文件）。
 
-        用于快速检查视频可用性。
+        用途场景：
+        - 人工上传时获取视频标题、作者等信息
+        - 快速检查视频是否可用
+        - 独立的元数据查询操作
+
+        与 download_resources() 的区别：
+        - fetch_metadata(): 仅获取元数据，不下载任何文件（快速，0.5-2秒）
+        - download_resources(): 下载资源 + 获取元数据（耗时，30-60秒）
+
+        性能特性：
+        - 速度快：不涉及大文件下载
+        - 成本低：某些下载器（如 TikHub）此操作仍需 API 调用
+        - 风控低：轻量级操作，不易触发限流
 
         Args:
             video_url: YouTube 视频 URL
             video_id: YouTube 视频 ID
 
         Returns:
-            视频元数据字典，失败返回 None
+            视频元数据字典（包含 title, author, duration 等），失败返回 None
         """
         pass

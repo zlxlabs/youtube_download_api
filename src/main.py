@@ -28,10 +28,10 @@ from src.api.schemas import ComponentStatus, HealthResponse, QueueStatus
 from src.config import Settings, get_settings
 from src.core.worker import DownloadWorker
 from src.db.database import Database, set_database
+from src.downloaders.manager import DownloaderManager
 from src.services.callback_service import CallbackService
 from src.services.file_service import FileService
 from src.services.manual_upload_service import ManualUploadService
-from src.services.metadata_service import MetadataService
 from src.services.notify import NotificationService
 from src.services.task_service import TaskService
 from src.services.transcode_service import TranscodeService
@@ -45,7 +45,7 @@ file_service: FileService | None = None
 callback_service: CallbackService | None = None
 notify_service: NotificationService | None = None
 transcode_service: TranscodeService | None = None
-metadata_service: MetadataService | None = None
+downloader_manager: DownloaderManager | None = None
 manual_upload_service: ManualUploadService | None = None
 download_worker: DownloadWorker | None = None
 worker_task: asyncio.Task | None = None
@@ -61,7 +61,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     Handles startup and shutdown of services, database, and background workers.
     """
     global db, task_service, file_service, callback_service, notify_service
-    global transcode_service, metadata_service, manual_upload_service
+    global transcode_service, downloader_manager, manual_upload_service
     global download_worker, worker_task, scheduler, startup_time
 
     settings = get_settings()
@@ -99,14 +99,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         task_service = TaskService(db, settings, file_service)
         callback_service = CallbackService(db, file_service)
         notify_service = NotificationService(settings, db)
+
+        # 初始化下载器管理器（用于元数据获取和下载）
+        downloader_manager = DownloaderManager(settings, db)
+
         if settings.manual_upload_enabled:
             transcode_service = TranscodeService()
-            metadata_service = MetadataService(settings)
             manual_upload_service = ManualUploadService(
                 db=db,
                 file_service=file_service,
                 transcode_service=transcode_service,
-                metadata_service=metadata_service,
+                downloader_manager=downloader_manager,
                 settings=settings,
             )
     except Exception as e:

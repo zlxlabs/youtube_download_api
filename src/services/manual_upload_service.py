@@ -16,8 +16,8 @@ from fastapi import UploadFile
 from src.config import Settings
 from src.db.database import Database
 from src.db.models import FileType, VideoInfo, VideoResource
+from src.downloaders.manager import DownloaderManager
 from src.services.file_service import FileService
-from src.services.metadata_service import MetadataService
 from src.services.transcode_service import TranscodeError, TranscodeService
 from src.utils.helpers import extract_video_id
 from src.utils.logger import logger
@@ -64,13 +64,13 @@ class ManualUploadService:
         db: Database,
         file_service: FileService,
         transcode_service: TranscodeService,
-        metadata_service: MetadataService,
+        downloader_manager: DownloaderManager,
         settings: Settings,
     ) -> None:
         self.db = db
         self.file_service = file_service
         self.transcode_service = transcode_service
-        self.metadata_service = metadata_service
+        self.downloader_manager = downloader_manager
         self.settings = settings
 
     @staticmethod
@@ -90,6 +90,79 @@ class ManualUploadService:
                 "thumbnail",
             )
         )
+
+    @staticmethod
+    def _dict_to_video_info(metadata: dict) -> VideoInfo:
+        """
+        将元数据字典转换为 VideoInfo 对象。
+
+        Args:
+            metadata: 元数据字典
+
+        Returns:
+            VideoInfo 对象
+        """
+        return VideoInfo(
+            title=metadata.get("title"),
+            author=metadata.get("author"),
+            channel_id=metadata.get("channel_id"),
+            duration=metadata.get("duration"),
+            description=metadata.get("description"),
+            upload_date=metadata.get("upload_date"),
+            view_count=metadata.get("view_count"),
+            thumbnail=metadata.get("thumbnail"),
+        )
+
+    @staticmethod
+    def _merge_metadata(
+        auto_metadata: Optional[VideoInfo],
+        manual_metadata: Optional[dict],
+    ) -> VideoInfo:
+        """
+        合并自动获取和手动提供的元数据。
+
+        手动元数据优先级更高，会覆盖自动获取的元数据。
+
+        Args:
+            auto_metadata: 自动获取的元数据
+            manual_metadata: 手动提供的元数据
+
+        Returns:
+            合并后的 VideoInfo 对象
+        """
+        result = VideoInfo()
+
+        # 首先使用自动获取的元数据
+        if auto_metadata:
+            result.title = auto_metadata.title
+            result.author = auto_metadata.author
+            result.channel_id = auto_metadata.channel_id
+            result.duration = auto_metadata.duration
+            result.description = auto_metadata.description
+            result.upload_date = auto_metadata.upload_date
+            result.view_count = auto_metadata.view_count
+            result.thumbnail = auto_metadata.thumbnail
+
+        # 然后用手动提供的元数据覆盖
+        if manual_metadata:
+            if manual_metadata.get("title"):
+                result.title = manual_metadata["title"]
+            if manual_metadata.get("author"):
+                result.author = manual_metadata["author"]
+            if manual_metadata.get("channel_id"):
+                result.channel_id = manual_metadata["channel_id"]
+            if manual_metadata.get("duration") is not None:
+                result.duration = manual_metadata["duration"]
+            if manual_metadata.get("description"):
+                result.description = manual_metadata["description"]
+            if manual_metadata.get("upload_date"):
+                result.upload_date = manual_metadata["upload_date"]
+            if manual_metadata.get("view_count") is not None:
+                result.view_count = manual_metadata["view_count"]
+            if manual_metadata.get("thumbnail"):
+                result.thumbnail = manual_metadata["thumbnail"]
+
+        return result
 
     @staticmethod
     def sanitize_filename(filename: str, max_length: int = 100) -> str:
@@ -183,19 +256,23 @@ class ManualUploadService:
                     f"[ManualUpload] video_resource exists but video_info is None, "
                     "will fetch from API"
                 )
-                auto_metadata = await self.metadata_service.fetch_youtube_metadata(
+                # 使用 DownloaderManager 获取元数据（支持数据库缓存）
+                metadata_dict = await self.downloader_manager.get_metadata(
                     video_url, video_id
                 )
+                auto_metadata = self._dict_to_video_info(metadata_dict) if metadata_dict else None
         else:
             logger.info(
                 f"[ManualUpload] No existing video_resource found, "
                 f"fetching metadata from API for {video_id}"
             )
-            auto_metadata = await self.metadata_service.fetch_youtube_metadata(
+            # 使用 DownloaderManager 获取元数据（支持数据库缓存）
+            metadata_dict = await self.downloader_manager.get_metadata(
                 video_url, video_id
             )
+            auto_metadata = self._dict_to_video_info(metadata_dict) if metadata_dict else None
 
-        merged_metadata = self.metadata_service.merge_metadata(
+        merged_metadata = self._merge_metadata(
             auto_metadata, manual_metadata
         )
 

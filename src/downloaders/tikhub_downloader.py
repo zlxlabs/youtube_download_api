@@ -5,11 +5,13 @@ TikHub API 下载器实现。
 """
 
 import asyncio
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlparse
 
 import httpx
+from cachetools import TTLCache
 
 from src.config import Settings
 from src.core.downloader import DownloadCancelledError
@@ -59,6 +61,21 @@ class TikHubDownloader(BaseDownloader):
             f"timeout=(connect=30s, read=300s), follow_redirects=True"
         )
 
+        # API 响应缓存
+        # 目的：避免短期内重复 API 调用（节省成本）
+        # 使用场景：人工上传后立即下载，可复用下载链接
+        # TTL：3小时（保守值，YouTube 链接通常 6-12 小时有效）
+        cache_ttl_hours = getattr(settings, "tikhub_cache_ttl_hours", 3)
+        self._api_cache = TTLCache(
+            maxsize=100,  # 最多缓存 100 个视频
+            ttl=cache_ttl_hours * 3600,  # 转换为秒
+        )
+
+        logger.info(
+            f"[tikhub] API cache initialized: "
+            f"maxsize=100, ttl={cache_ttl_hours}h"
+        )
+
     @property
     def name(self) -> str:
         """下载器名称。"""
@@ -78,7 +95,7 @@ class TikHubDownloader(BaseDownloader):
         """
         return bool(self.api_key)
 
-    async def download(
+    async def download_resources(
         self,
         video_url: str,
         video_id: str,
@@ -255,7 +272,12 @@ class TikHubDownloader(BaseDownloader):
         include_transcript: bool = True,
     ) -> dict[str, Any]:
         """
-        从 TikHub API 获取视频信息。
+        从 TikHub API 获取视频信息（带缓存）。
+
+        缓存策略：
+        - 缓存 key: video_id（不区分请求参数）
+        - TTL: 3小时（YouTube 链接通常 6-12 小时有效）
+        - 目的：避免短期内重复 API 调用，节省成本
 
         Args:
             video_id: YouTube 视频 ID
@@ -269,6 +291,14 @@ class TikHubDownloader(BaseDownloader):
             httpx.HTTPStatusError: HTTP 错误
             DownloaderError: API 返回错误
         """
+        # 1. 检查缓存
+        if video_id in self._api_cache:
+            logger.info(f"[tikhub] ✓ API cache hit: {video_id}")
+            return self._api_cache[video_id]
+
+        # 2. 缓存未命中，调用 API
+        logger.debug(f"[tikhub] API cache miss, calling API: {video_id}")
+
         # TikHub API requires at least one resource type; if both audio/transcript
         # are false (metadata-only), request videos=true to avoid 400.
         videos_param = "true" if (not include_audio and not include_transcript) else "false"
@@ -308,7 +338,13 @@ class TikHubDownloader(BaseDownloader):
                 downloader=self.name,
             )
 
-        return data.get("data", {})
+        video_data = data.get("data", {})
+
+        # 3. 缓存响应（包含下载链接）
+        self._api_cache[video_id] = video_data
+        logger.debug(f"[tikhub] API response cached: {video_id}")
+
+        return video_data
 
     def _parse_video_metadata(
         self, video_data: dict[str, Any], video_id: str
@@ -948,13 +984,13 @@ class TikHubDownloader(BaseDownloader):
         # 默认：不触发熔断器
         return False
 
-    async def get_video_metadata(
+    async def fetch_metadata(
         self,
         video_url: str,
         video_id: str,
     ) -> Optional[dict]:
         """
-        仅获取视频元数据（不下载）。
+        仅获取视频元数据（不下载任何文件）。
 
         Args:
             video_url: YouTube 视频 URL

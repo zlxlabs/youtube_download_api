@@ -103,7 +103,33 @@ class Settings(BaseSettings):
     # ============ Downloader Configuration ============
     downloader_priority: str = Field(
         default="ytdlp,tikhub",
-        description="Downloader priority order (comma-separated, e.g., 'ytdlp,tikhub')",
+        description="[DEPRECATED] Use metadata_priority, transcript_only_priority, audio_download_priority instead",
+    )
+
+    # 元数据获取优先级（优先免费方案）
+    metadata_priority: str = Field(
+        default="ytdlp,tikhub",
+        description="Metadata fetching priority (comma-separated, e.g., 'ytdlp,tikhub')",
+    )
+
+    # 仅字幕下载优先级（TikHub 更稳定）
+    transcript_only_priority: str = Field(
+        default="tikhub,ytdlp",
+        description="Transcript-only download priority (comma-separated, e.g., 'tikhub,ytdlp')",
+    )
+
+    # 音频下载优先级（优先免费方案）
+    audio_download_priority: str = Field(
+        default="ytdlp,tikhub",
+        description="Audio download priority (comma-separated, e.g., 'ytdlp,tikhub')",
+    )
+
+    # TikHub API 响应缓存时长
+    tikhub_cache_ttl_hours: int = Field(
+        default=3,
+        ge=1,
+        le=12,
+        description="TikHub API response cache TTL in hours (1-12)",
     )
 
     # ============ Circuit Breaker Configuration ============

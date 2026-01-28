@@ -56,7 +56,7 @@ class YtdlpDownloader(BaseDownloader):
         """
         return True
 
-    async def download(
+    async def download_resources(
         self,
         video_url: str,
         video_id: str,
@@ -382,13 +382,13 @@ class YtdlpDownloader(BaseDownloader):
         # 默认：不触发熔断器（保守策略）
         return False
 
-    async def get_video_metadata(
+    async def fetch_metadata(
         self,
         video_url: str,
         video_id: str,
     ) -> Optional[dict]:
         """
-        仅获取视频元数据（不下载）。
+        仅获取视频元数据（不下载任何文件）。
 
         Args:
             video_url: YouTube 视频 URL
