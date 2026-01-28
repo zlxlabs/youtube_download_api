@@ -296,8 +296,8 @@ function renderHistoryTable(tasks) {
 
   tbody.innerHTML = tasks.map(task => {
     // 获取请求参数
-    const includeAudio = task.request_mode?.include_audio ?? false;
-    const includeTranscript = task.request_mode?.include_transcript ?? false;
+    const includeAudio = task.request?.include_audio ?? false;
+    const includeTranscript = task.request?.include_transcript ?? false;
 
     // 图标：✓ 表示请求了该资源，✗ 表示未请求
     const audioIcon = includeAudio ? '✓' : '✗';
@@ -362,6 +362,14 @@ function historyNextPage() {
 async function showTaskDetail(taskId) {
   try {
     const task = await apiRequest(`/api/v1/tasks/${taskId}`);
+
+    // 提取文件名（从 URL 中获取）
+    const getFileName = (fileInfo) => {
+      if (!fileInfo || !fileInfo.url) return '-';
+      const parts = fileInfo.url.split('/');
+      return parts[parts.length - 1] || `file.${fileInfo.format || 'unknown'}`;
+    };
+
     const html = `
       <h2>任务详情</h2>
       <div class="detail-list">
@@ -373,6 +381,8 @@ async function showTaskDetail(taskId) {
         <div class="detail-item"><span class="detail-label">作者:</span> <span class="detail-value">${escapeHtml(task.video_info?.author || '-')}</span></div>
         <div class="detail-item"><span class="detail-label">时长:</span> <span class="detail-value">${formatDuration(task.video_info?.duration)}</span></div>
         <div class="detail-item"><span class="detail-label">请求类型:</span> <span class="detail-value">${getTaskType(task)}</span></div>
+        <div class="detail-item"><span class="detail-label">请求音频:</span> <span class="detail-value">${task.request?.include_audio ? '✓ 是' : '✗ 否'}</span></div>
+        <div class="detail-item"><span class="detail-label">请求字幕:</span> <span class="detail-value">${task.request?.include_transcript ? '✓ 是' : '✗ 否'}</span></div>
         <div class="detail-item"><span class="detail-label">缓存命中:</span> <span class="detail-value">${getCacheInfo(task)}</span></div>
         ${task.error_message ? `<div class="detail-item error-box"><span class="detail-label">错误:</span> <span class="detail-value">${escapeHtml(task.error_message)}</span></div>` : ''}
         <div class="detail-item"><span class="detail-label">创建时间:</span> <span class="detail-value">${formatDate(task.created_at)}</span></div>
@@ -382,8 +392,8 @@ async function showTaskDetail(taskId) {
       ${task.files ? `
         <h3>文件列表</h3>
         <ul>
-          ${task.files.audio ? `<li>音频: ${task.files.audio.filename} (${formatBytes(task.files.audio.size)})</li>` : ''}
-          ${task.files.transcript ? `<li>字幕: ${task.files.transcript.filename} (${formatBytes(task.files.transcript.size)})</li>` : ''}
+          ${task.files.audio ? `<li>音频: ${getFileName(task.files.audio)} (${formatBytes(task.files.audio.size)})</li>` : ''}
+          ${task.files.transcript ? `<li>字幕: ${getFileName(task.files.transcript)} (${formatBytes(task.files.transcript.size)})</li>` : ''}
         </ul>
       ` : ''}
     `;
@@ -946,9 +956,9 @@ function escapeHtml(text) {
 }
 
 function getTaskType(task) {
-  if (task.request_mode?.include_audio && task.request_mode?.include_transcript) return '音频+字幕';
-  if (task.request_mode?.include_audio) return '仅音频';
-  if (task.request_mode?.include_transcript) return '仅字幕';
+  if (task.request?.include_audio && task.request?.include_transcript) return '音频+字幕';
+  if (task.request?.include_audio) return '仅音频';
+  if (task.request?.include_transcript) return '仅字幕';
   return '-';
 }
 
