@@ -324,11 +324,30 @@ class CDPDownloader(BaseDownloader):
             # 2. 获取或创建 BrowserContext（优先复用已存在的 context）
             # 注意：复用 context 避免 Chrome 不断打开新窗口
             context_is_reused = False
+            context = None
+
+            # 尝试复用现有 Context（如果存在且有效）
             if browser.contexts:
-                context = browser.contexts[0]
-                context_is_reused = True
-                logger.debug(f"[cdp] Reusing existing context")
-            else:
+                try:
+                    candidate_context = browser.contexts[0]
+                    # 有效性检查：尝试获取 pages（轻量级操作）
+                    _ = candidate_context.pages
+                    context = candidate_context
+                    context_is_reused = True
+                    logger.debug(f"[cdp] Reusing existing context")
+                except Exception as e:
+                    logger.warning(
+                        f"[cdp] Existing context invalid (connection lost): {e}, "
+                        "will create new context"
+                    )
+                    # 尝试关闭失效的 Context（可能失败）
+                    try:
+                        await candidate_context.close()
+                    except Exception:
+                        pass
+
+            # 如果没有可用的 Context，创建新的
+            if context is None:
                 context = await browser.new_context(
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                     viewport={"width": 1920, "height": 1080},
