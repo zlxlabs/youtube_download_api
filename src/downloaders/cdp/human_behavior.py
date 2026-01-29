@@ -14,7 +14,7 @@ import asyncio
 import random
 import time
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 try:
     from playwright.async_api import BrowserContext, Page
@@ -48,7 +48,11 @@ class HumanBehaviorSimulator:
         """
         self.settings = settings
 
-    async def cleanup_old_pages(self, context: BrowserContext) -> None:
+    async def cleanup_old_pages(
+        self,
+        context: BrowserContext,
+        keep_last: bool = True
+    ) -> Optional[Page]:
         """
         清理旧的 Page（模拟人类关闭旧标签页）。
 
@@ -60,24 +64,55 @@ class HumanBehaviorSimulator:
         人类行为模拟：
         - 就像人类关闭旧标签页再打开新标签页
         - 不会同时播放多个视频
+
+        Chrome 存活保证：
+        - 保留最后一个 Page，避免关闭所有标签页导致 Chrome 退出
+        - 调用方需要在创建新 Page 后手动关闭保留的 Page
+
+        Args:
+            context: BrowserContext 实例
+            keep_last: 是否保留最后一个 Page（避免 Chrome 退出）
+
+        Returns:
+            保留的 Page（需要在创建新 Page 后手动关闭），如果没有保留则返回 None
         """
         if not context.pages:
             logger.debug("[cdp] No old pages to clean up")
-            return
+            return None
 
         old_pages = list(context.pages)
-        logger.info(
-            f"[cdp] Cleaning up {len(old_pages)} old page(s) "
-            "(simulating closing old tabs)"
-        )
 
-        for i, page in enumerate(old_pages):
+        # 如果只有 1 个 Page 且需要保留，不关闭
+        if len(old_pages) == 1 and keep_last:
+            logger.debug("[cdp] Only 1 page, keeping it alive")
+            return old_pages[0]
+
+        # 决定要关闭的 Page
+        if keep_last and len(old_pages) > 1:
+            pages_to_close = old_pages[:-1]
+            kept_page = old_pages[-1]
+            logger.info(
+                f"[cdp] Cleaning up {len(pages_to_close)} old page(s), "
+                f"keeping 1 alive (simulating closing old tabs)"
+            )
+        else:
+            pages_to_close = old_pages
+            kept_page = None
+            logger.info(
+                f"[cdp] Cleaning up {len(old_pages)} old page(s) "
+                "(simulating closing old tabs)"
+            )
+
+        # 关闭旧 Page
+        for i, page in enumerate(pages_to_close):
             try:
                 page_url = page.url if not page.is_closed() else "unknown"
                 await page.close()
-                logger.debug(f"[cdp] Closed old page {i+1}/{len(old_pages)}: {page_url}")
+                logger.debug(f"[cdp] Closed old page {i+1}/{len(pages_to_close)}: {page_url}")
             except Exception as e:
                 logger.debug(f"[cdp] Failed to close old page {i+1}: {e}")
+
+        return kept_page
 
     async def quick_fetch_data(
         self,
@@ -282,10 +317,19 @@ class HumanBehaviorSimulator:
                     logger.warning(f"[cdp] Failed to clean cookie file: {e}")
 
             # 关闭页面（如果还没被关闭）
+            # 注意：如果是最后一个 Page，保留它以避免 Chrome 退出
             try:
                 if not page.is_closed():
-                    await page.close()
-                    logger.debug(f"[cdp] Closed page for {video_id}")
+                    # 检查是否是最后一个 Page
+                    context = page.context
+                    if len(context.pages) > 1:
+                        await page.close()
+                        logger.debug(f"[cdp] Closed page for {video_id}")
+                    else:
+                        logger.debug(
+                            f"[cdp] Keeping last page alive for {video_id} "
+                            "(avoid Chrome exit)"
+                        )
             except Exception as e:
                 logger.debug(f"[cdp] Failed to close page (already closed?): {e}")
 

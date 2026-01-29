@@ -59,14 +59,15 @@ class CDPDownloader(BaseDownloader):
     工作流程：
     1. 连接到外部 Chrome（共享 Browser）
     2. 创建/复用 BrowserContext（每任务独立）
-    3. 清理旧 Page（模拟人类关闭旧标签页）
-    4. 快速获取 cookies + headers（合并两次访问）
-    5. 启动后台人类行为模拟（异步，不阻塞）
-    6. 使用 yt-dlp + cookies 提取音频 URL
-    7. 下载音频（三层降级）
-    8. 主流程立即返回结果
-    9. 后台任务继续模拟人类行为（30-60秒）
-    10. 后台任务清理 Context 和临时文件
+    3. 清理旧 Page（保留最后一个，避免 Chrome 退出）
+    4. 快速获取 cookies + headers（创建新 Page）
+    5. 关闭保留的旧 Page（此时新 Page 已创建）
+    6. 启动后台人类行为模拟（异步，不阻塞）
+    7. 使用 yt-dlp + cookies 提取音频 URL
+    8. 下载音频（三层降级）
+    9. 主流程立即返回结果
+    10. 后台任务继续模拟人类行为（30-60秒）
+    11. 后台任务清理临时文件和关闭 Page
 
     并发安全性：
     - 共享 Browser 实例（所有任务共享同一个 CDP 连接）
@@ -338,15 +339,27 @@ class CDPDownloader(BaseDownloader):
 
             try:
                 # 3. 清理旧 Page（仅在启用人类行为模拟时）
+                # 保留最后一个 Page，避免 Chrome 退出
+                kept_page = None
                 if self.settings.cdp_human_behavior_enabled and not self.settings.cdp_quick_mode:
-                    await self._behavior_simulator.cleanup_old_pages(context)
+                    kept_page = await self._behavior_simulator.cleanup_old_pages(
+                        context, keep_last=True
+                    )
 
                 # 4. 快速获取数据（创建新 Page）
                 page, cookie_file, headers = await self._behavior_simulator.quick_fetch_data(
                     context, video_url, video_id, task_id
                 )
 
-                # 5. 启动后台任务（异步，不阻塞）
+                # 5. 关闭保留的旧 Page（此时新 Page 已创建，Chrome 不会退出）
+                if kept_page and not kept_page.is_closed():
+                    try:
+                        await kept_page.close()
+                        logger.debug("[cdp] Closed kept page after new page created")
+                    except Exception as e:
+                        logger.debug(f"[cdp] Failed to close kept page: {e}")
+
+                # 6. 启动后台任务（异步，不阻塞）
                 if self.settings.cdp_human_behavior_enabled and not self.settings.cdp_quick_mode:
                     task = asyncio.create_task(
                         self._behavior_simulator.background_human_behavior(
@@ -370,7 +383,7 @@ class CDPDownloader(BaseDownloader):
                     # 快速模式：直接关闭页面
                     await page.close()
 
-                # 6. 获取 PO Token（如果启用）
+                # 7. 获取 PO Token（如果启用）
                 pot_token = None
                 if self.settings.cdp_enable_pot_token:
                     try:
@@ -380,17 +393,17 @@ class CDPDownloader(BaseDownloader):
                     except Exception as e:
                         logger.warning(f"[cdp] poToken acquisition error: {e}, continuing without it")
 
-                # 7. 使用 AudioDownloader 提取音频 URL
+                # 8. 使用 AudioDownloader 提取音频 URL
                 audio_info = await self._audio_downloader.extract_audio_url(
                     video_url, video_id, cookie_file, task_id, pot_token
                 )
 
-                # 8. 使用 AudioDownloader 下载音频
+                # 9. 使用 AudioDownloader 下载音频
                 audio_path = await self._audio_downloader.download_audio(
                     audio_info, video_id, task_id, output_dir, headers
                 )
 
-                # 9. 构造成功结果
+                # 10. 构造成功结果
                 metadata = VideoMetadata(
                     video_id=video_id,
                     title=audio_info.title,
