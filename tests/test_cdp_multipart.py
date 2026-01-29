@@ -31,7 +31,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from src.config import get_settings
-from src.downloaders.cdp_downloader import CDPDownloader
+from src.downloaders.cdp import CDPDownloader
 from src.utils.logger import logger
 
 
