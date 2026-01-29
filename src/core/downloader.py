@@ -272,12 +272,11 @@ class YouTubeDownloader:
         if self.settings.http_proxy:
             opts["proxy"] = self.settings.http_proxy
 
-        # Cookie configuration
-        if self.settings.cookie_file:
-            cookie_path = Path(self.settings.cookie_file)
-            if cookie_path.exists():
-                opts["cookiefile"] = str(cookie_path)
-                logger.info(f"Using cookie file: {cookie_path}")
+        # Cookie configuration - 智能选择最佳 Cookie
+        cookie_path = self._select_best_cookie()
+        if cookie_path:
+            opts["cookiefile"] = str(cookie_path)
+            logger.info(f"[ytdlp] Using cookie file: {cookie_path}")
 
         # PO Token Provider 配置
         #
@@ -331,6 +330,72 @@ class YouTubeDownloader:
         )
 
         return opts
+
+    def _select_best_cookie(self) -> Optional[Path]:
+        """
+        智能选择最佳 Cookie 文件。
+
+        优先级策略：
+        1. data/latest_cookies.txt（CDP 最新导出，5分钟内有效）
+        2. COOKIE_FILE（静态配置文件）
+        3. None（不使用 Cookie）
+
+        设计思路：
+        - 当 CDP 下载器可用时，会定期导出最新 Cookie 到共享位置
+        - ytdlp 优先使用这些"新鲜 Cookie"，提高降级场景的成功率
+        - 如果共享 Cookie 不存在或过期，降级到静态配置
+
+        Returns:
+            Cookie 文件路径，无可用 Cookie 返回 None
+        """
+        import time
+
+        # 1. 检查 CDP 共享 Cookie（优先）
+        shared_cookie_path = self.settings.data_dir / "latest_cookies.txt"
+
+        if shared_cookie_path.exists():
+            # 检查文件新鲜度（5分钟内认为有效）
+            file_age = time.time() - shared_cookie_path.stat().st_mtime
+            max_age = 300  # 5分钟
+
+            if file_age < max_age:
+                logger.info(
+                    f"[ytdlp] Using fresh CDP cookies (age: {file_age:.1f}s)",
+                    extra={
+                        "event": "ytdlp_cookie_selected",
+                        "cookie_source": "cdp_shared",
+                        "cookie_age_seconds": file_age,
+                        "cookie_freshness": "fresh",
+                    }
+                )
+                return shared_cookie_path
+            else:
+                logger.debug(
+                    f"[ytdlp] CDP cookies too old ({file_age:.1f}s), "
+                    f"falling back to static cookie"
+                )
+
+        # 2. 降级到静态 Cookie 文件
+        if self.settings.cookie_file:
+            static_cookie_path = Path(self.settings.cookie_file)
+            if static_cookie_path.exists():
+                logger.info(
+                    "[ytdlp] Using static cookie file",
+                    extra={
+                        "event": "ytdlp_cookie_selected",
+                        "cookie_source": "static_config",
+                        "cookie_freshness": "unknown",
+                    }
+                )
+                return static_cookie_path
+            else:
+                logger.warning(
+                    f"[ytdlp] Static cookie file not found: {static_cookie_path}"
+                )
+
+        # 3. 无可用 Cookie
+        logger.debug("[ytdlp] No cookie file available")
+        return None
 
     def _log_anti_bot_config(self) -> None:
         """

@@ -370,6 +370,9 @@ class CDPDownloader(BaseDownloader):
                     context, video_url, video_id, task_id
                 )
 
+                # 4.5. 同步 Cookie 到共享位置（让 ytdlp 也能使用）
+                await self._sync_cookie_to_shared_location(cookie_file)
+
                 # 5. 关闭保留的旧 Page（此时新 Page 已创建，Chrome 不会退出）
                 if kept_page and not kept_page.is_closed():
                     try:
@@ -620,6 +623,62 @@ class CDPDownloader(BaseDownloader):
                 message=f"Failed to connect to all CDP instances:\n{all_errors}",
                 error_code=ErrorCode.CDP_CONNECTION_FAILED,
                 downloader=self.name,
+            )
+
+    # ========== Cookie 同步方法 ==========
+
+    async def _sync_cookie_to_shared_location(self, cookie_file: Path) -> None:
+        """
+        将 CDP 导出的 Cookie 同步到共享位置。
+
+        让 ytdlp 下载器也能使用最新的 Cookie，提高降级场景的成功率。
+
+        工作流程：
+        1. 复制临时 Cookie 文件到共享位置（data/latest_cookies.txt）
+        2. 设置文件权限为 600（仅所有者可读写，Unix 系统）
+        3. 记录同步日志
+
+        Args:
+            cookie_file: CDP 导出的临时 Cookie 文件路径
+
+        副作用：
+            - 创建/覆盖 data/latest_cookies.txt
+            - 同步失败不影响主流程（仅记录警告日志）
+        """
+        try:
+            import os
+            import shutil
+
+            # 共享 Cookie 文件路径
+            shared_cookie_path = self.settings.data_dir / "latest_cookies.txt"
+
+            # 确保父目录存在
+            shared_cookie_path.parent.mkdir(parents=True, exist_ok=True)
+
+            # 复制文件（保留原临时文件）
+            shutil.copy2(cookie_file, shared_cookie_path)
+
+            # 设置文件权限（仅所有者可读写）
+            if os.name != "nt":
+                os.chmod(shared_cookie_path, 0o600)
+
+            logger.info(
+                f"[cdp] Synced fresh cookies to shared location: {shared_cookie_path}",
+                extra={
+                    "event": "cdp_cookie_synced",
+                    "cookie_age_seconds": 0,
+                    "shared_path": str(shared_cookie_path),
+                }
+            )
+
+        except Exception as e:
+            # 同步失败不影响主流程
+            logger.warning(
+                f"[cdp] Failed to sync cookies to shared location: {e}",
+                extra={
+                    "event": "cdp_cookie_sync_failed",
+                    "error": str(e),
+                }
             )
 
     # ========== POT Token 方法 ==========
