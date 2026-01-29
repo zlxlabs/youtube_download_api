@@ -1294,19 +1294,427 @@ CDP_PAGE_ALIVE_MAX=10
 
 ---
 
-## 13. 附录
+## 13. 模块拆分设计
 
-### 13.1 相关文件清单
+### 13.1 为什么需要拆分
+
+#### 13.1.1 当前问题
+
+实施人类行为模拟方案后，`cdp_downloader.py` 将达到 **1900-2000 行**，存在以下问题：
+
+| 问题 | 说明 | 影响 |
+|------|------|------|
+| **代码规模过大** | 单文件近 2000 行，违反"文件不超过 1000 行"的最佳实践 | 降低可读性和可维护性 |
+| **职责过多** | 承担 8 个主要职责（Browser管理、Cookie、Headers、下载、行为模拟等） | 违反单一职责原则 |
+| **测试困难** | 所有逻辑混在一起，难以编写针对性单元测试 | 测试覆盖率低，bug 难以定位 |
+| **扩展困难** | 新增行为需要在巨大文件中定位代码 | 开发效率低 |
+
+#### 13.1.2 职责分析
+
+当前类承担的职责：
+
+| 职责 | 代码行数 | 复杂度 |
+|------|---------|--------|
+| Browser 连接管理 | ~150 行 | 中 |
+| Cookie 管理 | ~100 行 | 低 |
+| Headers 提取 | ~80 行 | 低 |
+| 音频 URL 提取 | ~100 行 | 中 |
+| 音频下载（三层降级） | ~400 行 | 高 |
+| 熔断器管理 | ~80 行 | 中 |
+| 通知服务 | ~100 行 | 低 |
+| **人类行为模拟（新增）** | **~300 行** | **中** |
+| 总计 | **~1900 行** | - |
+
+---
+
+### 13.2 拆分方案
+
+#### 13.2.1 目录结构
+
+```
+src/downloaders/cdp/
+├── __init__.py                # 导出 CDPDownloader
+├── downloader.py              # 主下载器（协调者，~700 行）
+├── audio_downloader.py        # 音频下载逻辑（~400 行）
+├── human_behavior.py          # 人类行为模拟（~300 行）✨ 新增
+└── models.py                  # 已存在（AudioInfo 等）
+```
+
+#### 13.2.2 模块职责
+
+**1. `downloader.py` - 主下载器（协调者）**
+
+**职责**：
+- 实现 `BaseDownloader` 接口
+- 协调各个组件（Browser、Audio、HumanBehavior）
+- 错误处理和熔断器管理
+- 通知服务集成
+
+**保留的方法**：
+```python
+# 接口实现
+- name, downloader_type, is_available
+- fetch_metadata()
+- download_resources()  # 主流程协调
+- health_check()
+- should_retry()
+- should_trigger_circuit_breaker()
+
+# Browser 管理
+- _get_browser()
+
+# 熔断器
+- _update_circuit_breaker()
+- _handle_download_error()
+
+# 通知
+- _notify_connection_failure()
+- _notify_circuit_breaker_open()
+- _notify_cdp_recovered()
+
+# POT Token
+- _get_pot_token()
+```
+
+**代码量**：~700 行
+
+---
+
+**2. `audio_downloader.py` - 音频下载逻辑**
+
+**职责**：
+- yt-dlp 音频 URL 提取
+- curl_cffi 下载（单线程 + 分片）
+- yt-dlp 兜底下载
+- 文件命名和路径管理
+
+**方法**：
+```python
+class AudioDownloader:
+    def __init__(self, settings: Settings):
+        self.settings = settings
+
+    async def extract_audio_url(
+        self,
+        video_url: str,
+        video_id: str,
+        cookie_file: Path,
+    ) -> AudioInfo:
+        """使用 yt-dlp + cookies 提取音频 URL"""
+        pass
+
+    async def download_audio(
+        self,
+        audio_info: AudioInfo,
+        video_id: str,
+        task_id: str,
+        output_dir: Path,
+        headers: Dict[str, str],
+    ) -> Path:
+        """下载音频（三层降级）"""
+        pass
+
+    async def _download_with_curl_cffi(self, ...) -> bool:
+        """curl_cffi 单线程下载"""
+        pass
+
+    async def _download_with_curl_cffi_multipart(self, ...) -> bool:
+        """curl_cffi 分片下载"""
+        pass
+
+    async def _download_with_ytdlp(self, ...) -> Optional[Path]:
+        """yt-dlp 兜底下载"""
+        pass
+
+    def _sanitize_filename(self, text: str) -> str:
+        """清理文件名"""
+        pass
+```
+
+**代码量**：~400 行
+
+---
+
+**3. `human_behavior.py` - 人类行为模拟 ✨ 新增**
+
+**职责**：
+- 快速数据获取（合并 Cookie + Headers 提取）
+- 清理旧 Page（并发安全）
+- 后台人类行为模拟
+- 滚动、暂停、观看等行为
+
+**方法**：
+```python
+class HumanBehaviorSimulator:
+    def __init__(self, settings: Settings):
+        self.settings = settings
+
+    async def cleanup_old_pages(self, context: BrowserContext) -> None:
+        """清理旧 Page（模拟人类关闭旧标签页）"""
+        pass
+
+    async def quick_fetch_data(
+        self,
+        context: BrowserContext,
+        video_url: str,
+        video_id: str,
+        task_id: str,
+    ) -> Tuple[Page, Path, Dict[str, str]]:
+        """快速获取 cookies + headers（2-3秒完成）"""
+        pass
+
+    async def background_human_behavior(
+        self,
+        page: Page,
+        video_url: str,
+        video_id: str,
+        task_id: str,
+    ) -> None:
+        """后台异步执行：人类行为模拟（不阻塞主流程）"""
+        pass
+
+    async def _sleep_with_page_check(
+        self,
+        page: Page,
+        duration: float,
+        video_id: str,
+    ) -> None:
+        """分段睡眠，定期检查 Page 是否被关闭"""
+        pass
+
+    async def _simulate_scroll(self, page: Page) -> None:
+        """模拟页面滚动"""
+        pass
+
+    async def _simulate_pause_resume(self, page: Page, duration: float) -> None:
+        """模拟暂停/恢复视频"""
+        pass
+
+    def _cookies_to_netscape(self, cookies: list) -> str:
+        """转换 cookies 为 Netscape 格式"""
+        pass
+```
+
+**代码量**：~300 行
+
+---
+
+### 13.3 模块间调用关系
+
+```
+downloader.py (主协调者)
+    ↓
+    ├─> human_behavior.py
+    │   ├─> cleanup_old_pages()          # 清理旧 Page
+    │   ├─> quick_fetch_data()           # 获取 cookies + headers
+    │   └─> background_human_behavior()  # 后台任务
+    │
+    └─> audio_downloader.py
+        ├─> extract_audio_url()  # yt-dlp 提取 URL
+        └─> download_audio()     # curl_cffi/ytdlp 下载
+```
+
+**调用示例**：
+
+```python
+# downloader.py
+class CDPDownloader(BaseDownloader):
+    def __init__(self, settings: Settings):
+        self.settings = settings
+        # 创建子模块实例
+        self._audio_downloader = AudioDownloader(self.settings)
+        self._behavior_simulator = HumanBehaviorSimulator(self.settings)
+
+    async def download_resources(self, ...) -> DownloaderResult:
+        # 1. 获取 Browser + Context
+        browser, cdp_url = await self._get_browser()
+        context = browser.contexts[0] if browser.contexts else await browser.new_context(...)
+
+        try:
+            # 2. 使用 HumanBehaviorSimulator
+            await self._behavior_simulator.cleanup_old_pages(context)
+            page, cookie_file, headers = await self._behavior_simulator.quick_fetch_data(
+                context, video_url, video_id, task_id
+            )
+
+            # 3. 启动后台任务
+            if self.settings.cdp_human_behavior_enabled:
+                task = asyncio.create_task(
+                    self._behavior_simulator.background_human_behavior(
+                        page, video_url, video_id, task_id
+                    )
+                )
+                # ...
+
+            # 4. 使用 AudioDownloader
+            audio_info = await self._audio_downloader.extract_audio_url(
+                video_url, video_id, cookie_file
+            )
+            audio_path = await self._audio_downloader.download_audio(
+                audio_info, video_id, task_id, output_dir, headers
+            )
+
+            # 5. 返回结果
+            return DownloaderResult(...)
+        finally:
+            # ...
+```
+
+---
+
+### 13.4 拆分效果对比
+
+#### 13.4.1 代码规模
+
+| 文件 | 拆分前 | 拆分后 |
+|------|--------|--------|
+| `cdp_downloader.py` | 1900 行 | - |
+| `downloader.py` | - | 700 行 ✅ |
+| `audio_downloader.py` | - | 400 行 ✅ |
+| `human_behavior.py` | - | 300 行 ✅ |
+
+**结果**：每个文件都控制在 **1000 行以内**。
+
+#### 13.4.2 优势
+
+| 优势 | 说明 |
+|------|------|
+| ✅ **单一职责** | 每个模块职责清晰，易于理解 |
+| ✅ **可测试性** | 每个模块可以独立测试（如 `test_audio_downloader.py`） |
+| ✅ **可维护性** | 修改音频下载逻辑不影响人类行为模拟 |
+| ✅ **可复用性** | `AudioDownloader` 可能被其他下载器复用 |
+| ✅ **易于扩展** | 新增行为（如查看评论）只需修改 `human_behavior.py` |
+
+#### 13.4.3 劣势（可控）
+
+| 劣势 | 解决方案 |
+|------|---------|
+| ⚠️ 文件数量增加 | 通过 `cdp/__init__.py` 统一导出，使用者无感知 |
+| ⚠️ 需要管理导入 | 使用相对导入，保持简洁 |
+
+---
+
+### 13.5 实施步骤
+
+#### 阶段 1：创建目录结构（5 分钟）
+
+```bash
+mkdir src/downloaders/cdp
+touch src/downloaders/cdp/__init__.py
+touch src/downloaders/cdp/downloader.py
+touch src/downloaders/cdp/audio_downloader.py
+touch src/downloaders/cdp/human_behavior.py
+```
+
+#### 阶段 2：移动代码（30 分钟）
+
+1. **复制原文件**（保留备份）：
+   ```bash
+   cp src/downloaders/cdp_downloader.py src/downloaders/cdp_downloader.py.bak
+   ```
+
+2. **提取 AudioDownloader**：
+   - 将音频下载相关方法移动到 `audio_downloader.py`
+   - 测试：运行现有测试，确保无破坏
+
+3. **提取 HumanBehaviorSimulator**：
+   - 实现设计方案中的新方法
+   - 修改原 `_export_cookies()` 和 `_extract_request_headers()` 调用
+
+4. **保留主协调者**：
+   - `downloader.py` 保留协调逻辑
+   - 创建子模块实例
+
+#### 阶段 3：更新导入（5 分钟）
+
+```python
+# src/downloaders/cdp/__init__.py
+from .downloader import CDPDownloader
+
+__all__ = ["CDPDownloader"]
+```
+
+```python
+# 其他文件（如 manager.py）更新导入
+# 从
+from src.downloaders.cdp_downloader import CDPDownloader
+
+# 改为
+from src.downloaders.cdp import CDPDownloader
+```
+
+#### 阶段 4：测试验证（10 分钟）
+
+```bash
+# 1. 运行单元测试
+pytest tests/test_cdp_downloader.py -v
+
+# 2. 运行集成测试
+pytest tests/integration/test_cdp_integration.py -v
+
+# 3. 手动测试
+python -m src.main
+# 提交下载任务，观察日志
+```
+
+---
+
+### 13.6 状态共享处理
+
+**问题**：类级别共享状态如何处理？
+
+```python
+# 当前代码中的共享状态
+CDPDownloader._browser: Optional[Browser]
+CDPDownloader._browser_lock: asyncio.Lock
+CDPDownloader._circuit_breaker_state: str
+CDPDownloader._notification_cache: Dict[str, float]
+```
+
+**解决方案**：
+
+1. **保留在主类中**：共享状态仍然由 `CDPDownloader` 管理
+2. **通过依赖注入传递**：子模块需要时，通过参数传递
+
+```python
+# audio_downloader.py 不需要访问共享状态
+audio_downloader = AudioDownloader(self.settings)
+
+# human_behavior.py 也不需要访问共享状态
+behavior_simulator = HumanBehaviorSimulator(self.settings)
+
+# 调用示例
+page, cookie_file, headers = await behavior_simulator.quick_fetch_data(
+    context, video_url, video_id, task_id
+)
+```
+
+---
+
+### 13.7 注意事项
+
+1. **保留备份**：拆分前务必备份原文件
+2. **增量测试**：每移动一个模块，立即测试
+3. **更新文档**：更新 README.md 和设计文档中的文件路径
+4. **更新 .gitignore**：确保 `*.bak` 文件不被提交
+
+---
+
+## 14. 附录
+
+### 14.1 相关文件清单
 
 | 文件 | 说明 |
 |------|------|
 | `src/config.py` | 新增配置项 |
-| `src/downloaders/cdp_downloader.py` | 核心改造 |
+| `src/downloaders/cdp/downloader.py` | 主下载器（拆分后） |
+| `src/downloaders/cdp/audio_downloader.py` | 音频下载模块（拆分后） |
+| `src/downloaders/cdp/human_behavior.py` | 人类行为模拟模块（拆分后） |
 | `.env.example` | 配置示例 |
 | `README.md` | 更新配置说明 |
 | `docs/cdp_human_behavior_design.md` | 本文档 |
 
-### 13.2 参考资料
+### 14.2 参考资料
 
 - [Playwright 文档](https://playwright.dev/python/)
 - [YouTube 风控机制分析](https://github.com/yt-dlp/yt-dlp/wiki/FAQ)
@@ -1314,9 +1722,9 @@ CDP_PAGE_ALIVE_MAX=10
 
 ---
 
-## 14. 实施检查清单
+## 15. 实施检查清单
 
-### 14.1 代码修改检查清单（必须完成）
+### 15.1 代码修改检查清单（必须完成）
 
 开发者在实施此方案前，必须完成以下修改：
 
@@ -1529,11 +1937,11 @@ DOWNLOAD_CONCURRENCY=1
 
 ---
 
-### 14.2 实施流程
+### 15.2 实施流程
 
 1. **阶段 1：代码实现**（1-2 天）
    - [ ] 完成 src/config.py 修改
-   - [ ] 完成 src/downloaders/cdp_downloader.py 修改
+   - [ ] 完成 src/downloaders/cdp/ 模块拆分
    - [ ] 完成 src/main.py 修改
    - [ ] 更新 .env.example
    - [ ] 更新 README.md
@@ -1557,7 +1965,7 @@ DOWNLOAD_CONCURRENCY=1
 
 ---
 
-### 14.3 验证清单
+### 15.3 验证清单
 
 实施完成后，使用以下清单验证：
 
@@ -1583,7 +1991,7 @@ DOWNLOAD_CONCURRENCY=1
 
 ---
 
-### 14.4 已知限制
+### 15.4 已知限制
 
 实施前请明确以下限制：
 

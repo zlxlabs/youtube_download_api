@@ -1730,6 +1730,12 @@ youtube-audio-api/
 │   │   ├── circuit_breaker.py     # 下载器熔断器
 │   │   ├── ytdlp_downloader.py   # yt-dlp 实现
 │   │   ├── tikhub_downloader.py  # TikHub 实现
+│   │   ├── cdp/                  # CDP 下载器（模块化）
+│   │   │   ├── __init__.py       # 导出 CDPDownloader
+│   │   │   ├── downloader.py     # 主下载器（协调者）
+│   │   │   ├── audio_downloader.py # 音频下载逻辑
+│   │   │   ├── human_behavior.py # 人类行为模拟
+│   │   │   └── models.py         # CDP 专用模型
 │   │   ├── models.py             # 下载器模型
 │   │   └── exceptions.py         # 下载器异常
 │   ├── db/
