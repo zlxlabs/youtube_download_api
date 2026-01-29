@@ -303,7 +303,7 @@ class NotificationService:
         """构建 IP 熔断器状态段。"""
         from src.core.ip_ban_models import IPBanLevel
 
-        state = ip_ban_breaker.current_state
+        state = ip_ban_breaker.get_current_level()
         state_emoji = {
             IPBanLevel.NORMAL: "🟢",
             IPBanLevel.AUDIO_BANNED: "🟡",
