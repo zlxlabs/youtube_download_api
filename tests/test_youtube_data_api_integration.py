@@ -97,14 +97,29 @@ def test_should_retry(downloader):
     from src.downloaders.exceptions import DownloaderError
     from src.db.models import ErrorCode
 
-    # YouTube Data API 错误不应该重试（应该降级）
-    error = DownloaderError(
+    # 网络错误 → 应该重试
+    network_error = DownloaderError(
+        message="SSL connection error",
+        error_code=ErrorCode.NETWORK_ERROR,
+        downloader="youtube_data_api",
+    )
+    assert downloader.should_retry(network_error) is True
+
+    # API 限流错误 → 不应该重试（应该降级）
+    rate_limit_error = DownloaderError(
         message="Rate limited",
         error_code=ErrorCode.RATE_LIMITED,
         downloader="youtube_data_api",
     )
+    assert downloader.should_retry(rate_limit_error) is False
 
-    assert downloader.should_retry(error) is False
+    # 视频不存在 → 不应该重试（应该降级）
+    not_found_error = DownloaderError(
+        message="Video not found",
+        error_code=ErrorCode.VIDEO_UNAVAILABLE,
+        downloader="youtube_data_api",
+    )
+    assert downloader.should_retry(not_found_error) is False
 
 
 def test_should_trigger_circuit_breaker(downloader):

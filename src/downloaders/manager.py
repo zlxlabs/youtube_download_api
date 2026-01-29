@@ -779,33 +779,22 @@ class DownloaderManager:
                     logger.debug(f"Downloader {name} not available, skipping")
                     continue
 
-                try:
-                    # 调用下载器获取元数据
-                    logger.debug(f"Trying downloader: {downloader.name}")
-                    metadata = await downloader.fetch_metadata(video_url, video_id)
+                # 使用重试逻辑调用下载器
+                metadata = await self._fetch_metadata_with_retry(
+                    downloader, video_url, video_id, errors
+                )
 
-                    if metadata:
-                        logger.info(
-                            f"✓ Metadata fetched from {downloader.name}: {video_id} "
-                            f"(title: {metadata.get('title', 'N/A')[:50]})"
-                        )
+                if metadata:
+                    # 写入数据库（永久保存）
+                    if self.db:
+                        try:
+                            # 确保 metadata 是字典
+                            metadata_dict = metadata if isinstance(metadata, dict) else metadata.__dict__
+                            await self._save_metadata_to_db(video_id, metadata_dict)
+                        except Exception as e:
+                            logger.warning(f"Failed to save metadata to database: {e}")
 
-                        # 3. 写入数据库（永久保存）
-                        if self.db:
-                            try:
-                                # 确保 metadata 是字典
-                                metadata_dict = metadata if isinstance(metadata, dict) else metadata.__dict__
-                                await self._save_metadata_to_db(video_id, metadata_dict)
-                            except Exception as e:
-                                logger.warning(f"Failed to save metadata to database: {e}")
-
-                        return metadata
-
-                except Exception as e:
-                    error_msg = f"{downloader.name}: {str(e)}"
-                    errors.append(error_msg)
-                    logger.warning(f"Failed to fetch metadata with {downloader.name}: {e}")
-                    continue
+                    return metadata
 
             # 所有下载器都失败
             logger.error(f"All downloaders failed to fetch metadata for {video_id}")
@@ -813,6 +802,93 @@ class DownloaderManager:
                 logger.error(f"Errors:\n" + "\n".join(f"  - {e}" for e in errors))
 
             return None
+
+    async def _fetch_metadata_with_retry(
+        self,
+        downloader: BaseDownloader,
+        video_url: str,
+        video_id: str,
+        errors: List[str],
+    ) -> Optional[dict]:
+        """
+        使用指定下载器获取元数据，带有重试和指数退避。
+
+        重试策略：
+        - 临时性网络错误（SSL、超时）：最多重试 2 次
+        - API 限流、配额超限：不重试（直接降级）
+        - 指数退避：1s, 2s
+
+        Args:
+            downloader: 下载器实例
+            video_url: 视频 URL
+            video_id: 视频 ID
+            errors: 错误列表（用于记录失败信息）
+
+        Returns:
+            视频元数据字典，失败返回 None
+        """
+        # 默认最大重试次数
+        max_retries = 2
+
+        for attempt in range(max_retries + 1):  # 0, 1, 2
+            try:
+                logger.debug(
+                    f"Trying downloader: {downloader.name}"
+                    + (f" (attempt {attempt + 1}/{max_retries + 1})" if attempt > 0 else "")
+                )
+
+                metadata = await downloader.fetch_metadata(video_url, video_id)
+
+                if metadata:
+                    logger.info(
+                        f"✓ Metadata fetched from {downloader.name}: {video_id} "
+                        f"(title: {metadata.get('title', 'N/A')[:50]})"
+                        + (f" after {attempt} retry(ies)" if attempt > 0 else "")
+                    )
+                    return metadata
+
+            except DownloaderError as e:
+                # 判断是否应该重试
+                should_retry = downloader.should_retry(e)
+                is_last_attempt = attempt == max_retries
+
+                if not should_retry:
+                    # 不可重试的错误（如 API 限流、配额超限），直接降级
+                    logger.warning(
+                        f"Failed to fetch metadata with {downloader.name}: "
+                        f"{e.error_code.value} - {e.message} (not retryable, will fallback)"
+                    )
+                    errors.append(f"{downloader.name}: {e.message}")
+                    return None
+
+                if is_last_attempt:
+                    # 已达到最大重试次数
+                    logger.warning(
+                        f"Failed to fetch metadata with {downloader.name} "
+                        f"after {max_retries + 1} attempts: {e.error_code.value} - {e.message}"
+                    )
+                    errors.append(f"{downloader.name}: {e.message} (after {max_retries + 1} attempts)")
+                    return None
+
+                # 计算退避时间（指数退避：1s, 2s）
+                backoff_delay = 2 ** attempt  # 1, 2
+
+                logger.warning(
+                    f"[{downloader.name}] Attempt {attempt + 1}/{max_retries + 1} failed: "
+                    f"{e.error_code.value} - {e.message}, retrying in {backoff_delay}s..."
+                )
+
+                await asyncio.sleep(backoff_delay)
+
+            except Exception as e:
+                # 未预期的错误，记录并降级
+                logger.warning(
+                    f"Failed to fetch metadata with {downloader.name}: {e} (unexpected error)"
+                )
+                errors.append(f"{downloader.name}: {e}")
+                return None
+
+        return None
 
     async def _save_metadata_to_db(self, video_id: str, metadata: dict) -> None:
         """

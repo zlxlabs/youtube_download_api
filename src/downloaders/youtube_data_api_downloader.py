@@ -284,9 +284,24 @@ class YoutubeDataApiDownloader(BaseDownloader):
 
         except Exception as e:
             logger.error(f"[youtube_data_api] Unexpected error: {e}")
+
+            # 区分网络错误和其他错误
+            error_str = str(e).lower()
+            is_network_error = any(
+                keyword in error_str
+                for keyword in [
+                    "ssl",
+                    "timeout",
+                    "connection",
+                    "network",
+                    "eof occurred",
+                    "unexpected eof",
+                ]
+            )
+
             raise DownloaderError(
                 message=str(e),
-                error_code=ErrorCode.DOWNLOAD_FAILED,
+                error_code=ErrorCode.NETWORK_ERROR if is_network_error else ErrorCode.DOWNLOAD_FAILED,
                 downloader=self.name,
             ) from e
 
@@ -316,16 +331,34 @@ class YoutubeDataApiDownloader(BaseDownloader):
         """
         判断错误是否应该重试当前下载器。
 
-        YouTube Data API 错误通常不应该重试（配额问题），应该降级。
+        重试策略：
+        - 临时性网络错误（SSL、超时、连接失败）：应该重试
+        - API 限流、配额超限：不重试（应该降级）
+        - 视频不存在等：不重试（应该降级）
 
         Args:
             error: 捕获的异常
 
         Returns:
-            False（不重试，直接降级）
+            True 表示应该重试，False 表示应该降级
         """
-        # API 限流、配额超限等错误不应该重试
-        # 应该降级到其他下载器
+        if isinstance(error, DownloaderError):
+            # 临时性网络错误：应该重试
+            if error.error_code == ErrorCode.NETWORK_ERROR:
+                return True
+
+            # 系统性错误（API 限流、配额超限、认证失败）：不重试，应该降级
+            if error.error_code in (
+                ErrorCode.RATE_LIMITED,
+                ErrorCode.DOWNLOAD_FAILED,
+                ErrorCode.VIDEO_UNAVAILABLE,
+                ErrorCode.VIDEO_PRIVATE,
+                ErrorCode.VIDEO_REGION_BLOCKED,
+                ErrorCode.VIDEO_AGE_RESTRICTED,
+            ):
+                return False
+
+        # 默认：不重试（降级到其他下载器）
         return False
 
     def should_trigger_circuit_breaker(self, error: Exception) -> bool:
