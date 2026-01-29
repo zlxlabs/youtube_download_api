@@ -320,11 +320,8 @@ class NotificationService:
 
         # 最近熔断时间
         last_ban_info = "无"
-        if ip_ban_breaker.last_ban_time:
-            from datetime import datetime
-
-            last_ban_dt = datetime.fromtimestamp(ip_ban_breaker.last_ban_time)
-            last_ban_info = self._format_local_time(last_ban_dt)
+        if ip_ban_breaker.banned_at:
+            last_ban_info = self._format_local_time(ip_ban_breaker.banned_at)
 
         return f"""
 ### 🛡️ IP 熔断器
