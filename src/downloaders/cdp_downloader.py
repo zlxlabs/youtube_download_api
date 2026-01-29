@@ -27,8 +27,8 @@ try:
     PLAYWRIGHT_AVAILABLE = True
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
-    Browser = None
-    BrowserContext = None
+    Browser = None  # type: ignore
+    BrowserContext = None  # type: ignore
 
 try:
     import yt_dlp
@@ -47,6 +47,15 @@ from src.downloaders.cdp_models import (
 from src.downloaders.exceptions import DownloaderError
 from src.downloaders.models import DownloaderResult, DownloaderType, VideoMetadata
 from src.utils.logger import logger
+
+# 延迟导入通知服务（避免循环依赖）
+try:
+    from src.services.notify import NotificationService
+
+    NOTIFICATION_AVAILABLE = True
+except ImportError:
+    NOTIFICATION_AVAILABLE = False
+    NotificationService = None
 
 
 class CDPDownloader(BaseDownloader):
@@ -79,6 +88,9 @@ class CDPDownloader(BaseDownloader):
     _circuit_open_until: float = 0
     _health_check_failures: int = 0
 
+    # 通知服务缓存
+    _notification_cache: Dict[str, float] = {}  # key -> last_notify_time
+
     def __init__(self, settings: Settings):
         """
         初始化 CDP 下载器。
@@ -87,6 +99,7 @@ class CDPDownloader(BaseDownloader):
             settings: 应用配置
         """
         self.settings = settings
+        self._notify_service: Optional[NotificationService] = None
 
         # 延迟初始化锁（避免事件循环问题）
         if CDPDownloader._browser_lock is None:
@@ -143,6 +156,93 @@ class CDPDownloader(BaseDownloader):
                 logger.info("[cdp] Circuit breaker entering HALF_OPEN state")
 
         return True
+
+    async def health_check(self) -> CDPHealthStatus:
+        """
+        健康检查：测试 CDP 连接。
+
+        检查项：
+        1. CDP 服务是否可达
+        2. 能否成功创建 Browser 连接
+        3. 更新熔断器状态
+
+        Returns:
+            CDPHealthStatus: 健康状态信息
+
+        副作用：
+            - 更新熔断器状态
+            - 连接失败时发送企微通知（带频率限制）
+        """
+        now = time.time()
+
+        # 避免频繁健康检查
+        if now - CDPDownloader._last_health_check < self.settings.cdp_health_check_interval:
+            return CDPHealthStatus(
+                is_healthy=CDPDownloader._circuit_breaker_state != "OPEN",
+                last_check_time=CDPDownloader._last_health_check,
+                consecutive_failures=CDPDownloader._health_check_failures,
+                circuit_state=CDPDownloader._circuit_breaker_state,
+                circuit_open_until=CDPDownloader._circuit_open_until,
+            )
+
+        CDPDownloader._last_health_check = now
+
+        try:
+            # 尝试获取 Browser 连接
+            browser, cdp_url = await self._get_browser()
+
+            # 简单验证：检查是否可以创建 Context
+            context = await browser.new_context()
+            await context.close()
+
+            # 健康检查成功
+            await self._update_circuit_breaker(success=True)
+
+            logger.info(
+                "[cdp] Health check passed",
+                extra={
+                    "event": "cdp_health_check",
+                    "success": True,
+                    "circuit_state": CDPDownloader._circuit_breaker_state,
+                    "cdp_url": cdp_url,
+                },
+            )
+
+            return CDPHealthStatus(
+                is_healthy=True,
+                last_check_time=now,
+                consecutive_failures=0,
+                circuit_state=CDPDownloader._circuit_breaker_state,
+                circuit_open_until=0,
+            )
+
+        except Exception as e:
+            error_msg = str(e)
+
+            # 健康检查失败
+            await self._update_circuit_breaker(success=False)
+
+            # 发送通知（带频率限制）
+            await self._notify_connection_failure(error_msg, "health_check")
+
+            logger.warning(
+                "[cdp] Health check failed",
+                extra={
+                    "event": "cdp_health_check",
+                    "success": False,
+                    "error": error_msg[:200],
+                    "consecutive_failures": CDPDownloader._health_check_failures,
+                    "circuit_state": CDPDownloader._circuit_breaker_state,
+                },
+            )
+
+            return CDPHealthStatus(
+                is_healthy=False,
+                last_check_time=now,
+                consecutive_failures=CDPDownloader._health_check_failures,
+                circuit_state=CDPDownloader._circuit_breaker_state,
+                circuit_open_until=CDPDownloader._circuit_open_until,
+            )
 
     async def fetch_metadata(
         self,
@@ -640,9 +740,15 @@ class CDPDownloader(BaseDownloader):
 
         # 可选：注入 poToken
         if self.settings.cdp_enable_pot_token:
-            # TODO: 从 POT provider 获取 token
-            # ydl_opts['extractor_args'] = {'youtube': {'po_token': [token]}}
-            pass
+            try:
+                pot_token = await self._get_pot_token(video_id)
+                if pot_token:
+                    ydl_opts["extractor_args"] = {"youtube": {"po_token": [pot_token]}}
+                    logger.info(f"[cdp] Using poToken for {video_id}")
+                else:
+                    logger.warning(f"[cdp] Failed to get poToken for {video_id}, continuing without it")
+            except Exception as e:
+                logger.warning(f"[cdp] poToken acquisition error: {e}, continuing without it")
 
         try:
             # 在线程池中执行（避免阻塞）
@@ -1193,6 +1299,9 @@ class CDPDownloader(BaseDownloader):
                     CDPDownloader._circuit_breaker_state = "CLOSED"
                     CDPDownloader._health_check_failures = 0
                     logger.info("[cdp] Circuit breaker CLOSED (recovered)")
+
+                    # 发送恢复通知
+                    await self._notify_cdp_recovered()
             else:
                 # 正常状态成功：重置失败计数
                 CDPDownloader._health_check_failures = 0
@@ -1221,6 +1330,12 @@ class CDPDownloader(BaseDownloader):
                     f"[cdp] Circuit breaker OPEN (failures: {CDPDownloader._health_check_failures})"
                 )
 
+                # 发送熔断器打开通知
+                await self._notify_circuit_breaker_open(
+                    CDPDownloader._health_check_failures,
+                    CDPDownloader._circuit_open_until,
+                )
+
     async def _handle_download_error(
         self,
         error: Exception,
@@ -1229,3 +1344,175 @@ class CDPDownloader(BaseDownloader):
     ):
         """错误处理。"""
         logger.error(f"[cdp] Download error for {video_id}: {error}")
+
+    # ========== POT Token 方法 ==========
+
+    async def _get_pot_token(self, video_id: str) -> Optional[str]:
+        """
+        从 POT Provider 获取 poToken。
+
+        Args:
+            video_id: 视频 ID
+
+        Returns:
+            poToken 字符串，或 None（如果获取失败）
+        """
+        if not self.settings.pot_server_url:
+            logger.debug("[cdp] POT_SERVER_URL not configured")
+            return None
+
+        try:
+            import httpx
+
+            pot_url = f"{self.settings.pot_server_url.rstrip('/')}/get_pot"
+            payload = {
+                "client": "web",
+                "video_id": video_id,
+            }
+
+            timeout = httpx.Timeout(10.0, connect=5.0)
+
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(pot_url, json=payload)
+                response.raise_for_status()
+
+                data = response.json()
+                pot_token = data.get("po_token") or data.get("poToken")
+
+                if pot_token:
+                    logger.debug(f"[cdp] Successfully got poToken for {video_id}")
+                    return pot_token
+                else:
+                    logger.warning(f"[cdp] POT provider returned no token: {data}")
+                    return None
+
+        except Exception as e:
+            logger.warning(f"[cdp] Failed to get poToken from {self.settings.pot_server_url}: {e}")
+            return None
+
+    # ========== 通知方法 ==========
+
+    def _get_notify_service(self) -> Optional[NotificationService]:
+        """
+        获取通知服务实例（懒加载）。
+
+        Returns:
+            NotificationService 或 None（如果未配置）
+        """
+        if not NOTIFICATION_AVAILABLE:
+            return None
+
+        if self._notify_service is None:
+            try:
+                self._notify_service = NotificationService(self.settings)
+            except Exception as e:
+                logger.warning(f"[cdp] Failed to initialize NotificationService: {e}")
+                return None
+
+        return self._notify_service
+
+    async def _notify_connection_failure(
+        self,
+        error: str,
+        context: str = "",
+    ) -> None:
+        """
+        发送 CDP 连接失败通知（带频率限制）。
+
+        Args:
+            error: 错误信息
+            context: 上下文（如 "health_check", "download"）
+        """
+        notify_service = self._get_notify_service()
+        if not notify_service:
+            return
+
+        # 频率限制：使用 error hash 作为 key
+        cache_key = f"cdp_conn_fail:{hash(error)}"
+        last_notify = CDPDownloader._notification_cache.get(cache_key, 0)
+        cooldown = self.settings.cdp_notify_cooldown
+
+        if time.time() - last_notify < cooldown:
+            logger.debug(f"[cdp] Connection failure notification throttled: {error[:50]}")
+            return
+
+        # 发送通知
+        try:
+            # 获取使用的 CDP URL（如果可能）
+            cdp_url = (
+                self.settings.cdp_url_list[0]
+                if self.settings.cdp_url_list
+                else "unknown"
+            )
+
+            await notify_service.notify_cdp_connection_failed(
+                error=error,
+                cdp_url=cdp_url,
+            )
+
+            CDPDownloader._notification_cache[cache_key] = time.time()
+
+            logger.info(
+                f"[cdp] Connection failure notification sent",
+                extra={
+                    "event": "cdp_connection_failed",
+                    "context": context,
+                    "cdp_url": cdp_url,
+                },
+            )
+
+        except Exception as e:
+            logger.error(f"[cdp] Failed to send connection failure notification: {e}")
+
+    async def _notify_circuit_breaker_open(
+        self,
+        consecutive_failures: int,
+        open_until_timestamp: float,
+    ) -> None:
+        """
+        发送 CDP 熔断器打开通知。
+
+        Args:
+            consecutive_failures: 连续失败次数
+            open_until_timestamp: 熔断结束时间（Unix 时间戳）
+        """
+        notify_service = self._get_notify_service()
+        if not notify_service:
+            return
+
+        try:
+            await notify_service.notify_cdp_circuit_breaker_open(
+                consecutive_failures=consecutive_failures,
+                open_until_timestamp=open_until_timestamp,
+            )
+
+            logger.info(
+                "[cdp] Circuit breaker open notification sent",
+                extra={
+                    "event": "cdp_circuit_breaker_open",
+                    "consecutive_failures": consecutive_failures,
+                    "open_until": open_until_timestamp,
+                },
+            )
+
+        except Exception as e:
+            logger.error(f"[cdp] Failed to send circuit breaker notification: {e}")
+
+    async def _notify_cdp_recovered(self) -> None:
+        """
+        发送 CDP 恢复通知。
+        """
+        notify_service = self._get_notify_service()
+        if not notify_service:
+            return
+
+        try:
+            await notify_service.notify_cdp_recovered()
+
+            logger.info(
+                "[cdp] CDP recovery notification sent",
+                extra={"event": "cdp_recovered"},
+            )
+
+        except Exception as e:
+            logger.error(f"[cdp] Failed to send CDP recovery notification: {e}")

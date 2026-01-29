@@ -623,7 +623,25 @@ IP 熔断器采用**被动探测**策略：
 | `FILE_RETENTION_DAYS` | 否 | 60 | 文件保留天数 |
 | `TZ` | 否 | Asia/Shanghai | 时区配置 |
 | `TIKHUB_API_KEY` | 否 | - | TikHub API 密钥（用于下载降级） |
+| **CDP 下载器配置** ||||
+| `CDP_ENABLED` | 否 | false | 启用 CDP 下载器 |
+| `CDP_URLS` | 否 | http://127.0.0.1:9222 | CDP 端点列表（逗号分隔，支持多实例） |
+| `CDP_TIMEOUT` | 否 | 30 | CDP 连接超时（秒） |
+| `CDP_FAILOVER_STRATEGY` | 否 | sequential | 故障转移策略（sequential/random） |
+| `CDP_USE_CURL_CFFI` | 否 | true | 使用 curl_cffi TLS 指纹模拟 |
+| `CDP_ENABLE_POT_TOKEN` | 否 | false | 启用 poToken 支持 |
+| `CDP_ENABLE_MULTIPART` | 否 | false | 启用分片多线程下载 |
+| `CDP_MULTIPART_CHUNKS` | 否 | 6 | 分片数量（推荐 4-8） |
+| `CDP_MULTIPART_MIN_SIZE` | 否 | 10 | 分片下载最小文件阈值（MB） |
+| `CDP_HEALTH_CHECK_INTERVAL` | 否 | 300 | 健康检查间隔（秒） |
+| `CDP_CONNECTION_RETRY` | 否 | 3 | 连接重试次数 |
+| `CDP_CIRCUIT_FAILURE_THRESHOLD` | 否 | 3 | 熔断器失败阈值 |
+| `CDP_CIRCUIT_TIMEOUT` | 否 | 1800 | 熔断器超时（秒，30分钟） |
+| `CDP_CIRCUIT_HALF_OPEN_SUCCESS` | 否 | 2 | 半开状态成功阈值 |
+| `CDP_NOTIFY_COOLDOWN` | 否 | 3600 | 通知冷却时间（秒，1小时） |
+| **下载器配置** ||||
 | `DOWNLOADER_PRIORITY` | 否 | ytdlp,tikhub | 下载器优先级顺序 |
+| `AUDIO_DOWNLOAD_PRIORITY` | 否 | cdp,ytdlp,tikhub | 音频下载器优先级 |
 | `CIRCUIT_BREAKER_ENABLED` | 否 | true | 启用熔断器保护 |
 | `CIRCUIT_BREAKER_THRESHOLD` | 否 | 5 | 熔断器失败阈值 |
 | `CIRCUIT_BREAKER_TIMEOUT` | 否 | 1800 | 熔断器超时（秒） |
@@ -676,6 +694,7 @@ curl "http://localhost:8000/api/v1/settings/config"
 
 | 下载器 | 说明 | 优点 | 缺点 | 成本 |
 |--------|------|------|------|------|
+| **CDP** | Chrome DevTools Protocol | 真实浏览器指纹、降低 403 风险 | 需要外部 Chrome | 免费 |
 | **yt-dlp** | 本地 yt-dlp 库 | 免费、功能强大 | 可能遇到 YouTube 限流 | 免费 |
 | **TikHub** | TikHub API 服务 | 稳定、不受限流影响 | 需要 API key | 0.002$/次 |
 
@@ -684,12 +703,19 @@ curl "http://localhost:8000/api/v1/settings/config"
 ```
 请求下载
   │
-  ├─> 1. 尝试 yt-dlp（优先）
+  ├─> 1. 尝试 CDP（优先，如果启用）
+  │   ├─ 真实浏览器 Cookies + TLS 指纹模拟
+  │   ├─ 成功 → 返回结果
+  │   ├─ HTTP 403（本地 IP 问题）→ 直接失败，不降级
+  │   ├─ 连接失败 → 降级到 yt-dlp
+  │   └─ 其他失败 → 降级到 yt-dlp
+  │
+  ├─> 2. 尝试 yt-dlp（降级）
   │   ├─ 成功 → 返回结果
   │   ├─ HTTP 403（本地 IP 问题）→ 直接失败，不降级
   │   └─ 其他失败（限流/网络）→ 继续降级
   │
-  ├─> 2. 尝试 TikHub（降级）
+  ├─> 3. 尝试 TikHub（降级）
   │   ├─ 成功 → 返回结果
   │   ├─ HTTP 403（本地 IP 问题）→ 直接失败
   │   └─ 失败 → 返回错误
@@ -780,6 +806,313 @@ CIRCUIT_BREAKER_TIMEOUT=3600       # 1 小时后恢复
 ```bash
 CIRCUIT_BREAKER_ENABLED=false
 ```
+
+---
+
+## CDP 下载器配置
+
+CDP (Chrome DevTools Protocol) 下载器通过真实浏览器指纹降低 YouTube 403 风控，是推荐的音频下载首选方案。
+
+### 核心优势
+
+- **真实浏览器指纹**：使用外部 Chrome 获取真实 Cookies 和 Headers
+- **TLS 指纹模拟**：curl_cffi 模拟浏览器 TLS 握手
+- **降低 403 风险**：预期降低 403 错误率 60-80%
+- **多实例故障转移**：支持多个 Chrome 实例，自动切换
+- **熔断器保护**：智能熔断机制，避免持续性故障
+- **分片多线程下载**：可选的分片并发下载（推荐大文件）
+
+### 快速开始
+
+#### 1. 启动外部 Chrome（Mac/Linux）
+
+```bash
+# macOS
+/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
+  --remote-debugging-port=9222 \
+  --user-data-dir=/tmp/chrome-cdp \
+  --no-first-run \
+  --no-default-browser-check &
+
+# Linux
+google-chrome \
+  --remote-debugging-port=9222 \
+  --user-data-dir=/tmp/chrome-cdp \
+  --no-first-run \
+  --no-default-browser-check &
+
+# Windows
+"C:\Program Files\Google\Chrome\Application\chrome.exe" ^
+  --remote-debugging-port=9222 ^
+  --user-data-dir=%TEMP%\chrome-cdp ^
+  --no-first-run ^
+  --no-default-browser-check
+
+# 验证 CDP 可用
+curl http://localhost:9222/json/version
+```
+
+#### 2. 配置环境变量
+
+```bash
+# .env
+CDP_ENABLED=true
+CDP_URLS=http://127.0.0.1:9222  # 本地开发
+# CDP_URLS=http://192.168.1.100:9222,http://192.168.1.101:9222  # 生产环境（多实例）
+
+# 可选：启用分片下载（推荐）
+CDP_ENABLE_MULTIPART=true
+CDP_MULTIPART_CHUNKS=6  # 默认 6 个分片
+
+# 可选：启用 poToken 支持（双重保障）
+CDP_ENABLE_POT_TOKEN=false
+
+# 下载器优先级（CDP 优先）
+AUDIO_DOWNLOAD_PRIORITY=cdp,ytdlp,tikhub
+```
+
+#### 3. 安装依赖
+
+```bash
+# 使用 uv（推荐）
+uv add playwright curl-cffi
+
+# 或使用 pip
+pip install playwright curl-cffi
+
+# 注意：不需要安装 playwright 的浏览器（使用外部 Chrome）
+```
+
+### 配置参数详解
+
+#### 基础配置
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `CDP_ENABLED` | `false` | 启用 CDP 下载器（必需） |
+| `CDP_URLS` | `http://127.0.0.1:9222` | CDP 端点（支持多个，逗号分隔） |
+| `CDP_TIMEOUT` | `30` | 连接超时（秒） |
+| `CDP_FAILOVER_STRATEGY` | `sequential` | 故障转移策略：sequential（顺序）或 random（随机） |
+
+#### 功能开关
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `CDP_USE_CURL_CFFI` | `true` | 使用 curl_cffi TLS 指纹模拟（推荐） |
+| `CDP_ENABLE_POT_TOKEN` | `false` | 启用 poToken 支持（可选，需要 POT Server） |
+| `CDP_ENABLE_MULTIPART` | `false` | 启用分片多线程下载 |
+
+#### 分片下载配置
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `CDP_MULTIPART_CHUNKS` | `6` | 分片数量（推荐 4-8） |
+| `CDP_MULTIPART_MIN_SIZE` | `10` | 最小文件阈值（MB，小于此值不分片） |
+
+#### 熔断器配置
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `CDP_CIRCUIT_FAILURE_THRESHOLD` | `3` | 连续失败阈值 |
+| `CDP_CIRCUIT_TIMEOUT` | `1800` | 熔断时长（秒，30分钟） |
+| `CDP_CIRCUIT_HALF_OPEN_SUCCESS` | `2` | 半开状态成功阈值 |
+
+#### 健康检查
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `CDP_HEALTH_CHECK_INTERVAL` | `300` | 健康检查间隔（秒） |
+| `CDP_CONNECTION_RETRY` | `3` | 连接重试次数 |
+| `CDP_NOTIFY_COOLDOWN` | `3600` | 通知冷却时间（秒） |
+
+### 配置示例
+
+#### 示例 1：基础配置（本地开发）
+
+```bash
+CDP_ENABLED=true
+CDP_URLS=http://127.0.0.1:9222
+CDP_USE_CURL_CFFI=true
+AUDIO_DOWNLOAD_PRIORITY=cdp,ytdlp,tikhub
+```
+
+#### 示例 2：生产环境（多实例 + 分片下载）
+
+```bash
+CDP_ENABLED=true
+CDP_URLS=http://192.168.1.100:9222,http://192.168.1.101:9222
+CDP_FAILOVER_STRATEGY=sequential
+CDP_USE_CURL_CFFI=true
+CDP_ENABLE_MULTIPART=true
+CDP_MULTIPART_CHUNKS=6
+AUDIO_DOWNLOAD_PRIORITY=cdp,ytdlp,tikhub
+```
+
+#### 示例 3：完整配置（所有功能）
+
+```bash
+# 基础配置
+CDP_ENABLED=true
+CDP_URLS=http://192.168.1.100:9222,http://192.168.1.101:9222
+CDP_TIMEOUT=30
+CDP_FAILOVER_STRATEGY=sequential
+
+# 功能开关
+CDP_USE_CURL_CFFI=true
+CDP_ENABLE_POT_TOKEN=false
+CDP_ENABLE_MULTIPART=true
+
+# 分片配置
+CDP_MULTIPART_CHUNKS=6
+CDP_MULTIPART_MIN_SIZE=10
+
+# 熔断器
+CDP_CIRCUIT_FAILURE_THRESHOLD=3
+CDP_CIRCUIT_TIMEOUT=1800
+CDP_CIRCUIT_HALF_OPEN_SUCCESS=2
+
+# 健康检查
+CDP_HEALTH_CHECK_INTERVAL=300
+CDP_CONNECTION_RETRY=3
+CDP_NOTIFY_COOLDOWN=3600
+
+# 下载器优先级
+AUDIO_DOWNLOAD_PRIORITY=cdp,ytdlp,tikhub
+```
+
+### 工作流程
+
+```
+1. [连接阶段]
+   ├─> 检查熔断器状态
+   ├─> 获取共享 Browser 实例（多实例故障转移）
+   └─> 连接失败 → 发送企微通知 → 降级到 ytdlp
+
+2. [Context 创建阶段]
+   ├─> 创建独立的 BrowserContext（每任务独立）
+   └─> 设置 User-Agent、Viewport 等
+
+3. [Cookie 导出阶段]
+   ├─> 访问视频页面（刷新登录态）
+   ├─> 导出 Cookies（每次导出新 cookie）
+   └─> 写入临时文件
+
+4. [Headers 提取阶段]
+   ├─> 监听 Network 请求
+   ├─> 捕获 googlevideo.com 音频请求
+   └─> 提取真实 Headers
+
+5. [音频 URL 提取阶段]
+   ├─> yt-dlp + cookies 解析视频
+   ├─> 获取 bestaudio 格式
+   └─> 可选：注入 poToken
+
+6. [下载阶段]
+   ├─> 优先：分片多线程下载（如启用）
+   ├─> 降级：curl_cffi 下载（TLS 指纹 + 真实 Headers）
+   └─> 兜底：yt-dlp 直接下载
+
+7. [清理阶段]
+   ├─> 删除临时 cookies 文件
+   ├─> 关闭 Context（自动清理资源）
+   └─> Browser 保持连接（供其他任务复用）
+```
+
+### 熔断器机制
+
+```
+状态机：
+CLOSED（正常）
+  ├─ 连续失败 3 次 → OPEN（熔断）
+
+OPEN（熔断）
+  ├─ 拒绝所有请求，直接降级到 ytdlp
+  ├─ 等待 30 分钟 → HALF_OPEN（半开）
+
+HALF_OPEN（半开）
+  ├─ 允许测试请求
+  ├─ 连续成功 2 次 → CLOSED（恢复）
+  └─ 失败 → OPEN（重新熔断）
+```
+
+### 企微通知
+
+CDP 下载器支持以下通知：
+
+1. **连接失败通知**：CDP 无法连接到 Chrome 时发送（含频率限制）
+2. **熔断器打开通知**：连续失败触发熔断时发送（@ 所有人）
+3. **恢复通知**：熔断器恢复正常时发送
+
+### 故障排查
+
+#### 连接失败
+
+```bash
+# 1. 检查 Chrome 是否运行
+curl http://localhost:9222/json/version
+
+# 2. 检查防火墙
+# macOS
+sudo pfctl -d  # 临时禁用防火墙
+
+# Linux
+sudo ufw status
+sudo ufw allow 9222/tcp
+
+# 3. 查看 Chrome 日志
+# 访问 chrome://inspect
+```
+
+#### 下载 403
+
+```bash
+# 1. 确认 Chrome 已登录 YouTube
+# 访问 http://localhost:9222 查看页面列表
+
+# 2. 检查 cookies
+# 查看日志中的 "Exported X cookies" 信息
+
+# 3. 降低频率
+AUDIO_INTERVAL_MIN=120
+AUDIO_INTERVAL_MAX=300
+```
+
+#### 熔断器频繁触发
+
+```bash
+# 调整熔断器参数
+CDP_CIRCUIT_FAILURE_THRESHOLD=5  # 提高阈值
+CDP_CIRCUIT_TIMEOUT=3600  # 延长恢复时间
+```
+
+### 性能优化
+
+#### 启用分片下载
+
+```bash
+CDP_ENABLE_MULTIPART=true
+CDP_MULTIPART_CHUNKS=6  # 6 个分片并发
+```
+
+**效果**：
+- 23.59MB 文件，6 分片并发下载成功
+- 总耗时 47 秒（含前期准备）
+- 下载速度 0.50 MB/s
+- 未触发反爬检测（无 403）
+
+#### 多实例负载均衡
+
+```bash
+# 配置多个 Chrome 实例
+CDP_URLS=http://192.168.1.100:9222,http://192.168.1.101:9222,http://192.168.1.102:9222
+CDP_FAILOVER_STRATEGY=random  # 随机选择实例
+```
+
+### 详细文档
+
+更多信息请参考：
+- [CDP 下载器设计文档](docs/cdp_downloader_design.md)
+- [CDP 快速开始指南](docs/cdp_quick_start.md)
 
 ---
 

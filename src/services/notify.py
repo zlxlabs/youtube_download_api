@@ -488,6 +488,162 @@ class NotificationService:
         except Exception as e:
             logger.error(f"Failed to send disk space notification: {e}")
 
+    # ========== CDP 下载器通知 ==========
+
+    async def notify_cdp_connection_failed(
+        self,
+        error: str,
+        cdp_url: str,
+    ) -> None:
+        """
+        发送 CDP 连接失败通知。
+
+        Args:
+            error: 错误信息
+            cdp_url: CDP 地址
+        """
+        if not self.enabled or not self.notifier:
+            return
+
+        try:
+            # 截断错误信息
+            error_preview = error[:500] if len(error) > 500 else error
+
+            content = f"""# ⚠️ CDP 下载器连接失败
+
+**错误信息：**
+```
+{error_preview}
+```
+
+**CDP 地址：** {cdp_url}
+
+**影响范围：**
+- CDP 下载器暂时不可用
+- 已自动降级到 ytdlp/tikhub
+- 不影响任务正常执行
+
+**建议操作：**
+1. 检查 Chrome 是否正在运行
+2. 确认启动命令：
+   ```
+   /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome \\
+     --remote-debugging-port=9222 \\
+     --user-data-dir=/tmp/chrome-cdp
+   ```
+3. 检查网络连接和防火墙
+4. 查看 Chrome 日志：chrome://inspect
+
+**熔断状态：**
+- 连续失败后将触发熔断器（30 分钟）
+- 自动恢复后会继续尝试使用 CDP
+"""
+
+            self.notifier.send_markdown(
+                webhook_url=self.webhook_url,
+                content=content,
+                mention_all=False,  # 不 @ 所有人，降低打扰
+            )
+            logger.info(f"CDP connection failure notification sent: {cdp_url}")
+
+        except Exception as e:
+            logger.error(f"Failed to send CDP connection notification: {e}")
+
+    async def notify_cdp_circuit_breaker_open(
+        self,
+        consecutive_failures: int,
+        open_until_timestamp: float,
+    ) -> None:
+        """
+        发送 CDP 熔断器打开通知。
+
+        Args:
+            consecutive_failures: 连续失败次数
+            open_until_timestamp: 熔断结束时间（Unix 时间戳）
+        """
+        if not self.enabled or not self.notifier:
+            return
+
+        try:
+            # 计算熔断时长
+            import time
+
+            open_duration_min = int((open_until_timestamp - time.time()) / 60)
+
+            # 格式化恢复时间
+            from datetime import datetime
+
+            open_until_dt = datetime.fromtimestamp(open_until_timestamp)
+            recovery_time = open_until_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+            content = f"""# 🚨 CDP 熔断器已打开
+
+**触发原因：**
+连续失败 {consecutive_failures} 次
+
+**熔断时长：**
+{open_duration_min} 分钟
+
+**影响：**
+- CDP 下载器暂停使用
+- 所有任务使用 ytdlp/tikhub
+- 熔断结束后自动恢复
+
+**自动恢复时间：**
+{recovery_time}
+
+**人工干预（可选）：**
+1. 检查并修复 Chrome 连接问题
+2. 确认网络连接正常
+3. 等待自动恢复即可（无需手动操作）
+"""
+
+            self.notifier.send_markdown(
+                webhook_url=self.webhook_url,
+                content=content,
+                mention_all=True,  # 熔断是重要事件，需要 @ 所有人
+            )
+            logger.warning(
+                f"CDP circuit breaker open notification sent: "
+                f"{consecutive_failures} failures, open until {recovery_time}"
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to send CDP circuit breaker notification: {e}")
+
+    async def notify_cdp_recovered(self) -> None:
+        """
+        发送 CDP 恢复通知。
+        """
+        if not self.enabled or not self.notifier:
+            return
+
+        try:
+            content = """# ✅ CDP 下载器已恢复
+
+CDP 熔断器已恢复正常状态，可继续使用。
+
+**状态：**
+- 熔断器：已关闭
+- 下载器：可用
+- 优先级：已恢复为音频下载首选
+
+**下一步：**
+无需手动操作，系统已自动恢复正常。
+"""
+
+            self.notifier.send_markdown(
+                webhook_url=self.webhook_url,
+                content=content,
+                mention_all=False,
+            )
+            logger.info("CDP recovery notification sent")
+
+        except Exception as e:
+            logger.error(f"Failed to send CDP recovery notification: {e}")
+
+    # ========== 辅助方法 ==========
+
     def _get_local_ip(self) -> str:
         """
         Get local IP address.
@@ -498,7 +654,7 @@ class NotificationService:
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
+            ip: str = s.getsockname()[0]  # type: ignore
             s.close()
             return ip
         except Exception:
