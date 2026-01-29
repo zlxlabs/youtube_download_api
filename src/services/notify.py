@@ -327,8 +327,8 @@ class NotificationService:
 ### 🛡️ IP 熔断器
 > **状态**: {emoji} {text}
 > **最近熔断**: {last_ban_info}
-> **最小等待**: {ip_ban_breaker.min_wait_before_retry} 秒
-> **重试间隔**: {ip_ban_breaker.max_retry_interval} 秒
+> **最小等待**: {ip_ban_breaker.MIN_WAIT_BEFORE_RETRY} 秒
+> **重试间隔**: {ip_ban_breaker.MAX_RETRY_INTERVAL} 秒
 """
 
     def _build_cookie_section(self) -> str:
