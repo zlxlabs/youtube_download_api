@@ -238,6 +238,41 @@ class DownloaderManager:
 
         return circuit_breakers
 
+    def _merge_metadata(
+        self,
+        base: VideoMetadata,
+        downloader_metadata: VideoMetadata,
+    ) -> VideoMetadata:
+        """
+        合并两个元数据对象。
+
+        策略：优先使用下载器返回的元数据（如果有值），否则使用基础元数据补充。
+        这样可以确保即使下载器（如 CDP）只返回部分字段，也能获得完整的视频信息。
+
+        Args:
+            base: 基础元数据（通过 metadata_priority 获取的完整元数据）
+            downloader_metadata: 下载器返回的元数据（可能不完整）
+
+        Returns:
+            合并后的完整元数据
+        """
+        return VideoMetadata(
+            video_id=downloader_metadata.video_id,
+            title=downloader_metadata.title or base.title,
+            author=downloader_metadata.author or base.author,
+            channel_id=downloader_metadata.channel_id or base.channel_id,
+            duration=downloader_metadata.duration or base.duration,
+            description=downloader_metadata.description or base.description,
+            upload_date=downloader_metadata.upload_date or base.upload_date,
+            view_count=downloader_metadata.view_count or base.view_count,
+            thumbnail=downloader_metadata.thumbnail or base.thumbnail,
+            source_downloader=(
+                f"{downloader_metadata.source_downloader}+{base.source_downloader}"
+                if downloader_metadata.source_downloader and base.source_downloader
+                else downloader_metadata.source_downloader or base.source_downloader
+            ),
+        )
+
     def _get_prioritized_downloaders(
         self,
         include_audio: bool,
@@ -323,6 +358,11 @@ class DownloaderManager:
         - 字幕下载：使用 TRANSCRIPT_ONLY_PRIORITY（如 "tikhub,ytdlp"）
         - 音频+字幕：使用 AUDIO_DOWNLOAD_PRIORITY
 
+        元数据获取策略：
+        - 在下载资源前，先使用 METADATA_PRIORITY 获取完整元数据
+        - 如果下载器返回的元数据不完整（如 CDP 只返回 title），用预先获取的元数据补充
+        - 确保最终返回的结果包含完整的视频信息（title、author、description 等）
+
         Args:
             video_url: YouTube 视频 URL
             video_id: YouTube 视频 ID
@@ -340,7 +380,37 @@ class DownloaderManager:
         errors: List[str] = []
         last_error: Optional[Exception] = None
 
-        # 根据场景获取优先级排序后的下载器列表
+        # 1. 先获取完整的视频元数据（使用 metadata_priority）
+        # 这样确保即使使用仅支持音频下载的下载器（如 CDP），也能获得完整的视频信息
+        logger.debug(f"Fetching metadata before download for {video_id}")
+        metadata_dict = await self.get_metadata(video_url, video_id)
+
+        if metadata_dict:
+            logger.info(
+                f"✓ Metadata fetched before download: {video_id} "
+                f"(title: {metadata_dict.get('title', 'N/A')[:50]})"
+            )
+            # 转换为 VideoMetadata 对象
+            base_metadata = VideoMetadata(
+                video_id=video_id,
+                title=metadata_dict.get("title"),
+                author=metadata_dict.get("author"),
+                channel_id=metadata_dict.get("channel_id"),
+                duration=metadata_dict.get("duration"),
+                description=metadata_dict.get("description"),
+                upload_date=metadata_dict.get("upload_date"),
+                view_count=metadata_dict.get("view_count"),
+                thumbnail=metadata_dict.get("thumbnail"),
+                source_downloader="metadata_priority",
+            )
+        else:
+            logger.warning(
+                f"Failed to fetch metadata for {video_id}, "
+                f"will rely on downloader's metadata"
+            )
+            base_metadata = None
+
+        # 2. 根据场景获取优先级排序后的下载器列表
         prioritized_downloaders = self._get_prioritized_downloaders(include_audio, include_transcript)
 
         for downloader in prioritized_downloaders:
@@ -382,12 +452,22 @@ class DownloaderManager:
                         include_transcript,
                     )
 
-                # 成功：记录统计并返回
+                # 成功：记录统计
                 self.stats.record_success(downloader.name)
                 logger.info(
                     f"✓ Download succeeded with {downloader.name} "
                     f"(success rate: {self.stats.get_success_rate(downloader.name):.1%})"
                 )
+
+                # 补充元数据：如果预先获取了完整元数据，用它补充下载器返回的不完整元数据
+                if base_metadata:
+                    result.video_metadata = self._merge_metadata(
+                        base=base_metadata,
+                        downloader_metadata=result.video_metadata,
+                    )
+                    logger.debug(
+                        f"Merged metadata: source={result.video_metadata.source_downloader}"
+                    )
 
                 return result
 
