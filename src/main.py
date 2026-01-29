@@ -180,8 +180,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Record startup time
     startup_time = time.time()
 
-    # Send startup notification
-    await notify_service.notify_startup(__version__)
+    # Send startup notification with IP ban breaker status
+    ip_ban_breaker = download_worker.ip_ban_breaker if download_worker else None
+    await notify_service.notify_startup(__version__, ip_ban_breaker)
 
     logger.info("Application started successfully")
 
@@ -189,6 +190,27 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Shutdown
     logger.info("Shutting down...")
+
+    # Calculate uptime
+    uptime = int(time.time() - startup_time) if startup_time else 0
+
+    # Collect shutdown statistics
+    shutdown_stats = None
+    if db:
+        try:
+            # 获取任务统计信息
+            task_stats = await db.get_task_stats()
+            shutdown_stats = {
+                "total_tasks": task_stats["total"],
+                "completed_tasks": task_stats["completed"],
+                "failed_tasks": task_stats["failed"],
+            }
+        except Exception as e:
+            logger.error(f"Failed to collect shutdown statistics: {e}")
+
+    # Send shutdown notification
+    if notify_service:
+        await notify_service.notify_shutdown(uptime, shutdown_stats)
 
     # 关闭超时设置（秒）
     # 给下载任务足够时间响应取消信号，但不要无限等待

@@ -525,7 +525,8 @@ class Database:
             {where_clause}
         """
         count_cursor = await self.execute(count_sql, tuple(params))
-        total = (await count_cursor.fetchone())[0]
+        count_row = await count_cursor.fetchone()
+        total = count_row[0] if count_row else 0  # type: ignore[index]
 
         # 获取分页数据（使用 LEFT JOIN 聚合文件统计）
         params.extend([limit, offset])
@@ -985,7 +986,8 @@ class Database:
         count_cursor = await self.execute(
             f"SELECT COUNT(*) FROM tasks {where_clause}", tuple(params)
         )
-        total = (await count_cursor.fetchone())[0]
+        count_row = await count_cursor.fetchone()
+        total = count_row[0] if count_row else 0  # type: ignore[index]
 
         params.extend([limit, offset])
         cursor = await self.execute(
@@ -1288,19 +1290,58 @@ class Database:
             Dictionary with video, file, and task counts.
         """
         video_cursor = await self.execute("SELECT COUNT(*) FROM video_resources")
-        video_count = (await video_cursor.fetchone())[0]
+        video_row = await video_cursor.fetchone()
+        video_count = video_row[0] if video_row else 0  # type: ignore[index]
 
         file_cursor = await self.execute("SELECT COUNT(*) FROM files")
-        file_count = (await file_cursor.fetchone())[0]
+        file_row = await file_cursor.fetchone()
+        file_count = file_row[0] if file_row else 0  # type: ignore[index]
 
         task_cursor = await self.execute("SELECT COUNT(*) FROM tasks")
-        task_count = (await task_cursor.fetchone())[0]
+        task_row = await task_cursor.fetchone()
+        task_count = task_row[0] if task_row else 0  # type: ignore[index]
 
         return {
             "videos": video_count,
             "files": file_count,
             "tasks": task_count,
         }
+
+    async def get_task_stats(self) -> dict[str, int]:
+        """
+        获取任务统计信息（按状态分组）。
+
+        Returns:
+            包含各状态任务数量的字典。
+        """
+        cursor = await self.execute(
+            """
+            SELECT status, COUNT(*) as count
+            FROM tasks
+            GROUP BY status
+            """
+        )
+        rows = await cursor.fetchall()
+
+        # 初始化所有状态为 0
+        stats = {
+            "total": 0,
+            "pending": 0,
+            "downloading": 0,
+            "completed": 0,
+            "failed": 0,
+            "cancelled": 0,
+        }
+
+        # 填充实际统计
+        for row in rows:
+            status = row["status"]
+            count = row["count"]
+            if status in stats:
+                stats[status] = count
+            stats["total"] += count
+
+        return stats
 
     # ==================== Helper Methods ====================
 

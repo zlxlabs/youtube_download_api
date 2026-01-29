@@ -153,12 +153,17 @@ class NotificationService:
 
         return datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
 
-    async def notify_startup(self, version: str) -> None:
+    async def notify_startup(
+        self,
+        version: str,
+        ip_ban_breaker=None,
+    ) -> None:
         """
-        Send system startup notification.
+        发送系统启动通知（中文）。
 
         Args:
-            version: Application version.
+            version: 应用版本号
+            ip_ban_breaker: IP 熔断器实例（可选）
         """
         if not self.enabled or not self.notifier:
             return
@@ -167,47 +172,69 @@ class NotificationService:
             hostname = socket.gethostname()
             ip = self._get_local_ip()
 
-            # Build moderation status string
-            if self.settings.wecom_moderation_enabled:
-                moderation_urls = self.settings.get_moderation_url_list()
-                moderation_status = (
-                    f"Enabled ({self.settings.wecom_moderation_strategy}, "
-                    f"{len(moderation_urls)} URLs)"
-                )
-            else:
-                moderation_status = "Disabled"
+            # 构建启动通知内容
+            content = f"""# 🚀 YouTube Audio API 已启动
 
-            # Build downloader configuration string
-            downloader_config = ""
-            if self.downloader_manager:
-                # 下载器优先级
-                downloader_names = [d.name for d in self.downloader_manager.downloaders]
-                if downloader_names:
-                    downloader_config += f"> 📥 Downloaders: {' → '.join(downloader_names)}\n"
+## 📊 基础信息
+🖥️ **主机**: {hostname} ({ip})
+📦 **版本**: {version}
+🕐 **启动时间**: {self._get_local_now()}
+🌍 **时区**: {self.settings.tz}
 
-                # 熔断器配置
-                if self.downloader_manager.circuit_breakers:
-                    cb_threshold = getattr(self.settings, "circuit_breaker_threshold", 5)
-                    cb_timeout = getattr(self.settings, "circuit_breaker_timeout", 1800)
-                    downloader_config += f"> 🔌 Circuit Breaker: threshold={cb_threshold}, timeout={cb_timeout}s\n"
-                else:
-                    downloader_config += "> 🔌 Circuit Breaker: Disabled\n"
+## ⚙️ 核心配置
 
-            content = f"""# 🚀 YouTube Audio API Started
+### 🚦 任务队列
+> 并发数: {self.settings.download_concurrency}
+> 字幕任务间隔: {self.settings.transcript_interval_min}-{self.settings.transcript_interval_max} 秒（轻量级）
+> 音频任务间隔: {self.settings.audio_interval_min}-{self.settings.audio_interval_max} 秒（重量级）
+> 文件保留: {self.settings.file_retention_days} 天
 
-🖥️ **Host**: {hostname} ({ip})
-📦 **Version**: {version}
-🕐 **Time**: {self._get_local_now()}
-
-⚙️ **Configuration**:
-> 📊 Concurrency: {self.settings.download_concurrency}
-> ⏳ Task Interval: {self.settings.task_interval_min}-{self.settings.task_interval_max}s
-> 🗂️ File Retention: {self.settings.file_retention_days} days
-> 🔑 PO Token: {self.settings.pot_server_url}
-> 🛡️ Content Moderation: {moderation_status}
-{downloader_config}
-✨ Service is ready to accept requests!
+### 📥 下载器配置
+> **元数据获取**: {self._format_priority(self.settings.metadata_priority)}
+> **仅字幕**: {self._format_priority(self.settings.transcript_only_priority)}
+> **音频下载**: {self._format_priority(self.settings.audio_download_priority)}
+> **熔断器**: {self._format_circuit_breaker_status()}
+> **TikHub 缓存**: {self.settings.tikhub_cache_ttl_hours} 小时
 """
+
+            # CDP 下载器配置（条件显示）
+            if self.settings.cdp_enabled:
+                cdp_info = self._build_cdp_config_section()
+                content += cdp_info
+
+            # IP 熔断器状态
+            if ip_ban_breaker:
+                ip_ban_info = self._build_ip_ban_breaker_section(ip_ban_breaker)
+                content += ip_ban_info
+
+            # Cookie 配置（条件显示）
+            cookie_info = self._build_cookie_section()
+            if cookie_info:
+                content += cookie_info
+
+            # 人工上传配置（条件显示）
+            if self.settings.manual_upload_enabled:
+                upload_info = self._build_manual_upload_section()
+                content += upload_info
+
+            # 第三方服务（条件显示）
+            third_party_info = self._build_third_party_section()
+            if third_party_info:
+                content += third_party_info
+
+            # 企业微信审核（条件显示）
+            if self.settings.wecom_moderation_enabled:
+                moderation_info = self._build_moderation_section()
+                content += moderation_info
+
+            # 网络配置（仅开发环境显示）
+            if self.settings.debug or self.settings.http_proxy or self.settings.https_proxy:
+                network_info = self._build_network_section()
+                if network_info:
+                    content += network_info
+
+            content += "\n---\n✨ 服务已就绪，可以接受请求！"
+
             self.notifier.send_markdown(
                 webhook_url=self.webhook_url,
                 content=content,
@@ -216,6 +243,266 @@ class NotificationService:
 
         except Exception as e:
             logger.error(f"Failed to send startup notification: {e}")
+
+    def _format_priority(self, priority_str: str) -> str:
+        """格式化下载器优先级字符串。"""
+        parts = [p.strip().upper() for p in priority_str.split(",") if p.strip()]
+        return " → ".join(parts)
+
+    def _format_circuit_breaker_status(self) -> str:
+        """格式化熔断器状态。"""
+        if not self.settings.circuit_breaker_enabled:
+            return "❌ 未启用"
+        return (
+            f"✅ 已启用（阈值={self.settings.circuit_breaker_threshold}, "
+            f"超时={self.settings.circuit_breaker_timeout}秒）"
+        )
+
+    def _build_cdp_config_section(self) -> str:
+        """构建 CDP 下载器配置段。"""
+        # CDP URL 列表
+        cdp_urls = self.settings.cdp_url_list
+        cdp_urls_str = ", ".join(cdp_urls) if len(cdp_urls) <= 2 else f"{len(cdp_urls)} 个实例"
+
+        # 分片下载状态
+        multipart_status = "❌ 未启用"
+        if self.settings.cdp_enable_multipart:
+            min_size_mb = self.settings.cdp_multipart_min_size // (1024 * 1024)
+            multipart_status = (
+                f"✅ 已启用（{self.settings.cdp_multipart_chunks} chunks, "
+                f"≥{min_size_mb} MB）"
+            )
+
+        # 人类行为模拟
+        behavior_status = "❌ 未启用"
+        if self.settings.cdp_human_behavior_enabled:
+            if self.settings.cdp_quick_mode:
+                behavior_status = "⚠️ 快速模式（跳过模拟）"
+            else:
+                behavior_status = (
+                    f"✅ 已启用（观看 {self.settings.cdp_watch_duration_min}-"
+                    f"{self.settings.cdp_watch_duration_max}秒）"
+                )
+
+        # poToken 状态
+        pot_status = "✅ 已启用" if self.settings.cdp_enable_pot_token else "❌ 未启用"
+
+        return f"""
+### 🌐 CDP 下载器
+> **状态**: ✅ 已启用
+> **端点**: {cdp_urls_str}
+> **故障转移**: {self.settings.cdp_failover_strategy}
+> **TLS 指纹**: {'✅ 已启用（curl_cffi）' if self.settings.cdp_use_curl_cffi else '❌ 未启用'}
+> **分片下载**: {multipart_status}
+> **人类行为模拟**: {behavior_status}
+> **熔断器**: 阈值={self.settings.cdp_circuit_failure_threshold}, 超时={self.settings.cdp_circuit_timeout}秒
+> **poToken**: {pot_status}
+"""
+
+    def _build_ip_ban_breaker_section(self, ip_ban_breaker) -> str:
+        """构建 IP 熔断器状态段。"""
+        from src.core.ip_ban_models import IPBanLevel
+
+        state = ip_ban_breaker.current_state
+        state_emoji = {
+            IPBanLevel.NORMAL: "🟢",
+            IPBanLevel.AUDIO_BANNED: "🟡",
+            IPBanLevel.FULLY_BANNED: "🔴",
+        }
+        state_text = {
+            IPBanLevel.NORMAL: "正常",
+            IPBanLevel.AUDIO_BANNED: "音频熔断",
+            IPBanLevel.FULLY_BANNED: "全局熔断",
+        }
+
+        emoji = state_emoji.get(state, "⚪")
+        text = state_text.get(state, "未知")
+
+        # 最近熔断时间
+        last_ban_info = "无"
+        if ip_ban_breaker.last_ban_time:
+            from datetime import datetime
+
+            last_ban_dt = datetime.fromtimestamp(ip_ban_breaker.last_ban_time)
+            last_ban_info = self._format_local_time(last_ban_dt)
+
+        return f"""
+### 🛡️ IP 熔断器
+> **状态**: {emoji} {text}
+> **最近熔断**: {last_ban_info}
+> **最小等待**: {ip_ban_breaker.min_wait_before_retry} 秒
+> **重试间隔**: {ip_ban_breaker.max_retry_interval} 秒
+"""
+
+    def _build_cookie_section(self) -> str:
+        """构建 Cookie 配置段。"""
+        if not self.settings.cookie_file and not self.settings.pot_server_url:
+            return ""
+
+        cookie_status = "❌ 未配置"
+        if self.settings.cookie_file:
+            # 检查文件是否存在
+            from pathlib import Path
+
+            cookie_path = Path(self.settings.cookie_file)
+            if cookie_path.exists():
+                cookie_status = f"✅ 已配置（{self.settings.cookie_file}）"
+            else:
+                cookie_status = f"⚠️ 已配置但文件不存在（{self.settings.cookie_file}）"
+
+        return f"""
+### 🍪 Cookie 配置
+> **Cookie 文件**: {cookie_status}
+> **PO Token 服务**: {self.settings.pot_server_url}
+"""
+
+    def _build_manual_upload_section(self) -> str:
+        """构建人工上传配置段。"""
+        # 统计支持的格式数量
+        video_formats = [
+            f.strip()
+            for f in self.settings.manual_upload_allowed_video_formats.split(",")
+            if f.strip()
+        ]
+        audio_formats = [
+            f.strip()
+            for f in self.settings.manual_upload_allowed_audio_formats.split(",")
+            if f.strip()
+        ]
+
+        return f"""
+### 📤 人工上传
+> **状态**: ✅ 已启用
+> **最大文件**: {self.settings.manual_upload_max_size_mb} MB
+> **支持格式**: 视频（{len(video_formats)} 种）、音频（{len(audio_formats)} 种）
+"""
+
+    def _build_third_party_section(self) -> str:
+        """构建第三方服务配置段。"""
+        services = []
+
+        # YouTube Data API
+        if self.settings.youtube_data_api_key:
+            masked_key = self.settings.youtube_data_api_key[:6] + "***"
+            services.append(f"> **YouTube Data API**: ✅ 已配置（{masked_key}）")
+
+        # TikHub API
+        if self.settings.tikhub_api_key:
+            services.append("> **TikHub API**: ✅ 已配置")
+
+        if not services:
+            return ""
+
+        return "\n### 🔑 第三方服务\n" + "\n".join(services) + "\n"
+
+    def _build_moderation_section(self) -> str:
+        """构建企业微信审核配置段。"""
+        moderation_urls = self.settings.get_moderation_url_list()
+        return f"""
+### 🛡️ 企业微信审核
+> **状态**: ✅ 已启用
+> **策略**: {self.settings.wecom_moderation_strategy}
+> **敏感词库**: {len(moderation_urls)} 个 URL
+"""
+
+    def _build_network_section(self) -> str:
+        """构建网络配置段（仅开发环境）。"""
+        items = []
+
+        if self.settings.http_proxy:
+            items.append(f"> **HTTP 代理**: {self.settings.http_proxy}")
+        if self.settings.https_proxy:
+            items.append(f"> **HTTPS 代理**: {self.settings.https_proxy}")
+        if self.settings.base_url:
+            items.append(f"> **Base URL**: {self.settings.base_url}")
+
+        if not items:
+            return ""
+
+        return "\n### 🌐 网络配置\n" + "\n".join(items) + "\n"
+
+    async def notify_shutdown(
+        self,
+        uptime_seconds: int,
+        stats: dict | None = None,
+    ) -> None:
+        """
+        发送系统关闭通知（中文）。
+
+        Args:
+            uptime_seconds: 运行时长（秒）
+            stats: 统计信息（可选），包含 total_tasks, completed_tasks, failed_tasks
+        """
+        if not self.enabled or not self.notifier:
+            return
+
+        try:
+            hostname = socket.gethostname()
+            ip = self._get_local_ip()
+
+            # 格式化运行时长
+            uptime_str = self._format_uptime(uptime_seconds)
+
+            content = f"""# 🛑 YouTube Audio API 已关闭
+
+## 📊 基础信息
+🖥️ **主机**: {hostname} ({ip})
+🕐 **关闭时间**: {self._get_local_now()}
+⏱️ **运行时长**: {uptime_str}
+"""
+
+            # 添加统计信息（如果有）
+            if stats:
+                total = stats.get("total_tasks", 0)
+                completed = stats.get("completed_tasks", 0)
+                failed = stats.get("failed_tasks", 0)
+                success_rate = (completed / total * 100) if total > 0 else 0
+
+                content += f"""
+## 📈 运行统计
+> **处理任务**: {total} 个
+> **成功**: {completed} 个
+> **失败**: {failed} 个
+> **成功率**: {success_rate:.1f}%
+"""
+
+            content += "\n---\n👋 服务已安全关闭！"
+
+            self.notifier.send_markdown(
+                webhook_url=self.webhook_url,
+                content=content,
+            )
+            logger.debug("Shutdown notification sent")
+
+        except Exception as e:
+            logger.error(f"Failed to send shutdown notification: {e}")
+
+    def _format_uptime(self, seconds: int) -> str:
+        """
+        格式化运行时长。
+
+        Args:
+            seconds: 秒数
+
+        Returns:
+            格式化的时长字符串（如：1 天 2 小时 30 分钟）
+        """
+        days = seconds // 86400
+        hours = (seconds % 86400) // 3600
+        minutes = (seconds % 3600) // 60
+        secs = seconds % 60
+
+        parts = []
+        if days > 0:
+            parts.append(f"{days} 天")
+        if hours > 0:
+            parts.append(f"{hours} 小时")
+        if minutes > 0:
+            parts.append(f"{minutes} 分钟")
+        if secs > 0 or not parts:
+            parts.append(f"{secs} 秒")
+
+        return " ".join(parts)
 
     async def _get_video_info(self, video_id: str) -> Optional[VideoInfo]:
         """
