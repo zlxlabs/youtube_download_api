@@ -193,6 +193,23 @@ class Settings(BaseSettings):
         description="CDP max connections (currently only 1 is supported)",
     )
 
+    # 分片下载配置
+    cdp_enable_multipart: bool = Field(
+        default=False,
+        description="Enable multipart download for large files (experimental)",
+    )
+    cdp_multipart_chunks: int = Field(
+        default=6,
+        ge=2,
+        le=16,
+        description="Number of chunks for multipart download (recommended: 4-8)",
+    )
+    cdp_multipart_min_size: int = Field(
+        default=10 * 1024 * 1024,  # 10MB
+        ge=1 * 1024 * 1024,
+        description="Minimum file size to enable multipart download (bytes)",
+    )
+
     @property
     def cdp_url_list(self) -> list[str]:
         """Parse CDP URL list from comma-separated string."""
