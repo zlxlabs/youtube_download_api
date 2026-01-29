@@ -19,7 +19,7 @@ from src.db.models import FileType, VideoInfo, VideoResource
 from src.downloaders.manager import DownloaderManager
 from src.services.file_service import FileService
 from src.services.transcode_service import TranscodeError, TranscodeService
-from src.utils.helpers import extract_video_id
+from src.utils.helpers import extract_video_id, sanitize_filename as sanitize_filename_util
 from src.utils.logger import logger
 
 
@@ -166,16 +166,22 @@ class ManualUploadService:
 
     @staticmethod
     def sanitize_filename(filename: str, max_length: int = 100) -> str:
+        """
+        清理文件名，使用字节长度限制避免"文件名过长"错误。
+
+        Args:
+            filename: 原始文件名（可能包含扩展名）
+            max_length: 最大字节长度（默认100字节）
+
+        Returns:
+            str: 清理后的文件名
+        """
         path = Path(filename)
         name = path.stem
         ext = path.suffix
 
-        name = ManualUploadService.ILLEGAL_CHARS_PATTERN.sub("_", name)
-        name = name.replace("：", "_").replace("｜", "_").replace("、", "_")
-        name = name.strip(". ")
-
-        if len(name) > max_length:
-            name = name[:max_length]
+        # 使用通用的 sanitize_filename 函数（按字节长度限制）
+        name = sanitize_filename_util(name, max_bytes=max_length)
 
         if not name:
             name = "uploaded_file"

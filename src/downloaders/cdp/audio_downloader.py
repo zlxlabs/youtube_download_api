@@ -9,7 +9,6 @@ CDP 音频下载模块。
 """
 
 import asyncio
-import re
 from pathlib import Path
 from typing import Dict, Optional
 from urllib.parse import parse_qs, urlparse
@@ -25,6 +24,7 @@ from src.db.models import ErrorCode
 from src.downloaders.cdp.models import AudioInfo
 from src.downloaders.exceptions import DownloaderError
 from src.services.transcode_service import TranscodeService, TranscodeError
+from src.utils.helpers import sanitize_filename
 from src.utils.logger import logger
 
 
@@ -277,10 +277,26 @@ class AudioDownloader:
         )
 
     def _sanitize_filename(self, text: str) -> str:
-        """清理文件名中的非法字符。"""
-        text = re.sub(r'[\\/:*?"<>|]+', "_", text)
-        text = re.sub(r"\s+", " ", text).strip()
-        return text[:120] if text else "youtube_audio"
+        """
+        清理文件名中的非法字符，并限制文件名长度。
+
+        为了避免"文件名过长"错误，需要限制文件名的字节长度而非字符长度。
+        考虑到后续会添加 _itagXXX.ext.partN 等后缀（约30-40字节），
+        这里限制基础文件名为最多80字节（约26-27个中文字符）。
+
+        Args:
+            text: 原始文件名
+
+        Returns:
+            str: 清理后的安全文件名
+        """
+        if not text:
+            return "youtube_audio"
+
+        # 使用通用的 sanitize_filename 函数，限制为80字节
+        # 文件系统通常限制文件名为255字节
+        # 保留80字节给基础文件名，剩余175字节给 _itag251.webm.part0 等后缀
+        return sanitize_filename(text, max_bytes=80)
 
     def _parse_itag(self, url: str) -> Optional[int]:
         """从 URL 中解析 itag。"""
