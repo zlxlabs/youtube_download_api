@@ -210,6 +210,78 @@ class Settings(BaseSettings):
         description="Minimum file size to enable multipart download (bytes)",
     )
 
+    # CDP 人类行为模拟配置
+    cdp_human_behavior_enabled: bool = Field(
+        default=True,
+        description="Enable CDP human behavior simulation to reduce YouTube bot detection risk",
+    )
+
+    cdp_quick_mode: bool = Field(
+        default=False,
+        description="Quick mode: skip human behavior simulation (for testing)",
+    )
+
+    cdp_watch_duration_min: int = Field(
+        default=20,
+        ge=5,
+        le=120,
+        description="Minimum video watch duration in seconds (human behavior simulation)",
+    )
+    cdp_watch_duration_max: int = Field(
+        default=40,
+        ge=10,
+        le=180,
+        description="Maximum video watch duration in seconds (human behavior simulation)",
+    )
+
+    cdp_page_alive_min: int = Field(
+        default=30,
+        ge=10,
+        le=300,
+        description="Minimum page alive duration before closing (seconds)",
+    )
+    cdp_page_alive_max: int = Field(
+        default=60,
+        ge=20,
+        le=600,
+        description="Maximum page alive duration before closing (seconds)",
+    )
+
+    cdp_scroll_probability: float = Field(
+        default=0.8,
+        ge=0.0,
+        le=1.0,
+        description="Probability of scrolling the page (0.0-1.0)",
+    )
+    cdp_pause_probability: float = Field(
+        default=0.2,
+        ge=0.0,
+        le=1.0,
+        description="Probability of pausing/resuming video (0.0-1.0)",
+    )
+
+    @field_validator("cdp_watch_duration_max")
+    @classmethod
+    def validate_cdp_watch_duration_max(cls, v: int, info) -> int:
+        """Ensure cdp_watch_duration_max >= cdp_watch_duration_min."""
+        min_val = info.data.get("cdp_watch_duration_min", 20)
+        if v < min_val:
+            raise ValueError(
+                f"cdp_watch_duration_max ({v}) must be >= cdp_watch_duration_min ({min_val})"
+            )
+        return v
+
+    @field_validator("cdp_page_alive_max")
+    @classmethod
+    def validate_cdp_page_alive_max(cls, v: int, info) -> int:
+        """Ensure cdp_page_alive_max >= cdp_page_alive_min."""
+        min_val = info.data.get("cdp_page_alive_min", 30)
+        if v < min_val:
+            raise ValueError(
+                f"cdp_page_alive_max ({v}) must be >= cdp_page_alive_min ({min_val})"
+            )
+        return v
+
     @property
     def cdp_url_list(self) -> list[str]:
         """Parse CDP URL list from comma-separated string."""

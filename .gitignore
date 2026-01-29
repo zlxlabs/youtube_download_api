@@ -76,6 +76,7 @@ tmp/
 temp/
 *.tmp
 *.temp
+*.bak
 nul
 docker/output
 build-optimized.bat
