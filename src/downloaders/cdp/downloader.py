@@ -388,9 +388,24 @@ class CDPDownloader(BaseDownloader):
 
                     # 添加异常处理回调
                     def handle_task_exception(t):
+                        # 检查任务是否被取消（正常关闭）
+                        if t.cancelled():
+                            logger.debug(
+                                f"[cdp] Background behavior task cancelled for {video_id} "
+                                "(normal shutdown)"
+                            )
+                            return
+
+                        # 处理其他异常
                         try:
                             t.result()
+                        except asyncio.CancelledError:
+                            # 任务被取消（通常是服务器关闭），静默处理
+                            logger.debug(
+                                f"[cdp] Background behavior task cancelled for {video_id}"
+                            )
                         except Exception as e:
+                            # 真正的错误
                             logger.error(
                                 f"[cdp] Background behavior task failed for {video_id}: {e}",
                                 exc_info=True
