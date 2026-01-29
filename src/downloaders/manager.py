@@ -745,11 +745,19 @@ class DownloaderManager:
                 try:
                     resource = await self.db.get_video_resource(video_id)
                     if resource and resource.video_info:
+                        # 获取 title 用于日志显示（处理 VideoInfo 对象和字典两种情况）
+                        title = resource.video_info.title if hasattr(resource.video_info, 'title') else resource.video_info.get('title', 'N/A')
                         logger.info(
                             f"✓ Metadata from database cache: {video_id} "
-                            f"(title: {resource.video_info.get('title', 'N/A')[:50]})"
+                            f"(title: {title[:50] if title else 'N/A'})"
                         )
-                        return json.loads(resource.video_info) if isinstance(resource.video_info, str) else resource.video_info
+                        # 统一返回字典格式
+                        if isinstance(resource.video_info, str):
+                            return json.loads(resource.video_info)
+                        elif hasattr(resource.video_info, 'to_dict'):
+                            return resource.video_info.to_dict()
+                        else:
+                            return resource.video_info
                 except Exception as e:
                     logger.warning(f"Failed to read metadata from database: {e}")
 
