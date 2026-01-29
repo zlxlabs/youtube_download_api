@@ -10,7 +10,7 @@ CDP (Chrome DevTools Protocol) 下载器实现。
 特性：
 - 多客户端并发隔离（共享 Browser + 独立 Context）
 - 多 CDP 实例故障转移
-- 三层降级下载（curl_cffi → httpx → yt-dlp）
+- 两层降级下载（curl_cffi → yt-dlp）
 - 熔断器保护
 """
 
@@ -821,7 +821,7 @@ class CDPDownloader(BaseDownloader):
         headers: Dict[str, str],
     ) -> Path:
         """
-        下载音频（三层降级，使用真实 Headers）。
+        下载音频（两层降级，使用真实 Headers）。
 
         降级策略（从最优到兜底）：
         1. curl_cffi 分片下载（启用时，大文件使用）- 最快
