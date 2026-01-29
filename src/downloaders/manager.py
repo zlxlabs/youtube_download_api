@@ -238,6 +238,73 @@ class DownloaderManager:
 
         return circuit_breakers
 
+    def _get_prioritized_downloaders(
+        self,
+        include_audio: bool,
+        include_transcript: bool,
+    ) -> List[BaseDownloader]:
+        """
+        根据下载场景选择优先级配置。
+
+        Args:
+            include_audio: 是否下载音频
+            include_transcript: 是否获取字幕
+
+        Returns:
+            按优先级排序的下载器列表
+
+        Raises:
+            ValueError: 如果场景无效（audio 和 transcript 都为 False）
+        """
+        # 场景判断
+        if include_audio and include_transcript:
+            # 音频+字幕：使用音频优先级（大文件，高风控）
+            priority_str = self.settings.audio_download_priority
+            scenario = "audio+transcript"
+        elif include_audio:
+            # 仅音频：使用音频优先级
+            priority_str = self.settings.audio_download_priority
+            scenario = "audio-only"
+        elif include_transcript:
+            # 仅字幕：使用字幕优先级（轻量级，低风控）
+            priority_str = self.settings.transcript_only_priority
+            scenario = "transcript-only"
+        else:
+            raise ValueError("Invalid scenario: both include_audio and include_transcript are False")
+
+        logger.info(
+            f"[Scenario: {scenario}] Using priority config: {priority_str}"
+        )
+
+        # 解析优先级配置，构建下载器名称列表
+        priority_names = [name.strip() for name in priority_str.split(",") if name.strip()]
+
+        # 按优先级顺序构建下载器列表
+        # 注意：只包含已初始化且可用的下载器
+        prioritized: List[BaseDownloader] = []
+        downloader_map = {d.name: d for d in self.downloaders}
+
+        for name in priority_names:
+            if name in downloader_map:
+                prioritized.append(downloader_map[name])
+            else:
+                logger.debug(
+                    f"Downloader '{name}' in priority config but not available (not initialized or unavailable)"
+                )
+
+        if not prioritized:
+            logger.warning(
+                f"No available downloaders for scenario '{scenario}' with priority '{priority_str}', "
+                f"falling back to all available downloaders"
+            )
+            prioritized = [d for d in self.downloaders if d.supports_resource_download]
+
+        logger.debug(
+            f"[Scenario: {scenario}] Prioritized downloaders: {[d.name for d in prioritized]}"
+        )
+
+        return prioritized
+
     async def download_with_fallback(
         self,
         video_url: str,
@@ -249,7 +316,12 @@ class DownloaderManager:
         """
         使用降级策略下载。
 
-        按优先级顺序尝试所有下载器，遇到熔断器开启时跳过。
+        按场景化优先级顺序尝试所有下载器，遇到熔断器开启时跳过。
+
+        场景化优先级策略：
+        - 音频下载：使用 AUDIO_DOWNLOAD_PRIORITY（如 "cdp,ytdlp,tikhub"）
+        - 字幕下载：使用 TRANSCRIPT_ONLY_PRIORITY（如 "tikhub,ytdlp"）
+        - 音频+字幕：使用 AUDIO_DOWNLOAD_PRIORITY
 
         Args:
             video_url: YouTube 视频 URL
@@ -268,7 +340,10 @@ class DownloaderManager:
         errors: List[str] = []
         last_error: Optional[Exception] = None
 
-        for downloader in self.downloaders:
+        # 根据场景获取优先级排序后的下载器列表
+        prioritized_downloaders = self._get_prioritized_downloaders(include_audio, include_transcript)
+
+        for downloader in prioritized_downloaders:
             # 跳过不支持资源下载的下载器（如 YouTube Data API v3）
             if not downloader.supports_resource_download:
                 logger.debug(
