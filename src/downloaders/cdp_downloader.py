@@ -838,8 +838,8 @@ class CDPDownloader(BaseDownloader):
         if resume_from:
             request_headers["Range"] = f"bytes={resume_from}-"
 
-        # 下载
-        timeout = httpx.Timeout(10.0, read=120.0)
+        # 下载（使用读取超时：只要有数据流就不会超时）
+        timeout = httpx.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0)
         async with httpx.AsyncClient() as client:
             async with client.stream(
                 "GET", url, headers=request_headers, timeout=timeout, follow_redirects=True
@@ -925,15 +925,17 @@ class CDPDownloader(BaseDownloader):
             # 注意：必须使用流式下载，否则大文件会超时且丢失已下载数据
             def _curl_cffi_download():
                 """同步流式下载（在线程池中执行）"""
-                with curl_requests.get(
+                response = curl_requests.get(
                     url,
                     headers=request_headers,
                     impersonate="chrome120",
                     verify=False,
-                    timeout=300,  # 增加到 5 分钟（流式下载）
+                    timeout=(30, 120),  # (连接超时30s, 读取超时120s) - 只要有数据流就不会超时
                     allow_redirects=True,
                     stream=True,  # ← 关键：启用流式下载
-                ) as response:
+                )
+
+                try:
                     # 检查状态码
                     if response.status_code == 403:
                         raise DownloaderError(
@@ -958,6 +960,8 @@ class CDPDownloader(BaseDownloader):
                         for chunk in response.iter_content(chunk_size=8192):
                             if chunk:
                                 f.write(chunk)
+                finally:
+                    response.close()
 
             # 在线程池中执行（避免阻塞）
             await asyncio.to_thread(_curl_cffi_download)
