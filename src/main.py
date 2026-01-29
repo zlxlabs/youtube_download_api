@@ -77,6 +77,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Ensure directories exist
     settings.ensure_directories()
 
+    # Cleanup stale temporary files from previous runs
+    await _cleanup_stale_temp_files(settings)
+
     # Initialize database with error handling
     # 数据库是关键组件，连接失败应该阻止应用启动
     db = Database(settings.db_path)
@@ -371,6 +374,35 @@ def main() -> None:
         reload=settings.debug,
         log_level="debug" if settings.debug else "info",
     )
+
+
+async def _cleanup_stale_temp_files(settings: Settings) -> None:
+    """
+    清理过期的 CDP 临时文件。
+
+    在应用启动时自动执行，清理超过 1 小时的临时 cookie 文件，
+    防止文件积累占用磁盘空间。
+    """
+    tmp_dir = settings.data_dir / "tmp"
+
+    if not tmp_dir.exists():
+        return
+
+    now = time.time()
+    cleaned_count = 0
+
+    # 清理超过 1 小时的 CDP cookie 文件
+    for cookie_file in tmp_dir.glob("cdp_*.cookies.txt"):
+        try:
+            # 清理超过 1 小时的文件
+            if now - cookie_file.stat().st_mtime > 3600:
+                cookie_file.unlink()
+                cleaned_count += 1
+        except Exception as e:
+            logger.warning(f"[cleanup] Failed to remove {cookie_file}: {e}")
+
+    if cleaned_count > 0:
+        logger.info(f"[cleanup] Removed {cleaned_count} stale CDP cookie files")
 
 
 if __name__ == "__main__":

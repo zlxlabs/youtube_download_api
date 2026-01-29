@@ -13,7 +13,7 @@ from src.config import Settings
 from src.core.downloader import DownloadCancelledError
 from src.db.database import Database
 from src.downloaders.base import BaseDownloader
-from src.downloaders.cdp_downloader import CDPDownloader
+from src.downloaders.cdp import CDPDownloader
 from src.downloaders.circuit_breaker import CircuitBreaker, CircuitBreakerOpen
 from src.downloaders.exceptions import AllDownloadersFailed, DownloaderError
 from src.downloaders.models import DownloaderResult, VideoMetadata
