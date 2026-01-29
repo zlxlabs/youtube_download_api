@@ -1,0 +1,217 @@
+# 下载器架构详解
+
+本文档详细介绍系统的下载器架构，包括双层缓存策略、场景化优先级策略和扩展性设计。
+
+## 目录
+
+- [架构概览](#架构概览)
+- [双层缓存策略](#双层缓存策略)
+- [场景化优先级策略](#场景化优先级策略)
+- [扩展性设计](#扩展性设计)
+
+---
+
+## 架构概览
+
+### 三层架构
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                  调用层 (Services/Routes)                │
+│  - ManualUploadService: 人工上传                         │
+│  - Worker: 下载任务                                      │
+└────────────────────┬────────────────────────────────────┘
+                      │
+┌────────────────────▼────────────────────────────────────┐
+│           管理层 (DownloaderManager)                     │
+│  统一入口：                                               │
+│  - get_metadata()      ← 仅获取元数据                   │
+│  - download_resources() ← 下载资源                       │
+│  核心职责：                                               │
+│  - 优先级选择（可配置）                                   │
+│  - 降级策略（自动切换）                                   │
+│  - 缓存协调（数据库 + 内存）                              │
+│  - 熔断器保护                                             │
+│  - 并发控制（防止重复调用）                               │
+└────────────────────┬────────────────────────────────────┘
+                      │
+         ┌────────────┼────────────┐
+         │            │            │
+┌───────▼─────┐ ┌───▼────┐ ┌────▼──────┐
+│ YtdlpDown.  │ │TikHub  │ │ [新下载器]│
+│ (免费)      │ │(付费)  │ │ (扩展)    │
+└─────────────┘ └────────┘ └───────────┘
+```
+
+---
+
+## 双层缓存策略
+
+系统使用两层缓存优化性能和成本。
+
+### 缓存类型
+
+| 缓存类型 | 存储位置 | TTL | 用途 | 优势 |
+|---------|---------|-----|------|------|
+| **元数据缓存** | 数据库 (video_resources) | 永久 | 避免重复元数据获取 | 永久有效，跨任务共享 |
+| **API 响应缓存** | 内存 (TTLCache) | 3小时 | 复用 TikHub 下载链接 | 短期内无需重复 API 调用 |
+
+### 缓存流程示例
+
+```
+首次获取元数据：
+  → DownloaderManager.get_metadata()
+  → 数据库未命中
+  → ytdlp API 调用（免费，1-2秒）
+  → 写入数据库（永久保存）
+
+重复获取元数据：
+  → DownloaderManager.get_metadata()
+  → 数据库命中！
+  → 直接返回（免费，5ms）
+  → 性能提升：200-400倍
+```
+
+---
+
+## 场景化优先级策略
+
+系统针对不同场景使用不同的下载器优先级，平衡成本、性能和稳定性。
+
+### 场景 1：仅获取元数据
+
+**配置**: `METADATA_PRIORITY=ytdlp,tikhub`
+**策略**: 优先免费方案，节省成本
+
+```
+用途：人工上传时获取视频标题、作者等信息
+流程：
+  1. 检查数据库缓存 → 命中则直接返回（5ms）
+  2. 尝试 ytdlp（免费） → 成功率 80%
+  3. 降级 tikhub（$0.002） → 成功率 95%
+  4. 写入数据库（永久保存）
+
+成本：首次 $0.0004/个（平均）
+      重复：$0（数据库缓存）
+```
+
+### 场景 2：音频 + 字幕（完整模式）
+
+**配置**: `AUDIO_DOWNLOAD_PRIORITY=ytdlp,tikhub`
+**策略**: 优先免费方案，大文件下载
+
+```
+特点：
+  - 大文件下载（30-60秒）
+  - 风控风险高
+  - 优先免费，降级保障
+
+流程：
+  1. 元数据从数据库读取（复用缓存）
+  2. 尝试 ytdlp 下载音频+字幕
+  3. 失败 → 降级 tikhub
+  4. 支持部分成功（字幕成功，音频失败）
+```
+
+### 场景 3：仅字幕 ⭐
+
+**配置**: `TRANSCRIPT_ONLY_PRIORITY=tikhub,ytdlp`
+**策略**: **优先 TikHub**（与其他场景相反）
+
+```
+为什么优先 TikHub？
+  ✓ 字幕获取是轻量级操作（API 调用，无大文件）
+  ✓ TikHub 更稳定，风控风险低
+  ✓ 不涉及大文件下载，不暴露本地 IP
+  ✓ 成本可接受：$0.002/次
+  ✓ 避免 ytdlp 字幕失败 → 自动下载音频（浪费）
+
+流程：
+  1. 尝试 tikhub 获取字幕（$0.002）
+  2. 检查内存缓存（3小时TTL）→ 可能命中（$0）
+  3. 失败 → 降级 ytdlp
+
+特殊逻辑（ytdlp）：
+  - 如果无字幕 → 自动下载音频作为 fallback
+  - result.audio_fallback = true
+```
+
+---
+
+## 扩展性设计
+
+系统架构支持无限扩展下载器，添加新下载器仅需 5 步。
+
+### 步骤 1：创建下载器类
+
+```python
+# src/downloaders/new_downloader.py
+from src.downloaders.base import BaseDownloader
+
+class NewDownloader(BaseDownloader):
+    @property
+    def name(self) -> str:
+        return "newapi"
+
+    @property
+    def is_available(self) -> bool:
+        return bool(self.api_key)
+
+    async def fetch_metadata(self, video_url, video_id):
+        # 实现元数据获取
+        pass
+
+    async def download_resources(self, ...):
+        # 实现资源下载
+        pass
+```
+
+### 步骤 2：注册到管理器
+
+```python
+# src/downloaders/manager.py
+from .new_downloader import NewDownloader
+
+class DownloaderManager:
+    def _init_downloaders(self):
+        # ...
+        elif name == "newapi":
+            downloader = NewDownloader(self.settings)
+            # ...
+```
+
+### 步骤 3-5：配置、文档、测试
+
+```bash
+# config.py
+NEWAPI_API_KEY: Optional[str] = None
+
+# .env.example
+NEWAPI_API_KEY=your-key-here
+METADATA_PRIORITY=newapi,ytdlp,tikhub
+
+# tests/test_new_downloader.py
+async def test_fetch_metadata():
+    # 测试新下载器
+    pass
+```
+
+### 扩展示例
+
+```
+添加专门的元数据 API（免费且快速）
+
+METADATA_PRIORITY=metaapi,ytdlp,tikhub
+
+metaapi: 0.3秒，免费
+ytdlp:  1-2秒，免费
+tikhub: 0.5秒，$0.002
+```
+
+---
+
+## 相关文档
+
+- [配置总览](../configuration/overview.md)
+- [下载器配置](../configuration/downloaders.md)
+- [架构概览](./overview.md)
