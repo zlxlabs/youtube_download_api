@@ -56,6 +56,7 @@ class ErrorCode(str, Enum):
     CDP_DOWNLOAD_403 = "CDP_DOWNLOAD_403"  # HTTP 403 error
     CDP_DOWNLOAD_TIMEOUT = "CDP_DOWNLOAD_TIMEOUT"  # Download timeout
     CDP_SIZE_MISMATCH = "CDP_SIZE_MISMATCH"  # File size mismatch
+    CDP_TRANSCODE_FAILED = "CDP_TRANSCODE_FAILED"  # Transcode to m4a failed
 
 
 class CallbackStatus(str, Enum):

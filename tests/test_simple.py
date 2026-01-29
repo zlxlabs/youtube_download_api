@@ -42,8 +42,8 @@ except Exception as e:
 print("\nTest 4: Check POT Token was integrated")
 try:
     import inspect
-    # 读取文件内容检查
-    cdp_file = Path(__file__).parent.parent / "src" / "downloaders" / "cdp_downloader.py"
+    # 读取文件内容检查（CDP 下载器已模块化）
+    cdp_file = Path(__file__).parent.parent / "src" / "downloaders" / "cdp" / "downloader.py"
     content = cdp_file.read_text(encoding='utf-8')
 
     checks = [

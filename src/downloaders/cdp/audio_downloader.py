@@ -24,6 +24,7 @@ from src.config import Settings
 from src.db.models import ErrorCode
 from src.downloaders.cdp.models import AudioInfo
 from src.downloaders.exceptions import DownloaderError
+from src.services.transcode_service import TranscodeService, TranscodeError
 from src.utils.logger import logger
 
 
@@ -47,6 +48,7 @@ class AudioDownloader:
         """
         self.settings = settings
         self.downloader_name = downloader_name
+        self._transcode_service = TranscodeService()
 
     async def extract_audio_url(
         self,
@@ -200,7 +202,9 @@ class AudioDownloader:
                     logger.info(
                         f"[{self.downloader_name}] Downloaded via curl_cffi (multipart): {target_path}"
                     )
-                    return target_path
+                    # 转码为 m4a（如果需要）
+                    final_path = await self._convert_to_m4a_if_needed(target_path, output_dir)
+                    return final_path
             except DownloaderError as e:
                 # 403 错误：停止尝试，直接抛出（触发 IP 熔断）
                 if e.error_code == ErrorCode.CDP_DOWNLOAD_403:
@@ -229,7 +233,9 @@ class AudioDownloader:
                 )
                 if success:
                     logger.info(f"[{self.downloader_name}] Downloaded via curl_cffi: {target_path}")
-                    return target_path
+                    # 转码为 m4a（如果需要）
+                    final_path = await self._convert_to_m4a_if_needed(target_path, output_dir)
+                    return final_path
             except DownloaderError as e:
                 # 403 错误：停止尝试，直接抛出（触发 IP 熔断）
                 if e.error_code == ErrorCode.CDP_DOWNLOAD_403:
@@ -255,7 +261,9 @@ class AudioDownloader:
             )
             if ytdlp_path and ytdlp_path.exists():
                 logger.info(f"[{self.downloader_name}] Downloaded via yt-dlp: {ytdlp_path}")
-                return ytdlp_path
+                # 转码为 m4a（如果需要）
+                final_path = await self._convert_to_m4a_if_needed(ytdlp_path, output_dir)
+                return final_path
         except Exception as e:
             errors.append(f"ytdlp: {str(e)}")
             logger.error(f"[{self.downloader_name}] yt-dlp download failed: {e}")
@@ -630,3 +638,70 @@ class AudioDownloader:
         except Exception as e:
             logger.error(f"[{self.downloader_name}] yt-dlp sync download error: {e}")
             return None
+
+    async def _convert_to_m4a_if_needed(
+        self,
+        file_path: Path,
+        output_dir: Path,
+    ) -> Path:
+        """
+        如果文件不是 m4a 格式，转换为 m4a。
+
+        遵循项目标准：所有音频文件统一输出为 M4A 格式（128kbps AAC）。
+
+        Args:
+            file_path: 原始音频文件路径
+            output_dir: 输出目录
+
+        Returns:
+            Path: m4a 文件路径（可能是原文件或转换后的文件）
+
+        Raises:
+            DownloaderError: 转码失败
+        """
+        # 检查文件格式
+        if file_path.suffix.lower() == ".m4a":
+            logger.debug(f"[{self.downloader_name}] File already in m4a format: {file_path}")
+            return file_path
+
+        logger.info(
+            f"[{self.downloader_name}] Converting {file_path.suffix} to m4a: {file_path.name}"
+        )
+
+        try:
+            # 调用转码服务
+            m4a_path = await self._transcode_service.transcode_to_m4a(
+                input_file=file_path,
+                output_dir=output_dir,
+                target_bitrate=self.settings.audio_quality,
+                output_filename=file_path.stem,
+            )
+
+            # 转码成功，删除原始文件
+            try:
+                file_path.unlink()
+                logger.debug(f"[{self.downloader_name}] Deleted original file: {file_path}")
+            except Exception as e:
+                logger.warning(
+                    f"[{self.downloader_name}] Failed to delete original file {file_path}: {e}"
+                )
+
+            logger.info(
+                f"[{self.downloader_name}] Transcode completed: "
+                f"{m4a_path.stat().st_size / 1024 / 1024:.2f}MB"
+            )
+
+            return m4a_path
+
+        except TranscodeError as e:
+            raise DownloaderError(
+                message=f"Failed to convert {file_path.suffix} to m4a: {str(e)}",
+                error_code=ErrorCode.CDP_TRANSCODE_FAILED,
+                downloader=self.downloader_name,
+            )
+        except Exception as e:
+            raise DownloaderError(
+                message=f"Unexpected error during transcoding: {str(e)}",
+                error_code=ErrorCode.CDP_TRANSCODE_FAILED,
+                downloader=self.downloader_name,
+            )
