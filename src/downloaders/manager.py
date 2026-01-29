@@ -13,6 +13,7 @@ from src.config import Settings
 from src.core.downloader import DownloadCancelledError
 from src.db.database import Database
 from src.downloaders.base import BaseDownloader
+from src.downloaders.cdp_downloader import CDPDownloader
 from src.downloaders.circuit_breaker import CircuitBreaker, CircuitBreakerOpen
 from src.downloaders.exceptions import AllDownloadersFailed, DownloaderError
 from src.downloaders.models import DownloaderResult, VideoMetadata
@@ -149,7 +150,15 @@ class DownloaderManager:
 
         for name in priority_list:
             try:
-                if name == "ytdlp":
+                if name == "cdp":
+                    downloader = CDPDownloader(self.settings)
+                    if downloader.is_available:
+                        downloaders.append(downloader)
+                        logger.info(f"  ✓ {name} enabled (CDP configured)")
+                    else:
+                        logger.warning(f"  ✗ {name} not available (CDP not enabled or Playwright not installed)")
+
+                elif name == "ytdlp":
                     downloader = YtdlpDownloader(self.settings)
                     if downloader.is_available:
                         downloaders.append(downloader)

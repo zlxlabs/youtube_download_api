@@ -41,6 +41,22 @@ class ErrorCode(str, Enum):
     POT_TOKEN_FAILED = "POT_TOKEN_FAILED"  # PO Token acquisition failed
     INTERNAL_ERROR = "INTERNAL_ERROR"  # Internal error
 
+    # CDP-specific errors
+    CDP_CONNECTION_FAILED = "CDP_CONNECTION_FAILED"  # Cannot connect to Chrome
+    CDP_CONNECTION_TIMEOUT = "CDP_CONNECTION_TIMEOUT"  # Connection timeout
+    CDP_CHROME_NOT_READY = "CDP_CHROME_NOT_READY"  # Chrome not ready
+    CDP_CIRCUIT_BREAKER_OPEN = "CDP_CIRCUIT_BREAKER_OPEN"  # Circuit breaker open
+    CDP_PAGE_LOAD_FAILED = "CDP_PAGE_LOAD_FAILED"  # Page load failed
+    CDP_PAGE_TIMEOUT = "CDP_PAGE_TIMEOUT"  # Page load timeout
+    CDP_COOKIE_EXPORT_FAILED = "CDP_COOKIE_EXPORT_FAILED"  # Cookie export failed
+    CDP_NO_COOKIES = "CDP_NO_COOKIES"  # No valid cookies
+    CDP_NO_AUDIO_URL = "CDP_NO_AUDIO_URL"  # No audio URL from yt-dlp
+    CDP_YTDLP_FAILED = "CDP_YTDLP_FAILED"  # yt-dlp parsing failed
+    CDP_DOWNLOAD_FAILED = "CDP_DOWNLOAD_FAILED"  # Download failed (general)
+    CDP_DOWNLOAD_403 = "CDP_DOWNLOAD_403"  # HTTP 403 error
+    CDP_DOWNLOAD_TIMEOUT = "CDP_DOWNLOAD_TIMEOUT"  # Download timeout
+    CDP_SIZE_MISMATCH = "CDP_SIZE_MISMATCH"  # File size mismatch
+
 
 class CallbackStatus(str, Enum):
     """Callback status enumeration."""

@@ -105,6 +105,104 @@ class Settings(BaseSettings):
         default=None, description="YouTube Data API v3 key for metadata fetching"
     )
 
+    # ============ CDP Downloader Configuration ============
+    # 基础配置
+    cdp_enabled: bool = Field(
+        default=False,
+        description="Enable CDP downloader (requires external Chrome)",
+    )
+
+    cdp_urls: str = Field(
+        default="http://127.0.0.1:9222",
+        description="CDP endpoint URLs (comma-separated, supports multiple instances for failover)",
+    )
+
+    cdp_timeout: int = Field(
+        default=30,
+        ge=5,
+        le=120,
+        description="CDP connection timeout in seconds",
+    )
+
+    cdp_failover_strategy: str = Field(
+        default="sequential",
+        description="Failover strategy: sequential (ordered) or random",
+    )
+
+    # 功能开关
+    cdp_enable_pot_token: bool = Field(
+        default=False,
+        description="Enable poToken support for CDP downloader (optional)",
+    )
+
+    cdp_use_curl_cffi: bool = Field(
+        default=True,
+        description="Use curl_cffi for TLS fingerprinting",
+    )
+
+    # 健康检查
+    cdp_health_check_interval: int = Field(
+        default=300,
+        ge=60,
+        le=3600,
+        description="CDP health check interval in seconds",
+    )
+
+    cdp_connection_retry: int = Field(
+        default=3,
+        ge=1,
+        le=5,
+        description="Number of CDP connection retries",
+    )
+
+    # CDP 专用熔断器配置
+    cdp_circuit_failure_threshold: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description="CDP circuit breaker: consecutive failure threshold",
+    )
+
+    cdp_circuit_timeout: int = Field(
+        default=1800,
+        ge=300,
+        le=7200,
+        description="CDP circuit breaker: timeout in seconds (default: 30 minutes)",
+    )
+
+    cdp_circuit_half_open_success: int = Field(
+        default=2,
+        ge=1,
+        le=5,
+        description="CDP circuit breaker: success threshold in half-open state",
+    )
+
+    # 企微通知频率限制
+    cdp_notify_cooldown: int = Field(
+        default=3600,
+        ge=300,
+        le=86400,
+        description="CDP connection failure notification cooldown in seconds",
+    )
+
+    # 连接池配置（预留）
+    cdp_max_connections: int = Field(
+        default=1,
+        ge=1,
+        le=10,
+        description="CDP max connections (currently only 1 is supported)",
+    )
+
+    @property
+    def cdp_url_list(self) -> list[str]:
+        """Parse CDP URL list from comma-separated string."""
+        return [url.strip() for url in self.cdp_urls.split(",") if url.strip()]
+
+    @property
+    def cdp_connection_pool_enabled(self) -> bool:
+        """Check if CDP connection pool is enabled (reserved)."""
+        return self.cdp_max_connections > 1
+
     # ============ Downloader Configuration ============
     downloader_priority: str = Field(
         default="ytdlp,tikhub",
@@ -123,10 +221,10 @@ class Settings(BaseSettings):
         description="Transcript-only download priority (comma-separated, e.g., 'tikhub,ytdlp')",
     )
 
-    # 音频下载优先级（优先免费方案）
+    # 音频下载优先级（CDP 优先，然后降级到免费方案）
     audio_download_priority: str = Field(
-        default="ytdlp,tikhub",
-        description="Audio download priority (comma-separated, e.g., 'ytdlp,tikhub')",
+        default="cdp,ytdlp,tikhub",
+        description="Audio download priority (comma-separated, e.g., 'cdp,ytdlp,tikhub')",
     )
 
     # TikHub API 响应缓存时长

@@ -17,6 +17,8 @@ dependencies = [
     "curl-cffi>=0.14.0",
     "yt-dlp[default,curl-cffi]>=2026.1.19",
     "bgutil-ytdlp-pot-provider",
+    # CDP Downloader (Playwright)
+    "playwright>=1.40.0",
     # Database
     "aiosqlite>=0.19.0",
     # Configuration

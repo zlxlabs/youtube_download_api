@@ -13,6 +13,7 @@ from typing import Any, Optional
 class DownloaderType(str, Enum):
     """下载器类型枚举。"""
 
+    CDP = "cdp"
     YTDLP = "ytdlp"
     TIKHUB = "tikhub"
     YOUTUBE_DATA_API = "youtube_data_api"
