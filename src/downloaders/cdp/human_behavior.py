@@ -298,9 +298,8 @@ class HumanBehaviorSimulator:
                 logger.debug(f"[cdp] Page closed during initial wait for {video_id}")
                 return
 
-            # 2. 滚动页面（80% 概率）
-            if random.random() < self.settings.cdp_scroll_probability:
-                await self._simulate_scroll(page)
+            # 2. 滚动页面（内部决定是否滚动）
+            await self._simulate_scroll(page)
 
             # 3. 观看视频
             # 计算播放时长（基于视频总时长）
@@ -442,35 +441,76 @@ class HumanBehaviorSimulator:
 
     async def _simulate_scroll(self, page: Page) -> None:
         """
-        模拟页面滚动（简单版）。
+        模拟真实的观看行为滚动。
 
-        人类行为：
-        - 随机滚动距离（50%-80% 页面高度）
-        - 平滑滚动（smooth）
-        - 等待滚动动画完成
+        行为分层（贴合真实场景）：
+        - 40%: 完全不滚动（专注看视频）
+        - 35%: 轻度滚动 1-2 次（浏览标题/描述，200-400px）
+        - 20%: 中度滚动 2-3 次（查看推荐/评论预览，400-800px）
+        - 5%:  重度滚动 3-5 次（深入评论区，可能回滚）
+
+        分层设计理由：
+        - 大部分用户打开视频只是为了看视频，不会频繁滚动
+        - 即使滚动，也主要是浏览视频信息，不会滚动太远
+        - 只有少数用户会深入评论区
         """
         try:
             if page.is_closed():
                 return
 
-            # 随机滚动距离（50%-80% 页面高度）
-            scroll_ratio = random.uniform(0.5, 0.8)
+            # 40% 概率不滚动（只看视频）
+            rand = random.random()
+            if rand < 0.4:
+                logger.debug("[cdp] No scroll (watching video only)")
+                return
 
-            await page.evaluate(f"""() => {{
-                const scrollHeight = document.documentElement.scrollHeight;
-                const targetY = scrollHeight * {scroll_ratio};
+            # 35% 轻度滚动（浏览标题/描述）
+            if rand < 0.75:  # 0.4 + 0.35
+                scroll_count = random.randint(1, 2)
+                scroll_range = (200, 400)
+                behavior = "light"
+                down_probability = 0.95  # 几乎不向上滚
+                pause_range = (1.0, 2.0)  # 快速浏览
 
-                // 平滑滚动
-                window.scrollTo({{
-                    top: targetY,
-                    behavior: 'smooth'
-                }});
-            }}""")
+            # 20% 中度滚动（查看推荐/评论）
+            elif rand < 0.95:  # 0.75 + 0.20
+                scroll_count = random.randint(2, 3)
+                scroll_range = (400, 800)
+                behavior = "medium"
+                down_probability = 0.90
+                pause_range = (1.5, 3.0)  # 正常浏览
 
-            # 等待滚动动画完成
-            await asyncio.sleep(random.uniform(1, 2))
+            # 5% 重度滚动（深入评论区）
+            else:
+                scroll_count = random.randint(3, 5)
+                scroll_range = (300, 1000)
+                behavior = "heavy"
+                down_probability = 0.80  # 可能向上回滚
+                pause_range = (2.0, 5.0)  # 认真看评论
 
-            logger.debug(f"[cdp] Scrolled page: {scroll_ratio:.0%}")
+            logger.debug(f"[cdp] {behavior} scroll: {scroll_count} times")
+
+            # 执行滚动
+            for i in range(scroll_count):
+                if page.is_closed():
+                    return
+
+                # 随机滚动距离
+                scroll_distance = random.randint(*scroll_range)
+
+                # 决定方向（向下/向上）
+                direction = 1 if random.random() < down_probability else -1
+
+                await page.evaluate(f"""() => {{
+                    window.scrollBy({{
+                        top: {scroll_distance * direction},
+                        behavior: 'smooth'
+                    }});
+                }}""")
+
+                # 滚动后停顿观察
+                pause = random.uniform(*pause_range)
+                await asyncio.sleep(pause)
 
         except Exception as e:
             error_msg = str(e).lower()

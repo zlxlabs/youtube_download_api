@@ -153,21 +153,38 @@ class TestSimulateScroll:
 
     @pytest.mark.asyncio
     async def test_scroll_success(self, simulator):
-        """测试滚动成功。"""
+        """测试滚动成功（强制轻度滚动）。"""
         # 模拟 Page
         page = AsyncMock()
         # is_closed() 是同步方法，返回 False
         page.is_closed = MagicMock(return_value=False)
         page.evaluate = AsyncMock()
 
-        # 调用滚动
-        await simulator._simulate_scroll(page)
+        # Mock random.random() 返回 0.5，确保触发轻度滚动（0.4 < 0.5 < 0.75）
+        with patch('random.random', return_value=0.5):
+            # 调用滚动
+            await simulator._simulate_scroll(page)
 
-        # 验证：调用了 evaluate
-        page.evaluate.assert_called_once()
-        # 验证：JS 代码包含 scrollTo
+        # 验证：调用了 evaluate（轻度滚动会调用 1-2 次）
+        assert page.evaluate.call_count >= 1
+        # 验证：JS 代码包含 scrollBy（新逻辑使用 scrollBy）
         js_code = page.evaluate.call_args[0][0]
-        assert "scrollTo" in js_code
+        assert "scrollBy" in js_code
+
+    @pytest.mark.asyncio
+    async def test_scroll_no_scroll(self, simulator):
+        """测试不滚动场景（40% 概率）。"""
+        # 模拟 Page
+        page = AsyncMock()
+        page.is_closed = MagicMock(return_value=False)
+        page.evaluate = AsyncMock()
+
+        # Mock random.random() 返回 0.3，触发"不滚动"逻辑（< 0.4）
+        with patch('random.random', return_value=0.3):
+            await simulator._simulate_scroll(page)
+
+        # 验证：未调用 evaluate
+        page.evaluate.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_scroll_page_closed(self, simulator):

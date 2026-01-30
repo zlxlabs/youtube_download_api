@@ -251,7 +251,7 @@ class Settings(BaseSettings):
         default=0.8,
         ge=0.0,
         le=1.0,
-        description="Probability of scrolling the page (0.0-1.0)",
+        description="[DEPRECATED] Probability of scrolling the page (0.0-1.0) - now handled internally with realistic behavior layering",
     )
     cdp_pause_probability: float = Field(
         default=0.2,
