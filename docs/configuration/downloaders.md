@@ -173,6 +173,49 @@ pip install playwright curl-cffi
 | `CDP_CONNECTION_RETRY` | `3` | 连接重试次数 |
 | `CDP_NOTIFY_COOLDOWN` | `3600` | 通知冷却时间（秒，1小时） |
 
+#### 人类行为模拟配置
+
+模拟真实人类浏览行为，降低 YouTube 风控概率。后台任务异步执行，不阻塞下载流程。
+
+**⚠️ 重要**：人类行为模拟要求 `DOWNLOAD_CONCURRENCY=1`（单并发），否则多任务会互相干扰。
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `CDP_HUMAN_BEHAVIOR_ENABLED` | `true` | 启用人类行为模拟（生产环境推荐） |
+| `CDP_QUICK_MODE` | `false` | 快速模式：跳过人类行为模拟（仅测试用） |
+
+**视频播放时长控制**（智能防止持续播放）
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `CDP_MIN_PLAY_DURATION` | `30` | 最小播放时长（秒），避免短视频播放过短 |
+| `CDP_MAX_PLAY_DURATION` | `600` | 最大播放时长（秒，10分钟），限制长视频播放 |
+| `CDP_PLAY_RATIO_MIN` | `0.2` | 最小播放比例（20%），基于视频总时长 |
+| `CDP_PLAY_RATIO_MAX` | `0.4` | 最大播放比例（40%），基于视频总时长 |
+
+**工作原理**：
+- 获取视频总时长，计算播放时长 = min(max(视频时长 × 随机比例, 最小时长), 最大时长)
+- 例：10分钟视频 → 播放 2-4 分钟（20%-40%）
+- 例：30秒短视频 → 播放 30 秒（应用最小时长）
+- 例：2小时长视频 → 播放 10 分钟（应用最大时长）
+- 播放完成后，如果是最后一个 Page，自动暂停视频，避免持续播放
+
+**默认行为模拟**（无视频时长时降级使用）
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `CDP_WATCH_DURATION_MIN` | `20` | 最小观看时长（秒），直播或时长获取失败时使用 |
+| `CDP_WATCH_DURATION_MAX` | `40` | 最大观看时长（秒），直播或时长获取失败时使用 |
+| `CDP_PAGE_ALIVE_MIN` | `30` | 暂停后最小存活时长（秒） |
+| `CDP_PAGE_ALIVE_MAX` | `60` | 暂停后最大存活时长（秒） |
+
+**行为概率**
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `CDP_SCROLL_PROBABILITY` | `0.8` | 滚动页面概率（0.8 = 80%） |
+| `CDP_PAUSE_PROBABILITY` | `0.2` | 暂停/恢复视频概率（0.2 = 20%，观看期间） |
+
 ### 配置示例
 
 #### 示例 1：基础配置（本地开发）
@@ -225,8 +268,27 @@ CDP_HEALTH_CHECK_INTERVAL=300
 CDP_CONNECTION_RETRY=3
 CDP_NOTIFY_COOLDOWN=3600
 
+# 人类行为模拟（推荐启用，降低风控）
+CDP_HUMAN_BEHAVIOR_ENABLED=true
+CDP_QUICK_MODE=false
+# 视频播放时长控制
+CDP_MIN_PLAY_DURATION=30
+CDP_MAX_PLAY_DURATION=600
+CDP_PLAY_RATIO_MIN=0.2
+CDP_PLAY_RATIO_MAX=0.4
+# 默认行为模拟
+CDP_WATCH_DURATION_MIN=20
+CDP_WATCH_DURATION_MAX=40
+CDP_PAGE_ALIVE_MIN=30
+CDP_PAGE_ALIVE_MAX=60
+# 行为概率
+CDP_SCROLL_PROBABILITY=0.8
+CDP_PAUSE_PROBABILITY=0.2
+
 # 下载器优先级
 AUDIO_DOWNLOAD_PRIORITY=cdp,ytdlp,tikhub
+# 重要：人类行为模拟要求单并发
+DOWNLOAD_CONCURRENCY=1
 ```
 
 ### 工作流程

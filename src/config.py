@@ -260,6 +260,31 @@ class Settings(BaseSettings):
         description="Probability of pausing/resuming video (0.0-1.0)",
     )
 
+    # CDP 视频播放时长控制（基于视频总时长的智能计算）
+    cdp_min_play_duration: float = Field(
+        default=30.0,
+        ge=0.0,
+        description="Minimum video play duration in seconds (avoid short videos playing too briefly)",
+    )
+    cdp_max_play_duration: int = Field(
+        default=600,
+        ge=60,
+        le=3600,
+        description="Maximum video play duration in seconds (default: 10 minutes)",
+    )
+    cdp_play_ratio_min: float = Field(
+        default=0.2,
+        ge=0.0,
+        le=1.0,
+        description="Minimum play ratio of video duration (default: 20%)",
+    )
+    cdp_play_ratio_max: float = Field(
+        default=0.4,
+        ge=0.0,
+        le=1.0,
+        description="Maximum play ratio of video duration (default: 40%)",
+    )
+
     @field_validator("cdp_watch_duration_max")
     @classmethod
     def validate_cdp_watch_duration_max(cls, v: int, info) -> int:
@@ -279,6 +304,17 @@ class Settings(BaseSettings):
         if v < min_val:
             raise ValueError(
                 f"cdp_page_alive_max ({v}) must be >= cdp_page_alive_min ({min_val})"
+            )
+        return v
+
+    @field_validator("cdp_play_ratio_max")
+    @classmethod
+    def validate_cdp_play_ratio_max(cls, v: float, info) -> float:
+        """Ensure cdp_play_ratio_max >= cdp_play_ratio_min."""
+        min_val = info.data.get("cdp_play_ratio_min", 0.2)
+        if v < min_val:
+            raise ValueError(
+                f"cdp_play_ratio_max ({v}) must be >= cdp_play_ratio_min ({min_val})"
             )
         return v
 

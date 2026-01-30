@@ -365,8 +365,8 @@ class CDPDownloader(BaseDownloader):
                         context, keep_last=True
                     )
 
-                # 4. 快速获取数据（创建新 Page）
-                page, cookie_file, headers = await self._behavior_simulator.quick_fetch_data(
+                # 4. 快速获取数据（创建新 Page，同时获取视频时长）
+                page, cookie_file, headers, video_duration = await self._behavior_simulator.quick_fetch_data(
                     context, video_url, video_id, task_id
                 )
 
@@ -385,7 +385,7 @@ class CDPDownloader(BaseDownloader):
                 if self.settings.cdp_human_behavior_enabled and not self.settings.cdp_quick_mode:
                     task = asyncio.create_task(
                         self._behavior_simulator.background_human_behavior(
-                            page, video_url, video_id, task_id
+                            page, video_url, video_id, task_id, video_duration
                         )
                     )
 

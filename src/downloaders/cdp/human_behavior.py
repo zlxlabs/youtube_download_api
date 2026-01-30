@@ -120,9 +120,9 @@ class HumanBehaviorSimulator:
         video_url: str,
         video_id: str,
         task_id: str,
-    ) -> Tuple[Page, Path, Dict[str, str]]:
+    ) -> Tuple[Page, Path, Dict[str, str], Optional[float]]:
         """
-        快速获取 cookies + headers（2-3秒完成）。
+        快速获取 cookies + headers + 视频时长（2-3秒完成）。
 
         合并原有的两次页面访问：
         - 原：_export_cookies() + _extract_request_headers()
@@ -138,10 +138,11 @@ class HumanBehaviorSimulator:
             task_id: 任务 ID（用于临时文件命名）
 
         Returns:
-            (page, cookie_file, headers)
+            (page, cookie_file, headers, video_duration)
             - page: 保持打开状态，供后台任务使用
             - cookie_file: cookies 文件路径
             - headers: 真实请求 headers
+            - video_duration: 视频时长（秒），None 表示获取失败或直播
         """
         logger.info(f"[cdp] Quick fetching data for {video_id} (task: {task_id})")
 
@@ -200,6 +201,32 @@ class HumanBehaviorSimulator:
             cookie_file.parent.mkdir(parents=True, exist_ok=True)
             cookie_file.write_text(self._cookies_to_netscape(cookies), encoding="utf-8")
 
+            # 获取视频时长
+            video_duration = None
+            try:
+                if not page.is_closed():
+                    raw_duration = await page.evaluate("""() => {
+                        const video = document.querySelector('video');
+                        return video ? video.duration : null;
+                    }""")
+
+                    # 检查视频时长有效性
+                    if raw_duration is not None:
+                        import math
+                        if math.isinf(raw_duration) or math.isnan(raw_duration):
+                            logger.debug("[cdp] Video duration is infinite or NaN (likely live stream)")
+                            video_duration = None
+                        elif raw_duration > 0:
+                            video_duration = raw_duration
+                            logger.debug(f"[cdp] Video duration: {video_duration:.1f}s ({video_duration/60:.1f}min)")
+                        else:
+                            logger.debug("[cdp] Video duration is zero or negative")
+                            video_duration = None
+                    else:
+                        logger.debug("[cdp] Video duration not available (not loaded yet)")
+            except Exception as e:
+                logger.debug(f"[cdp] Failed to get video duration: {e}")
+
             # 返回结果（保持 page 打开）
             headers = captured_headers or {
                 "referer": "https://www.youtube.com/",
@@ -209,9 +236,9 @@ class HumanBehaviorSimulator:
 
             logger.info(
                 f"[cdp] Quick fetch completed for {task_id}: "
-                f"{len(cookies)} cookies, {len(headers)} headers"
+                f"{len(cookies)} cookies, {len(headers)} headers, duration={video_duration}s"
             )
-            return page, cookie_file, headers
+            return page, cookie_file, headers, video_duration
 
         except Exception as e:
             # 出错时立即关闭 Page
@@ -227,6 +254,7 @@ class HumanBehaviorSimulator:
         video_url: str,
         video_id: str,
         task_id: str,
+        video_duration: Optional[float] = None,
     ) -> None:
         """
         后台异步执行：人类行为模拟（不阻塞主流程）。
@@ -238,11 +266,18 @@ class HumanBehaviorSimulator:
         流程：
         1. 检查 Page 是否已关闭
         2. 滚动页面（模拟浏览，80% 概率）
-        3. 观看视频片段（20-40秒随机）
-        4. 可能暂停/恢复（20% 概率）
+        3. 观看视频片段（基于视频时长计算，或使用默认值）
+        4. 如果是最后一个 Page，暂停视频
         5. 保持页面存活（30-60秒随机）
         6. 清理 cookie 文件
         7. 关闭页面
+
+        Args:
+            page: Page 对象
+            video_url: 视频 URL
+            video_id: 视频 ID
+            task_id: 任务 ID
+            video_duration: 视频总时长（秒），None 表示未获取到
         """
         try:
             # 检查 Page 是否已关闭
@@ -268,30 +303,66 @@ class HumanBehaviorSimulator:
                 await self._simulate_scroll(page)
 
             # 3. 观看视频
-            watch_duration = random.uniform(
-                self.settings.cdp_watch_duration_min,
-                self.settings.cdp_watch_duration_max
-            )
-            logger.debug(f"[cdp] Watching video for {watch_duration:.1f}s")
-
-            # 观看期间可能暂停/恢复
-            if random.random() < self.settings.cdp_pause_probability:
-                await self._simulate_pause_resume(page, watch_duration)
+            # 计算播放时长（基于视频总时长）
+            if video_duration and video_duration > 0:
+                # 有视频时长信息，计算播放比例
+                play_ratio = random.uniform(
+                    self.settings.cdp_play_ratio_min,
+                    self.settings.cdp_play_ratio_max
+                )
+                # 确保播放时长在 [最小时长, 最大时长] 范围内
+                watch_duration = max(
+                    min(
+                        video_duration * play_ratio,
+                        self.settings.cdp_max_play_duration
+                    ),
+                    self.settings.cdp_min_play_duration
+                )
+                logger.debug(
+                    f"[cdp] Calculated watch duration: {watch_duration:.1f}s "
+                    f"({play_ratio:.0%} of {video_duration:.1f}s, "
+                    f"min {self.settings.cdp_min_play_duration}s, max {self.settings.cdp_max_play_duration}s)"
+                )
             else:
-                # 分段睡眠，定期检查 Page 状态
-                await self._sleep_with_page_check(page, watch_duration, video_id)
+                # 没有视频时长信息（直播或获取失败），使用默认值
+                watch_duration = random.uniform(
+                    self.settings.cdp_watch_duration_min,
+                    self.settings.cdp_watch_duration_max
+                )
+                logger.debug(
+                    f"[cdp] Using default watch duration: {watch_duration:.1f}s "
+                    "(video duration not available)"
+                )
 
-            # 4. 保持页面存活一段时间
-            alive_duration = random.uniform(
-                self.settings.cdp_page_alive_min,
-                self.settings.cdp_page_alive_max
-            )
-            logger.debug(f"[cdp] Keeping page alive for {alive_duration:.1f}s")
-            await self._sleep_with_page_check(page, alive_duration, video_id)
+            # 观看视频（分段检查 Page 状态）
+            logger.debug(f"[cdp] Watching video for {watch_duration:.1f}s")
+            await self._sleep_with_page_check(page, watch_duration, video_id)
+
+            # 4. 播放完成后，条件性暂停
+            # 只对最后一个 Page 执行暂停操作
+            if not page.is_closed():
+                context = page.context
+                if len(context.pages) == 1:
+                    # 确认是最后一个 Page，执行暂停
+                    logger.debug(f"[cdp] Pausing video for {video_id} (last page)")
+                    await self._pause_video(page)
+
+                    # 暂停后保持页面存活一段时间（模拟人类暂停后去做其他事）
+                    alive_duration = random.uniform(
+                        self.settings.cdp_page_alive_min,
+                        self.settings.cdp_page_alive_max
+                    )
+                    logger.debug(f"[cdp] Keeping paused video for {alive_duration:.1f}s")
+                    await self._sleep_with_page_check(page, alive_duration, video_id)
+                else:
+                    logger.debug(
+                        f"[cdp] Skipping pause for {video_id}: "
+                        f"not the last page ({len(context.pages)} pages exist)"
+                    )
 
             logger.info(
                 f"[cdp] Background behavior completed for {video_id}: "
-                f"watched={watch_duration:.1f}s, alive={alive_duration:.1f}s"
+                f"watched={watch_duration:.1f}s"
             )
 
         except Exception as e:
@@ -461,6 +532,29 @@ class HumanBehaviorSimulator:
                 logger.debug(f"[cdp] Pause/resume failed: {e}")
                 # 失败则正常等待
                 await self._sleep_with_page_check(page, duration, "pause_resume")
+
+    async def _pause_video(self, page: Page) -> None:
+        """
+        暂停视频播放。
+
+        Args:
+            page: Page 对象
+        """
+        try:
+            if page.is_closed():
+                return
+
+            await page.evaluate("""() => {
+                const video = document.querySelector('video');
+                if (video && !video.paused) {
+                    video.pause();
+                }
+            }""")
+            logger.debug("[cdp] Video paused successfully")
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "page has been closed" not in error_msg and "target closed" not in error_msg:
+                logger.debug(f"[cdp] Failed to pause video: {e}")
 
     def _cookies_to_netscape(self, cookies: list) -> str:
         """
