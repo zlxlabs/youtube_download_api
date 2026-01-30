@@ -257,7 +257,7 @@ class Settings(BaseSettings):
         default=0.2,
         ge=0.0,
         le=1.0,
-        description="Probability of pausing/resuming video (0.0-1.0)",
+        description="[DEPRECATED] Probability of pausing/resuming video (0.0-1.0) - video is now always paused after watching (for the last page)",
     )
 
     # CDP 视频播放时长控制（基于视频总时长的智能计算）
