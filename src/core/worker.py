@@ -367,124 +367,170 @@ class DownloadWorker:
         Returns:
             Dict with execution result.
         """
-        with tempfile.TemporaryDirectory() as temp_dir:
-            output_dir = Path(temp_dir)
+        # 追踪首次探测结果，用于在下载失败时保存字幕可用性信息
+        # 这样可以避免重复探测同一视频的字幕（节省 API 调用成本）
+        first_result: Optional[DownloaderResult] = None
 
-            # 使用下载器管理器下载（自动降级）
-            result: DownloaderResult = await self.downloader_manager.download_with_fallback(
-                video_url=task.video_url,
-                video_id=task.video_id,
-                output_dir=output_dir,
-                include_audio=need_audio,
-                include_transcript=need_transcript,
-            )
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                output_dir = Path(temp_dir)
 
-            logger.info(
-                f"Task {task.id}: Download completed with {result.downloader} "
-                f"(audio={result.audio_path is not None}, "
-                f"transcript={result.transcript_path is not None})"
-            )
-
-            # Audio fallback 逻辑：仅字幕模式但无字幕时，自动下载音频
-            audio_fallback = False
-            if not need_audio and need_transcript and not result.has_transcript:
-                logger.info(
-                    f"Task {task.id}: No transcript available, falling back to audio download"
-                )
-                audio_fallback = True
-
-                # 先检查数据库中是否已经存在音频文件（可能是人工上传的）
-                if existing_audio is not None:
-                    logger.info(
-                        f"Task {task.id}: Audio already exists in database (reusing), "
-                        f"no need to download"
-                    )
-                    # 不需要下载，后续会从数据库读取 existing_audio
-                else:
-                    # 数据库中没有音频，重新下载
-                    logger.info(
-                        f"Task {task.id}: Audio not found in database, downloading..."
-                    )
-                    result = await self.downloader_manager.download_with_fallback(
-                        video_url=task.video_url,
-                        video_id=task.video_id,
-                        output_dir=output_dir,
-                        include_audio=True,  # 强制下载音频
-                        include_transcript=False,  # 已经确认没有字幕了
-                    )
-
-                    logger.info(
-                        f"Task {task.id}: Audio fallback completed with {result.downloader} "
-                        f"(audio={result.audio_path is not None})"
-                    )
-
-            # 将 VideoMetadata 转换为 VideoInfo（兼容现有代码）
-            from src.db.models import VideoInfo as DbVideoInfo
-
-            video_info = DbVideoInfo(
-                title=result.video_metadata.title,
-                author=result.video_metadata.author,
-                channel_id=result.video_metadata.channel_id,
-                duration=result.video_metadata.duration,
-                description=result.video_metadata.description,
-                upload_date=result.video_metadata.upload_date,
-                view_count=result.video_metadata.view_count,
-                thumbnail=result.video_metadata.thumbnail,
-            )
-
-            # Update video resource with metadata
-            await self._update_video_resource(
-                task.video_id,
-                video_info,
-                result.has_transcript,
-            )
-
-            # Process audio file
-            audio_file_id = existing_audio.id if existing_audio else None
-            reused_audio = existing_audio is not None
-
-            # 修复：audio_fallback 场景下也需要保存音频
-            if (need_audio or audio_fallback) and result.audio_path and result.audio_path.exists():
-                audio_file = await self.file_service.create_file_record(
+                # 使用下载器管理器下载（自动降级）
+                result: DownloaderResult = await self.downloader_manager.download_with_fallback(
+                    video_url=task.video_url,
                     video_id=task.video_id,
-                    file_type=FileType.AUDIO,
-                    source_path=result.audio_path,
-                    quality=str(self.settings.audio_quality),
-                    video_title=video_info.title,
+                    output_dir=output_dir,
+                    include_audio=need_audio,
+                    include_transcript=need_transcript,
                 )
-                audio_file_id = audio_file.id
-                reused_audio = False
 
-            # Process transcript file
-            # 优化：无论用户是否请求字幕，只要下载器返回了字幕就保存
-            transcript_file_id = existing_transcript.id if existing_transcript else None
-            reused_transcript = existing_transcript is not None
+                # 保存首次探测结果（包含字幕可用性信息）
+                # 即使后续音频降级失败，也能保存这个探测结果
+                first_result = result
 
-            if result.transcript_path and result.transcript_path.exists():
-                if existing_transcript is None:
-                    # 没有缓存，保存新字幕
-                    lang = self._extract_language(result.transcript_path)
-                    transcript_file = await self.file_service.create_file_record(
+                logger.info(
+                    f"Task {task.id}: Download completed with {result.downloader} "
+                    f"(audio={result.audio_path is not None}, "
+                    f"transcript={result.transcript_path is not None})"
+                )
+
+                # Audio fallback 逻辑：仅字幕模式但无字幕时，自动下载音频
+                audio_fallback = False
+                if not need_audio and need_transcript and not result.has_transcript:
+                    logger.info(
+                        f"Task {task.id}: No transcript available, falling back to audio download"
+                    )
+                    audio_fallback = True
+
+                    # 先检查数据库中是否已经存在音频文件（可能是人工上传的）
+                    if existing_audio is not None:
+                        logger.info(
+                            f"Task {task.id}: Audio already exists in database (reusing), "
+                            f"no need to download"
+                        )
+                        # 不需要下载，后续会从数据库读取 existing_audio
+                    else:
+                        # 数据库中没有音频，重新下载
+                        logger.info(
+                            f"Task {task.id}: Audio not found in database, downloading..."
+                        )
+                        result = await self.downloader_manager.download_with_fallback(
+                            video_url=task.video_url,
+                            video_id=task.video_id,
+                            output_dir=output_dir,
+                            include_audio=True,  # 强制下载音频
+                            include_transcript=False,  # 已经确认没有字幕了
+                        )
+
+                        logger.info(
+                            f"Task {task.id}: Audio fallback completed with {result.downloader} "
+                            f"(audio={result.audio_path is not None})"
+                        )
+
+                # 将 VideoMetadata 转换为 VideoInfo（兼容现有代码）
+                from src.db.models import VideoInfo as DbVideoInfo
+
+                video_info = DbVideoInfo(
+                    title=result.video_metadata.title,
+                    author=result.video_metadata.author,
+                    channel_id=result.video_metadata.channel_id,
+                    duration=result.video_metadata.duration,
+                    description=result.video_metadata.description,
+                    upload_date=result.video_metadata.upload_date,
+                    view_count=result.video_metadata.view_count,
+                    thumbnail=result.video_metadata.thumbnail,
+                )
+
+                # Update video resource with metadata
+                await self._update_video_resource(
+                    task.video_id,
+                    video_info,
+                    result.has_transcript,
+                )
+
+                # Process audio file
+                audio_file_id = existing_audio.id if existing_audio else None
+                reused_audio = existing_audio is not None
+
+                # 修复：audio_fallback 场景下也需要保存音频
+                if (need_audio or audio_fallback) and result.audio_path and result.audio_path.exists():
+                    audio_file = await self.file_service.create_file_record(
                         video_id=task.video_id,
-                        file_type=FileType.TRANSCRIPT,
-                        source_path=result.transcript_path,
-                        language=lang,
+                        file_type=FileType.AUDIO,
+                        source_path=result.audio_path,
+                        quality=str(self.settings.audio_quality),
                         video_title=video_info.title,
                     )
-                    transcript_file_id = transcript_file.id
-                    reused_transcript = False
-                    logger.info(
-                        f"Task {task.id}: Saved transcript (requested={need_transcript})"
+                    audio_file_id = audio_file.id
+                    reused_audio = False
+
+                # Process transcript file
+                # 优化：无论用户是否请求字幕，只要下载器返回了字幕就保存
+                transcript_file_id = existing_transcript.id if existing_transcript else None
+                reused_transcript = existing_transcript is not None
+
+                if result.transcript_path and result.transcript_path.exists():
+                    if existing_transcript is None:
+                        # 没有缓存，保存新字幕
+                        lang = self._extract_language(result.transcript_path)
+                        transcript_file = await self.file_service.create_file_record(
+                            video_id=task.video_id,
+                            file_type=FileType.TRANSCRIPT,
+                            source_path=result.transcript_path,
+                            language=lang,
+                            video_title=video_info.title,
+                        )
+                        transcript_file_id = transcript_file.id
+                        reused_transcript = False
+                        logger.info(
+                            f"Task {task.id}: Saved transcript (requested={need_transcript})"
+                        )
+
+                return {
+                    "audio_file_id": audio_file_id,
+                    "transcript_file_id": transcript_file_id,
+                    "reused_audio": reused_audio,
+                    "reused_transcript": reused_transcript,
+                    "audio_fallback": audio_fallback,  # 标记是否触发了音频降级
+                    "downloader": result.downloader,  # 下载器名称
+                }
+
+        except (DownloaderError, AllDownloadersFailed) as e:
+            # 即使下载失败，也尝试保存首次探测到的字幕可用性信息
+            # 这样下次请求同一视频时，可以直接利用缓存的探测结果，避免重复 API 调用
+            if first_result and first_result.video_metadata:
+                try:
+                    from src.db.models import VideoInfo as DbVideoInfo
+
+                    video_info = DbVideoInfo(
+                        title=first_result.video_metadata.title,
+                        author=first_result.video_metadata.author,
+                        channel_id=first_result.video_metadata.channel_id,
+                        duration=first_result.video_metadata.duration,
+                        description=first_result.video_metadata.description,
+                        upload_date=first_result.video_metadata.upload_date,
+                        view_count=first_result.video_metadata.view_count,
+                        thumbnail=first_result.video_metadata.thumbnail,
                     )
 
-            return {
-                "audio_file_id": audio_file_id,
-                "transcript_file_id": transcript_file_id,
-                "reused_audio": reused_audio,
-                "reused_transcript": reused_transcript,
-                "audio_fallback": audio_fallback,  # 标记是否触发了音频降级
-                "downloader": result.downloader,  # 下载器名称
-            }
+                    await self._update_video_resource(
+                        task.video_id,
+                        video_info,
+                        has_native_transcript=first_result.has_transcript,
+                    )
+
+                    logger.info(
+                        f"Task {task.id}: Saved transcript detection result "
+                        f"(has_transcript={first_result.has_transcript}) despite download failure"
+                    )
+                except Exception as save_error:
+                    # 保存探测结果失败不应影响原有错误处理流程
+                    logger.warning(
+                        f"Task {task.id}: Failed to save transcript detection result: {save_error}"
+                    )
+
+            # 重新抛出原始异常，让上层处理
+            raise
 
     async def _update_video_resource(
         self,
