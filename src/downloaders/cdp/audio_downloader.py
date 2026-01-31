@@ -85,7 +85,9 @@ class AudioDownloader:
 
         ydl_opts = {
             "cookiefile": str(cookie_file),
-            "format": "bestaudio",
+            # 排除 DASH 格式，优先选择直接可下载的音频文件
+            # 格式优先级：m4a > webm，排除需要清单文件的格式
+            "format": "bestaudio[protocol!^=http_dash_segments][protocol!=m3u8]/bestaudio",
             "quiet": True,
             "no_warnings": True,
             "skip_download": True,  # 关键：禁止下载
@@ -119,6 +121,34 @@ class AudioDownloader:
                     downloader=self.downloader_name,
                 )
 
+            # 验证 URL：确保不是清单文件（MPD/m3u8）
+            protocol = info.get("protocol", "")
+            format_id = info.get("format_id", "")
+            ext = info.get("ext", "")
+
+            logger.debug(
+                f"[{self.downloader_name}] Extracted format info: "
+                f"protocol={protocol}, format_id={format_id}, ext={ext}"
+            )
+
+            # 检查是否是清单文件协议
+            invalid_protocols = ["http_dash_segments", "m3u8", "m3u8_native"]
+            if any(proto in protocol for proto in invalid_protocols):
+                raise DownloaderError(
+                    message=f"yt-dlp returned manifest file (protocol={protocol}), not direct audio URL",
+                    error_code=ErrorCode.CDP_NO_AUDIO_URL,
+                    downloader=self.downloader_name,
+                )
+
+            # 检查 URL 是否包含清单文件特征
+            url_lower = audio_url.lower()
+            if ".mpd" in url_lower or ".m3u8" in url_lower or "manifest" in url_lower:
+                raise DownloaderError(
+                    message=f"yt-dlp returned manifest URL, not direct audio URL",
+                    error_code=ErrorCode.CDP_NO_AUDIO_URL,
+                    downloader=self.downloader_name,
+                )
+
             # 构造 AudioInfo
             audio_info = AudioInfo(
                 url=audio_url,
@@ -126,12 +156,12 @@ class AudioDownloader:
                 mime_type=info.get("ext", "m4a"),
                 title=info.get("title", f"youtube_{video_id}"),
                 filesize=info.get("filesize") or info.get("filesize_approx"),
-                ext=info.get("ext", "m4a"),
+                ext=ext or "m4a",
             )
 
             logger.info(
                 f"[{self.downloader_name}] Extracted audio URL: itag={audio_info.itag}, "
-                f"size={audio_info.filesize or 'unknown'}, ext={audio_info.ext}"
+                f"size={audio_info.filesize or 'unknown'}, ext={audio_info.ext}, protocol={protocol}"
             )
 
             return audio_info
