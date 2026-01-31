@@ -1,11 +1,16 @@
 """最简单的测试。"""
+
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# 获取项目根目录（从 tests/integration/ 向上两级）
+project_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(project_root))
 
 print("Test 1: Import Settings")
 try:
     from src.config import Settings
+
     print("[PASS] Settings imported")
 except Exception as e:
     print(f"[FAIL] {e}")
@@ -14,9 +19,7 @@ except Exception as e:
 print("\nTest 2: Create Settings")
 try:
     settings = Settings(
-        api_key='test-key',
-        cdp_enabled=True,
-        cdp_urls='http://127.0.0.1:9222'
+        api_key="test-key", cdp_enabled=True, cdp_urls="http://127.0.0.1:9222"
     )
     print("[PASS] Settings created")
     print(f"  CDP Enabled: {settings.cdp_enabled}")
@@ -42,9 +45,10 @@ except Exception as e:
 print("\nTest 4: Check POT Token was integrated")
 try:
     import inspect
+
     # 读取文件内容检查（CDP 下载器已模块化）
-    cdp_file = Path(__file__).parent.parent / "src" / "downloaders" / "cdp" / "downloader.py"
-    content = cdp_file.read_text(encoding='utf-8')
+    cdp_file = project_root / "src" / "downloaders" / "cdp" / "downloader.py"
+    content = cdp_file.read_text(encoding="utf-8")
 
     checks = [
         ("_get_pot_token", "_get_pot_token" in content),
@@ -86,12 +90,18 @@ except Exception as e:
 
 print("\nTest 6: Check notification methods")
 try:
-    notify_file = Path(__file__).parent.parent / "src" / "services" / "notify.py"
-    notify_content = notify_file.read_text(encoding='utf-8')
+    notify_file = project_root / "src" / "services" / "notify.py"
+    notify_content = notify_file.read_text(encoding="utf-8")
 
     checks = [
-        ("notify_cdp_connection_failed", "notify_cdp_connection_failed" in notify_content),
-        ("notify_cdp_circuit_breaker_open", "notify_cdp_circuit_breaker_open" in notify_content),
+        (
+            "notify_cdp_connection_failed",
+            "notify_cdp_connection_failed" in notify_content,
+        ),
+        (
+            "notify_cdp_circuit_breaker_open",
+            "notify_cdp_circuit_breaker_open" in notify_content,
+        ),
         ("notify_cdp_recovered", "notify_cdp_recovered" in notify_content),
     ]
 
@@ -109,9 +119,9 @@ except Exception as e:
     print(f"[FAIL] {e}")
     sys.exit(1)
 
-print("\n" + "="*60)
+print("\n" + "=" * 60)
 print("All tests passed!")
-print("="*60)
+print("=" * 60)
 print("\nSummary:")
 print("  [PASS] Settings and configs")
 print("  [PASS] POT Token integration")
