@@ -477,6 +477,18 @@ class CDPDownloader(BaseDownloader):
                         logger.debug(f"[cdp] Cleaned up cookie file: {cookie_file}")
 
         except Exception as e:
+            # 检查是否是浏览器连接已关闭的错误
+            error_msg = str(e).lower()
+            if "target" in error_msg and "closed" in error_msg:
+                # 浏览器连接已断开，清空引用以便下次重连
+                async with CDPDownloader._browser_lock:
+                    if CDPDownloader._browser is not None:
+                        logger.warning(
+                            f"[cdp] Browser connection lost (target closed), "
+                            "clearing browser reference for reconnection"
+                        )
+                        CDPDownloader._browser = None
+
             # 更新熔断器（失败）
             await self._update_circuit_breaker(success=False)
 
@@ -544,12 +556,29 @@ class CDPDownloader(BaseDownloader):
             DownloaderError: 所有实例都连接失败
         """
         async with CDPDownloader._browser_lock:
-            # 如果已有连接且健康，直接返回
+            # 如果已有连接，先验证连接是否真的活着
             if CDPDownloader._browser is not None:
-                # 返回第一个健康的 URL（简化版）
-                for url in self.settings.cdp_url_list:
-                    if self._cdp_health_status[url].is_healthy:
-                        return CDPDownloader._browser, url
+                try:
+                    # 检查浏览器是否真的连接着（而非仅检查引用存在）
+                    if CDPDownloader._browser.is_connected():
+                        # 返回第一个健康的 URL（简化版）
+                        for url in self.settings.cdp_url_list:
+                            if self._cdp_health_status[url].is_healthy:
+                                return CDPDownloader._browser, url
+                    else:
+                        # 连接已断开，清空引用
+                        logger.warning(
+                            "[cdp] Existing browser is not connected (disconnected), "
+                            "will reconnect"
+                        )
+                        CDPDownloader._browser = None
+                except Exception as e:
+                    # 检查连接状态时出错，可能浏览器已关闭
+                    logger.warning(
+                        f"[cdp] Failed to check browser connection status: {e}, "
+                        "will reconnect"
+                    )
+                    CDPDownloader._browser = None
 
             # 需要建立新连接
             cdp_urls = self.settings.cdp_url_list
