@@ -55,4 +55,6 @@ Get-Content .env | ForEach-Object {
 # Get port from environment or use default
 $port = if ($env:PORT) { $env:PORT } else { "8011" }
 
-uv run uvicorn src.main:app --reload --host 127.0.0.1 --port $port
+# Windows 下 uvicorn --reload 使用 SelectorEventLoop，不支持子进程
+# 这会导致 Playwright (CDP) 无法启动，因此 Windows 上不使用 --reload
+uv run uvicorn src.main:app --host 127.0.0.1 --port $port

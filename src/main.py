@@ -5,6 +5,7 @@ Initializes the application, services, and background workers.
 """
 
 import asyncio
+import sys
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -389,11 +390,15 @@ def main() -> None:
 
     settings = get_settings()
 
+    # Windows 下 reload 模式会使用 SelectorEventLoop，不支持子进程
+    # 这会导致 Playwright (CDP) 无法启动，因此在 Windows 上禁用 reload
+    use_reload = settings.debug and sys.platform != "win32"
+
     uvicorn.run(
         "src.main:app",
         host=settings.host,
         port=settings.port,
-        reload=settings.debug,
+        reload=use_reload,
         log_level="debug" if settings.debug else "info",
     )
 
