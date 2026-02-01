@@ -85,7 +85,7 @@ class FileInfoResponse(BaseModel):
 
     url: str = Field(..., description="Download URL")
     size: Optional[int] = Field(None, description="File size in bytes")
-    format: Optional[str] = Field(None, description="File format (m4a/json)")
+    format: Optional[str] = Field(None, description="File format (audio: m4a/webm, transcript: json)")
     bitrate: Optional[int] = Field(None, description="Audio bitrate (for audio files)")
     language: Optional[str] = Field(
         None, description="Language code (for transcript files)"

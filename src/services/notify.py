@@ -6,6 +6,7 @@ Handles sending notifications to WeCom (Enterprise WeChat) webhook.
 
 import socket
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 from zoneinfo import ZoneInfo
 
@@ -561,7 +562,8 @@ class NotificationService:
             if task.audio_file_id and self.db:
                 audio_file = await self.db.get_file(task.audio_file_id)
                 if audio_file:
-                    audio_ext = audio_file.format or "m4a"
+                    # Fallback to extension from filename if format field is empty
+                    audio_ext = audio_file.format or Path(audio_file.filename).suffix.lstrip(".") or "m4a"
                     audio_url = f"{base_url}/api/v1/files/{task.audio_file_id}.{audio_ext}"
 
             if task.transcript_file_id and self.db:

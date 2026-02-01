@@ -454,7 +454,7 @@ curl -r 0-1048576 -o audio_partial.m4a http://localhost:8000/api/v1/files/abc123
 ```
 
 **响应**：
-- Content-Type: audio/m4a 或 text/plain
+- Content-Type: audio/mp4（m4a）、audio/webm 或 application/json（字幕）
 - Content-Length: 文件大小
 - Content-Disposition: attachment; filename="..."
 

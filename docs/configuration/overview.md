@@ -94,6 +94,7 @@ cp .env.example .env
 | | `CDP_ENABLE_MULTIPART` | 启用分片下载 |
 | | `CDP_MULTIPART_MIN_SIZE` | 分片下载最小文件阈值 |
 | | `CDP_MULTIPART_CHUNKS` | 分片数量 |
+| | `CDP_TRANSCODE_TO_M4A` | 是否转码为 m4a 格式（默认关闭，保留原始格式） |
 | **下载器优先级** | `AUDIO_DOWNLOAD_PRIORITY` | 音频下载器优先级 |
 | | `DOWNLOADER_PRIORITY` | 下载器优先级 |
 | **熔断器** | `CIRCUIT_BREAKER_ENABLED` | 启用熔断器 |

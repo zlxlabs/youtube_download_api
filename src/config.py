@@ -193,6 +193,12 @@ class Settings(BaseSettings):
         description="CDP max connections (currently only 1 is supported)",
     )
 
+    # 转码配置
+    cdp_transcode_to_m4a: bool = Field(
+        default=False,
+        description="Transcode downloaded audio to m4a format (default: False, keep original format to save time)",
+    )
+
     # 分片下载配置
     cdp_enable_multipart: bool = Field(
         default=False,

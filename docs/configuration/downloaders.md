@@ -149,6 +149,7 @@ pip install playwright curl-cffi
 | `CDP_USE_CURL_CFFI` | `true` | 使用 curl_cffi TLS 指纹模拟（推荐） |
 | `CDP_ENABLE_POT_TOKEN` | `false` | 启用 poToken 支持（可选） |
 | `CDP_ENABLE_MULTIPART` | `false` | 启用分片多线程下载 |
+| `CDP_TRANSCODE_TO_M4A` | `false` | 转码为 m4a 格式（关闭时保留原始格式如 webm，节省转码时间） |
 
 #### 分片下载配置
 
@@ -253,6 +254,7 @@ CDP_FAILOVER_STRATEGY=sequential
 CDP_USE_CURL_CFFI=true
 CDP_ENABLE_POT_TOKEN=false
 CDP_ENABLE_MULTIPART=true
+CDP_TRANSCODE_TO_M4A=false  # 保留原始格式（webm），节省转码时间
 
 # 分片配置（推荐）
 CDP_MULTIPART_CHUNKS=6

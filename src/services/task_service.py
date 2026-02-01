@@ -8,6 +8,7 @@ returns them without creating a new download task.
 
 import asyncio
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 from uuid import uuid4
 
@@ -257,7 +258,8 @@ class TaskService:
         # Include audio if requested OR if it's a fallback for missing transcript
         if audio_file and (request.include_audio or audio_fallback):
             # Generate URL with extension for better compatibility
-            audio_ext = audio_file.format or "m4a"
+            # Fallback to extension from filename if format field is empty
+            audio_ext = audio_file.format or Path(audio_file.filename).suffix.lstrip(".") or "m4a"
             audio_info = FileInfoResponse(
                 url=f"/api/v1/files/{audio_file.id}.{audio_ext}",
                 size=audio_file.size,
@@ -529,7 +531,8 @@ class TaskService:
                 audio_info = None
                 if audio_file:
                     # Generate URL with extension for better compatibility
-                    audio_ext = audio_file.format or "m4a"
+                    # Fallback to extension from filename if format field is empty
+                    audio_ext = audio_file.format or Path(audio_file.filename).suffix.lstrip(".") or "m4a"
                     audio_info = FileInfoResponse(
                         url=f"/api/v1/files/{audio_file.id}.{audio_ext}",
                         size=audio_file.size,

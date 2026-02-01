@@ -819,16 +819,17 @@ class AudioDownloader:
         output_dir: Path,
     ) -> Path:
         """
-        如果文件不是 m4a 格式，转换为 m4a。
+        如果文件不是 m4a 格式且启用了转码，转换为 m4a。
 
-        遵循项目标准：所有音频文件统一输出为 M4A 格式（128kbps AAC）。
+        转码功能默认关闭，可通过 CDP_TRANSCODE_TO_M4A=true 启用。
+        关闭时保留原始格式（如 webm），节省转码时间。
 
         Args:
             file_path: 原始音频文件路径
             output_dir: 输出目录
 
         Returns:
-            Path: m4a 文件路径（可能是原文件或转换后的文件）
+            Path: 音频文件路径（原文件或转换后的 m4a 文件）
 
         Raises:
             DownloaderError: 转码失败
@@ -836,6 +837,13 @@ class AudioDownloader:
         # 检查文件格式
         if file_path.suffix.lower() == ".m4a":
             logger.debug(f"[{self.downloader_name}] File already in m4a format: {file_path}")
+            return file_path
+
+        # 检查是否启用转码
+        if not self.settings.cdp_transcode_to_m4a:
+            logger.info(
+                f"[{self.downloader_name}] Transcode disabled, keeping original format: {file_path.name}"
+            )
             return file_path
 
         logger.info(

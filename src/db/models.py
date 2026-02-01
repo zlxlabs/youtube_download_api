@@ -209,7 +209,7 @@ class FileRecord:
     filename: str  # Actual filename
     filepath: str  # Relative path from data_dir
     size: Optional[int] = None  # File size in bytes
-    format: Optional[str] = None  # m4a / srt
+    format: Optional[str] = None  # Audio: m4a/webm, Transcript: json
 
     # Extended attributes (for future multi-version support)
     quality: Optional[str] = None  # Audio: 128 / 320

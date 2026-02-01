@@ -272,7 +272,7 @@ class CallbackService:
                     audio=FileInfoResponse(
                         url=audio_url,
                         size=audio_file.size if audio_file else None,
-                        format="m4a",
+                        format=audio_file.format if audio_file else None,
                         bitrate=None,
                         language=None,
                     ),

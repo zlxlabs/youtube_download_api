@@ -26,7 +26,17 @@ class TranscodeService:
     """
 
     SUPPORTED_VIDEO_FORMATS = {".mp4", ".webm", ".mkv", ".avi", ".mov"}
-    SUPPORTED_AUDIO_FORMATS = {".m4a", ".mp3", ".aac", ".opus", ".wav", ".flac", ".ogg"}
+    SUPPORTED_AUDIO_FORMATS = {".m4a", ".mp3", ".aac", ".opus", ".wav", ".flac", ".ogg", ".webm"}
+
+    # 超时配置常量
+    TRANSCODE_BASE_TIMEOUT = 60  # 基础超时时间（秒）
+    TRANSCODE_TIMEOUT_PER_10MB = 30  # 每 10MB 增加的超时时间（秒）
+    TRANSCODE_MIN_TIMEOUT = 120  # 最小超时时间（秒）
+    TRANSCODE_MAX_TIMEOUT = 3600  # 最大超时时间（秒），1 小时
+    REMUX_BASE_TIMEOUT = 30  # remux 基础超时时间（秒）
+    REMUX_TIMEOUT_PER_10MB = 5  # remux 每 10MB 增加的超时时间（秒）
+    REMUX_MIN_TIMEOUT = 60  # remux 最小超时时间（秒）
+    REMUX_MAX_TIMEOUT = 600  # remux 最大超时时间（秒）
 
     def __init__(self) -> None:
         if not self._check_ffmpeg():
@@ -42,6 +52,38 @@ class TranscodeService:
             return result.returncode == 0
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return False
+
+    def _calculate_transcode_timeout(self, file_size_bytes: int) -> int:
+        """
+        根据文件大小计算转码超时时间。
+
+        Args:
+            file_size_bytes: 文件大小（字节）
+
+        Returns:
+            超时时间（秒）
+        """
+        file_size_mb = file_size_bytes / (1024 * 1024)
+        timeout = self.TRANSCODE_BASE_TIMEOUT + (file_size_mb / 10) * self.TRANSCODE_TIMEOUT_PER_10MB
+        timeout = max(self.TRANSCODE_MIN_TIMEOUT, min(int(timeout), self.TRANSCODE_MAX_TIMEOUT))
+        return timeout
+
+    def _calculate_remux_timeout(self, file_size_bytes: int) -> int:
+        """
+        根据文件大小计算 remux 超时时间。
+
+        Remux 不需要重新编码，速度更快，所以超时时间更短。
+
+        Args:
+            file_size_bytes: 文件大小（字节）
+
+        Returns:
+            超时时间（秒）
+        """
+        file_size_mb = file_size_bytes / (1024 * 1024)
+        timeout = self.REMUX_BASE_TIMEOUT + (file_size_mb / 10) * self.REMUX_TIMEOUT_PER_10MB
+        timeout = max(self.REMUX_MIN_TIMEOUT, min(int(timeout), self.REMUX_MAX_TIMEOUT))
+        return timeout
 
     def is_supported_format(self, file_path: Path) -> bool:
         suffix = file_path.suffix.lower()
@@ -153,6 +195,10 @@ class TranscodeService:
         if not input_file.exists():
             raise TranscodeError(f"Input file not found: {input_file}")
 
+        # 获取文件大小用于计算动态超时
+        file_size = input_file.stat().st_size
+        file_size_mb = file_size / (1024 * 1024)
+
         logger.info(f"Validating file: {input_file}")
         is_valid = await self.validate_file(input_file)
         if not is_valid:
@@ -166,7 +212,11 @@ class TranscodeService:
         # If AAC audio is already present, remux (copy) to m4a for speed.
         audio_codec = await self._get_audio_codec(input_file)
         if audio_codec == "aac":
-            logger.info("AAC detected, remuxing audio stream to m4a (no re-encode)")
+            remux_timeout = self._calculate_remux_timeout(file_size)
+            logger.info(
+                f"AAC detected, remuxing audio stream to m4a (no re-encode), "
+                f"file size: {file_size_mb:.2f}MB, timeout: {remux_timeout}s"
+            )
             cmd = [
                 "ffmpeg",
                 "-i", str(input_file),
@@ -178,7 +228,7 @@ class TranscodeService:
 
             returncode, _, stderr = await self._run_command(
                 cmd,
-                timeout=300,
+                timeout=remux_timeout,
                 log_fallback="Async subprocess not supported, falling back to sync ffmpeg",
             )
 
@@ -205,14 +255,16 @@ class TranscodeService:
             str(output_file),
         ]
 
+        transcode_timeout = self._calculate_transcode_timeout(file_size)
         logger.info(
-            f"Transcoding {input_file.suffix} to m4a (bitrate: {target_bitrate}kbps)"
+            f"Transcoding {input_file.suffix} to m4a (bitrate: {target_bitrate}kbps), "
+            f"file size: {file_size_mb:.2f}MB, timeout: {transcode_timeout}s"
         )
 
         try:
             returncode, stdout, stderr = await self._run_command(
                 cmd,
-                timeout=600,
+                timeout=transcode_timeout,
                 log_fallback="Async subprocess not supported, falling back to sync ffmpeg",
             )
 
