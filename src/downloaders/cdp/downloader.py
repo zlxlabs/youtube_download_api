@@ -49,7 +49,7 @@ try:
     NOTIFICATION_AVAILABLE = True
 except ImportError:
     NOTIFICATION_AVAILABLE = False
-    NotificationService = None
+    NotificationService = None  # type: ignore[assignment, misc]
 
 
 class CDPDownloader(BaseDownloader):
@@ -78,7 +78,7 @@ class CDPDownloader(BaseDownloader):
 
     # ========== 类级别共享状态 ==========
     _browser: Optional[Browser] = None
-    _browser_lock: asyncio.Lock = None  # 延迟初始化
+    _browser_lock: Optional[asyncio.Lock] = None  # 延迟初始化
     _last_health_check: float = 0
     _cdp_health_status: Dict[str, CDPInstanceHealth] = {}
 
@@ -280,17 +280,21 @@ class CDPDownloader(BaseDownloader):
         include_transcript: bool = True,
     ) -> DownloaderResult:
         """
-        下载资源（仅支持音频）。
+        下载资源（音频和/或字幕）。
 
-        CDP 下载器仅负责音频下载，不支持字幕。
-        如果 include_audio=False，直接返回不支持。
+        CDP 下载器支持三种模式：
+        1. 仅音频：下载音频文件
+        2. 仅字幕：下载字幕文件
+        3. 音频+字幕：在一次页面访问中同时处理
+
+        核心优化：一次 CDP 页面访问 + 一次 yt-dlp 调用获取所有信息。
 
         Args:
             video_url: YouTube 视频 URL
             video_id: YouTube 视频 ID
             output_dir: 输出目录（临时目录）
             include_audio: 是否下载音频
-            include_transcript: 是否获取字幕（CDP 不支持）
+            include_transcript: 是否获取字幕
 
         Returns:
             DownloaderResult
@@ -303,15 +307,6 @@ class CDPDownloader(BaseDownloader):
             f"audio={include_audio}, transcript={include_transcript}"
         )
 
-        # CDP 仅支持音频下载
-        if not include_audio:
-            logger.debug("[cdp] CDP does not support transcript-only mode")
-            raise DownloaderError(
-                message="CDP downloader only supports audio download",
-                error_code=ErrorCode.DOWNLOAD_FAILED,
-                downloader=self.name,
-            )
-
         # 生成任务 ID（用于临时文件命名）
         task_id = f"cdp_{video_id}_{int(time.time())}"
         background_task_started = False  # 标志后台任务是否启动
@@ -322,50 +317,18 @@ class CDPDownloader(BaseDownloader):
             logger.debug(f"[cdp] Connected to browser at {cdp_url}")
 
             # 2. 获取或创建 BrowserContext（优先复用已存在的 context）
-            # 注意：复用 context 避免 Chrome 不断打开新窗口
-            context_is_reused = False
-            context = None
-
-            # 尝试复用现有 Context（如果存在且有效）
-            if browser.contexts:
-                try:
-                    candidate_context = browser.contexts[0]
-                    # 有效性检查：尝试获取 pages（轻量级操作）
-                    _ = candidate_context.pages
-                    context = candidate_context
-                    context_is_reused = True
-                    logger.debug(f"[cdp] Reusing existing context")
-                except Exception as e:
-                    logger.warning(
-                        f"[cdp] Existing context invalid (connection lost): {e}, "
-                        "will create new context"
-                    )
-                    # 尝试关闭失效的 Context（可能失败）
-                    try:
-                        await candidate_context.close()
-                    except Exception:
-                        pass
-
-            # 如果没有可用的 Context，创建新的
-            if context is None:
-                context = await browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                    viewport={"width": 1920, "height": 1080},
-                )
-                logger.debug(f"[cdp] Created new context")
-
+            context = await self._get_or_create_context(browser)
             context.set_default_timeout(30000)
 
             try:
                 # 3. 清理旧 Page（仅在启用人类行为模拟时）
-                # 保留最后一个 Page，避免 Chrome 退出
                 kept_page = None
                 if self.settings.cdp_human_behavior_enabled and not self.settings.cdp_quick_mode:
                     kept_page = await self._behavior_simulator.cleanup_old_pages(
                         context, keep_last=True
                     )
 
-                # 4. 快速获取数据（创建新 Page，同时获取视频时长）
+                # 4. 快速获取数据（创建新 Page，获取 cookie + headers）
                 page, cookie_file, headers, video_duration = await self._behavior_simulator.quick_fetch_data(
                     context, video_url, video_id, task_id
                 )
@@ -373,7 +336,7 @@ class CDPDownloader(BaseDownloader):
                 # 4.5. 同步 Cookie 到共享位置（让 ytdlp 也能使用）
                 await self._sync_cookie_to_shared_location(cookie_file)
 
-                # 5. 关闭保留的旧 Page（此时新 Page 已创建，Chrome 不会退出）
+                # 5. 关闭保留的旧 Page
                 if kept_page and not kept_page.is_closed():
                     try:
                         await kept_page.close()
@@ -381,69 +344,76 @@ class CDPDownloader(BaseDownloader):
                     except Exception as e:
                         logger.debug(f"[cdp] Failed to close kept page: {e}")
 
-                # 6. 启动后台任务（异步，不阻塞）
-                if self.settings.cdp_human_behavior_enabled and not self.settings.cdp_quick_mode:
-                    task = asyncio.create_task(
-                        self._behavior_simulator.background_human_behavior(
-                            page, video_url, video_id, task_id, video_duration
-                        )
-                    )
-
-                    # 添加异常处理回调
-                    def handle_task_exception(t):
-                        # 检查任务是否被取消（正常关闭）
-                        if t.cancelled():
-                            logger.debug(
-                                f"[cdp] Background behavior task cancelled for {video_id} "
-                                "(normal shutdown)"
-                            )
-                            return
-
-                        # 处理其他异常
-                        try:
-                            t.result()
-                        except asyncio.CancelledError:
-                            # 任务被取消（通常是服务器关闭），静默处理
-                            logger.debug(
-                                f"[cdp] Background behavior task cancelled for {video_id}"
-                            )
-                        except Exception as e:
-                            # 真正的错误
-                            logger.error(
-                                f"[cdp] Background behavior task failed for {video_id}: {e}",
-                                exc_info=True
-                            )
-
-                    task.add_done_callback(handle_task_exception)
-                    background_task_started = True
-                else:
-                    # 快速模式：直接关闭页面
-                    await page.close()
+                # 6. 启动后台人类行为模拟（异步，不阻塞）
+                background_task_started = await self._start_background_behavior(
+                    page, video_url, video_id, task_id, video_duration
+                )
 
                 # 7. 获取 PO Token（如果启用）
-                pot_token = None
-                if self.settings.cdp_enable_pot_token:
-                    try:
-                        pot_token = await self._get_pot_token(video_id)
-                        if not pot_token:
-                            logger.warning(f"[cdp] Failed to get poToken for {video_id}, continuing without it")
-                    except Exception as e:
-                        logger.warning(f"[cdp] poToken acquisition error: {e}, continuing without it")
+                pot_token = await self._get_pot_token_safe(video_id)
 
-                # 8. 使用 AudioDownloader 提取音频 URL
-                audio_info = await self._audio_downloader.extract_audio_url(
-                    video_url, video_id, cookie_file, task_id, pot_token
+                # 8. 一次性提取视频信息（音频 URL + 字幕信息）
+                extracted_info = await self._audio_downloader.extract_video_info(
+                    video_url=video_url,
+                    video_id=video_id,
+                    cookie_file=cookie_file,
+                    task_id=task_id,
+                    pot_token=pot_token,
+                    include_audio=include_audio,
+                    include_transcript=include_transcript,
                 )
 
-                # 9. 使用 AudioDownloader 下载音频
-                audio_path = await self._audio_downloader.download_audio(
-                    audio_info, video_id, task_id, output_dir, headers
-                )
+                # 9. 下载音频（如果需要）
+                audio_path = None
+                if include_audio:
+                    if extracted_info.audio_info:
+                        audio_path = await self._audio_downloader.download_audio(
+                            audio_info=extracted_info.audio_info,
+                            video_id=video_id,
+                            task_id=task_id,
+                            output_dir=output_dir,
+                            headers=headers,
+                        )
+                        logger.info(
+                            f"[cdp] Audio downloaded: {audio_path.name} "
+                            f"({audio_path.stat().st_size} bytes)"
+                        )
+                    else:
+                        raise DownloaderError(
+                            message="Failed to extract audio URL",
+                            error_code=ErrorCode.CDP_NO_AUDIO_URL,
+                            downloader=self.name,
+                        )
 
-                # 10. 构造成功结果
+                # 10. 下载字幕（如果需要）
+                transcript_path = None
+                has_transcript = False
+                if include_transcript:
+                    if extracted_info.subtitles:
+                        # 选择最佳字幕（已按优先级排序）
+                        best_subtitle = extracted_info.subtitles[0]
+                        transcript_path = await self._audio_downloader.download_subtitle(
+                            video_url=video_url,
+                            video_id=video_id,
+                            cookie_file=cookie_file,
+                            output_dir=output_dir,
+                            subtitle_lang=best_subtitle.lang,
+                        )
+                        if transcript_path:
+                            has_transcript = True
+                            logger.info(
+                                f"[cdp] Subtitle downloaded: {transcript_path.name} "
+                                f"(lang={best_subtitle.lang}, auto={best_subtitle.is_auto})"
+                            )
+                        else:
+                            logger.warning(f"[cdp] Subtitle download failed for {video_id}")
+                    else:
+                        logger.info(f"[cdp] No subtitles available for {video_id}")
+
+                # 11. 构造成功结果
                 metadata = VideoMetadata(
                     video_id=video_id,
-                    title=audio_info.title,
+                    title=extracted_info.title,
                     source_downloader=self.name,
                 )
 
@@ -452,13 +422,17 @@ class CDPDownloader(BaseDownloader):
                     downloader=self.name,
                     video_metadata=metadata,
                     audio_path=audio_path,
-                    has_transcript=False,
+                    transcript_path=transcript_path,
+                    has_transcript=has_transcript,
                 )
 
-                logger.info(
-                    f"[cdp] Successfully downloaded {video_id}: "
-                    f"size={audio_path.stat().st_size} bytes"
-                )
+                # 记录成功日志
+                success_parts = []
+                if audio_path:
+                    success_parts.append(f"audio={audio_path.stat().st_size}B")
+                if transcript_path:
+                    success_parts.append(f"transcript={transcript_path.name}")
+                logger.info(f"[cdp] Successfully downloaded {video_id}: {', '.join(success_parts)}")
 
                 # 更新熔断器（成功）
                 await self._update_circuit_breaker(success=True)
@@ -467,8 +441,6 @@ class CDPDownloader(BaseDownloader):
 
             finally:
                 # 不关闭 Context（保持复用）
-                # 注意：Context 由后台任务或下一个任务管理
-
                 # 仅在后台任务未启动时清理 Cookie
                 if not background_task_started:
                     cookie_file = self.settings.data_dir / "tmp" / f"{task_id}.cookies.txt"
@@ -481,6 +453,7 @@ class CDPDownloader(BaseDownloader):
             error_msg = str(e).lower()
             if "target" in error_msg and "closed" in error_msg:
                 # 浏览器连接已断开，清空引用以便下次重连
+                assert CDPDownloader._browser_lock is not None
                 async with CDPDownloader._browser_lock:
                     if CDPDownloader._browser is not None:
                         logger.warning(
@@ -555,6 +528,7 @@ class CDPDownloader(BaseDownloader):
         Raises:
             DownloaderError: 所有实例都连接失败
         """
+        assert CDPDownloader._browser_lock is not None
         async with CDPDownloader._browser_lock:
             # 如果已有连接，先验证连接是否真的活着
             if CDPDownloader._browser is not None:
@@ -654,6 +628,111 @@ class CDPDownloader(BaseDownloader):
                 downloader=self.name,
             )
 
+    async def _get_or_create_context(self, browser: Browser) -> BrowserContext:
+        """
+        获取或创建 BrowserContext。
+
+        优先复用已存在的 context，避免 Chrome 不断打开新窗口。
+
+        Args:
+            browser: 浏览器实例
+
+        Returns:
+            BrowserContext 实例
+        """
+        # 尝试复用现有 Context
+        if browser.contexts:
+            try:
+                candidate_context = browser.contexts[0]
+                # 有效性检查
+                _ = candidate_context.pages
+                logger.debug("[cdp] Reusing existing context")
+                return candidate_context
+            except Exception as e:
+                logger.warning(
+                    f"[cdp] Existing context invalid: {e}, creating new context"
+                )
+                try:
+                    await candidate_context.close()
+                except Exception:
+                    pass
+
+        # 创建新 Context
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            viewport={"width": 1920, "height": 1080},
+        )
+        logger.debug("[cdp] Created new context")
+        return context
+
+    async def _start_background_behavior(
+        self,
+        page,
+        video_url: str,
+        video_id: str,
+        task_id: str,
+        video_duration: Optional[float],
+    ) -> bool:
+        """
+        启动后台人类行为模拟任务。
+
+        Args:
+            page: Playwright Page 实例
+            video_url: 视频 URL
+            video_id: 视频 ID
+            task_id: 任务 ID
+            video_duration: 视频时长
+
+        Returns:
+            bool: 是否启动了后台任务
+        """
+        if not self.settings.cdp_human_behavior_enabled or self.settings.cdp_quick_mode:
+            # 快速模式：直接关闭页面
+            await page.close()
+            return False
+
+        task = asyncio.create_task(
+            self._behavior_simulator.background_human_behavior(
+                page, video_url, video_id, task_id, video_duration
+            )
+        )
+
+        def handle_task_exception(t):
+            if t.cancelled():
+                logger.debug(f"[cdp] Background task cancelled for {video_id}")
+                return
+            try:
+                t.result()
+            except asyncio.CancelledError:
+                logger.debug(f"[cdp] Background task cancelled for {video_id}")
+            except Exception as e:
+                logger.error(f"[cdp] Background task failed for {video_id}: {e}")
+
+        task.add_done_callback(handle_task_exception)
+        return True
+
+    async def _get_pot_token_safe(self, video_id: str) -> Optional[str]:
+        """
+        安全获取 PO Token（失败不抛出异常）。
+
+        Args:
+            video_id: 视频 ID
+
+        Returns:
+            PO Token 或 None
+        """
+        if not self.settings.cdp_enable_pot_token:
+            return None
+
+        try:
+            pot_token = await self._get_pot_token(video_id)
+            if not pot_token:
+                logger.warning(f"[cdp] Failed to get poToken for {video_id}")
+            return pot_token
+        except Exception as e:
+            logger.warning(f"[cdp] poToken acquisition error: {e}")
+            return None
+
     # ========== Cookie 同步方法 ==========
 
     async def _sync_cookie_to_shared_location(self, cookie_file: Path) -> None:
@@ -746,7 +825,7 @@ class CDPDownloader(BaseDownloader):
 
                 if pot_token:
                     logger.debug(f"[cdp] Successfully got poToken for {video_id}")
-                    return pot_token
+                    return str(pot_token)
                 else:
                     logger.warning(f"[cdp] POT provider returned no token: {data}")
                     return None

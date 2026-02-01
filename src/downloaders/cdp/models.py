@@ -4,9 +4,9 @@ CDP 下载器专用数据模型。
 提供 CDP 下载器使用的数据结构定义。
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 
 @dataclass
@@ -19,6 +19,30 @@ class AudioInfo:
     title: str  # 视频标题
     filesize: Optional[int]  # 预估大小（字节）
     ext: str  # 扩展名（m4a/webm）
+
+
+@dataclass
+class SubtitleInfo:
+    """字幕信息。"""
+
+    lang: str  # 语言代码（如 zh-Hans, en）
+    url: str  # 字幕 URL
+    ext: str  # 格式（json3, vtt, srt）
+    is_auto: bool = False  # 是否为自动生成字幕
+
+
+@dataclass
+class ExtractedInfo:
+    """
+    yt-dlp 提取的完整信息。
+
+    包含音频信息和字幕信息，用于 CDP 下载器一次性获取所有需要的数据。
+    """
+
+    audio_info: Optional[AudioInfo]  # 音频信息（仅字幕模式时为 None）
+    subtitles: List[SubtitleInfo] = field(default_factory=list)  # 可用字幕列表
+    title: str = ""  # 视频标题
+    raw_info: Optional[Dict[str, Any]] = None  # 原始 yt-dlp info（用于调试）
 
 
 @dataclass

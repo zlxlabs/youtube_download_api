@@ -1,8 +1,8 @@
 """
-CDP 音频下载模块。
+CDP 资源下载模块。
 
-负责音频下载的所有逻辑：
-- yt-dlp 音频 URL 提取
+负责音频和字幕下载的所有逻辑：
+- yt-dlp 音频/字幕 URL 提取
 - curl_cffi 下载（单线程 + 分片）
 - yt-dlp 兜底下载
 - 文件命名和路径管理
@@ -10,7 +10,7 @@ CDP 音频下载模块。
 
 import asyncio
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
 
 try:
@@ -21,26 +21,35 @@ except ImportError:
 
 from src.config import Settings
 from src.db.models import ErrorCode
-from src.downloaders.cdp.models import AudioInfo
+from src.downloaders.cdp.models import AudioInfo, ExtractedInfo, SubtitleInfo
 from src.downloaders.exceptions import DownloaderError
 from src.services.transcode_service import TranscodeService, TranscodeError
 from src.utils.helpers import sanitize_filename
 from src.utils.logger import logger
 
 
+# 字幕语言优先级
+SUBTITLE_PRIORITY = ["zh-Hans", "zh-Hant", "zh", "en"]
+
+# 非字幕类型的"语言"（需要过滤）
+NON_TRANSCRIPT_LANGS = {"live_chat", "live_chat_replay"}
+
+
 class AudioDownloader:
     """
-    CDP 音频下载器。
+    CDP 资源下载器。
 
     实现三层降级下载策略：
     1. curl_cffi 分片下载（大文件，最快）
     2. curl_cffi 单线程下载（TLS 指纹模拟，最优）
     3. yt-dlp 直接下载（兜底）
+
+    同时支持字幕提取和下载。
     """
 
     def __init__(self, settings: Settings, downloader_name: str = "cdp"):
         """
-        初始化音频下载器。
+        初始化资源下载器。
 
         Args:
             settings: 应用配置
@@ -174,6 +183,317 @@ class AudioDownloader:
                 error_code=ErrorCode.CDP_YTDLP_FAILED,
                 downloader=self.downloader_name,
             )
+
+    async def extract_video_info(
+        self,
+        video_url: str,
+        video_id: str,
+        cookie_file: Path,
+        task_id: str,
+        pot_token: Optional[str] = None,
+        include_audio: bool = True,
+        include_transcript: bool = True,
+    ) -> ExtractedInfo:
+        """
+        使用 yt-dlp + cookies 提取视频完整信息（音频 + 字幕）。
+
+        一次 yt-dlp 调用同时获取音频 URL 和字幕信息，避免重复请求。
+
+        Args:
+            video_url: 视频 URL
+            video_id: 视频 ID
+            cookie_file: cookies 文件路径
+            task_id: 任务 ID
+            pot_token: 可选的 PO Token
+            include_audio: 是否提取音频信息
+            include_transcript: 是否提取字幕信息
+
+        Returns:
+            ExtractedInfo: 包含音频和字幕信息
+
+        Raises:
+            DownloaderError: 提取失败
+        """
+        if not YTDLP_AVAILABLE:
+            raise DownloaderError(
+                message="yt-dlp not available",
+                error_code=ErrorCode.CDP_YTDLP_FAILED,
+                downloader=self.downloader_name,
+            )
+
+        logger.debug(
+            f"[{self.downloader_name}] Extracting video info for {video_id}: "
+            f"audio={include_audio}, transcript={include_transcript}"
+        )
+
+        ydl_opts = {
+            "cookiefile": str(cookie_file),
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "simulate": False,
+            "extract_flat": False,
+            "no_color": True,
+        }
+
+        # 如果需要音频，设置格式选择
+        if include_audio:
+            ydl_opts["format"] = "bestaudio[protocol!^=http_dash_segments][protocol!=m3u8]/bestaudio"
+
+        # 可选：注入 poToken
+        if pot_token:
+            ydl_opts["extractor_args"] = {"youtube": {"po_token": [pot_token]}}
+            logger.info(f"[{self.downloader_name}] Using poToken for {video_id}")
+
+        try:
+            # 在线程池中执行（避免阻塞）
+            info = await asyncio.to_thread(self._ytdlp_extract_info, video_url, ydl_opts)
+
+            if not info:
+                raise DownloaderError(
+                    message="yt-dlp returned no info",
+                    error_code=ErrorCode.CDP_YTDLP_FAILED,
+                    downloader=self.downloader_name,
+                )
+
+            title = info.get("title", f"youtube_{video_id}")
+
+            # 提取音频信息
+            audio_info = None
+            if include_audio:
+                audio_url = info.get("url")
+                if audio_url:
+                    # 验证不是清单文件
+                    protocol = info.get("protocol", "")
+                    invalid_protocols = ["http_dash_segments", "m3u8", "m3u8_native"]
+                    url_lower = audio_url.lower()
+
+                    if not any(proto in protocol for proto in invalid_protocols) and \
+                       ".mpd" not in url_lower and ".m3u8" not in url_lower:
+                        ext = info.get("ext", "m4a")
+                        audio_info = AudioInfo(
+                            url=audio_url,
+                            itag=self._parse_itag(audio_url),
+                            mime_type=ext,
+                            title=title,
+                            filesize=info.get("filesize") or info.get("filesize_approx"),
+                            ext=ext,
+                        )
+                        logger.info(
+                            f"[{self.downloader_name}] Extracted audio: "
+                            f"itag={audio_info.itag}, ext={audio_info.ext}"
+                        )
+                    else:
+                        logger.warning(
+                            f"[{self.downloader_name}] Audio URL is manifest file, skipping"
+                        )
+
+            # 提取字幕信息
+            subtitles: List[SubtitleInfo] = []
+            if include_transcript:
+                subtitles = self._extract_subtitle_info(info)
+                logger.info(
+                    f"[{self.downloader_name}] Found {len(subtitles)} subtitle(s): "
+                    f"{[s.lang for s in subtitles[:5]]}"
+                    f"{'...' if len(subtitles) > 5 else ''}"
+                )
+
+            return ExtractedInfo(
+                audio_info=audio_info,
+                subtitles=subtitles,
+                title=title,
+                raw_info=info if self.settings.debug else None,
+            )
+
+        except Exception as e:
+            if isinstance(e, DownloaderError):
+                raise
+            raise DownloaderError(
+                message=f"yt-dlp extraction failed: {str(e)}",
+                error_code=ErrorCode.CDP_YTDLP_FAILED,
+                downloader=self.downloader_name,
+            )
+
+    def _extract_subtitle_info(self, info: Dict[str, Any]) -> List[SubtitleInfo]:
+        """
+        从 yt-dlp info 中提取字幕信息。
+
+        按优先级排序：中文 > 英文 > 其他，手动字幕 > 自动字幕。
+
+        Args:
+            info: yt-dlp 提取的视频信息
+
+        Returns:
+            按优先级排序的字幕列表
+        """
+        subtitles: List[SubtitleInfo] = []
+
+        # 提取手动字幕
+        if info.get("subtitles"):
+            for lang, formats in info["subtitles"].items():
+                if lang in NON_TRANSCRIPT_LANGS or lang.startswith("live_chat"):
+                    continue
+                url, ext = self._find_best_subtitle_url(formats)
+                if url:
+                    subtitles.append(SubtitleInfo(
+                        lang=lang,
+                        url=url,
+                        ext=ext,
+                        is_auto=False,
+                    ))
+
+        # 提取自动字幕
+        if info.get("automatic_captions"):
+            for lang, formats in info["automatic_captions"].items():
+                if lang in NON_TRANSCRIPT_LANGS or lang.startswith("live_chat"):
+                    continue
+                # 跳过已有手动字幕的语言
+                if any(s.lang == lang and not s.is_auto for s in subtitles):
+                    continue
+                url, ext = self._find_best_subtitle_url(formats)
+                if url:
+                    subtitles.append(SubtitleInfo(
+                        lang=lang,
+                        url=url,
+                        ext=ext,
+                        is_auto=True,
+                    ))
+
+        # 按优先级排序
+        def priority_key(s: SubtitleInfo) -> tuple:
+            try:
+                lang_priority = float(SUBTITLE_PRIORITY.index(s.lang))
+            except ValueError:
+                # 检查是否是优先语言的变体（如 zh-TW）
+                for i, prio_lang in enumerate(SUBTITLE_PRIORITY):
+                    if s.lang.startswith(prio_lang):
+                        lang_priority = i + 0.5
+                        break
+                else:
+                    lang_priority = float(len(SUBTITLE_PRIORITY))
+            # 手动字幕优先于自动字幕
+            auto_priority = 1 if s.is_auto else 0
+            return (lang_priority, auto_priority)
+
+        subtitles.sort(key=priority_key)
+        return subtitles
+
+    def _find_best_subtitle_url(
+        self, formats: List[Dict[str, Any]]
+    ) -> tuple[Optional[str], str]:
+        """
+        从字幕格式列表中选择最佳 URL。
+
+        优先 json3 格式（便于后续处理）。
+
+        Args:
+            formats: yt-dlp 字幕格式列表
+
+        Returns:
+            (url, ext) 元组
+        """
+        if not formats:
+            return None, ""
+
+        # 优先 json3 格式
+        for fmt in formats:
+            if fmt.get("ext") == "json3":
+                url = fmt.get("url")
+                if url:
+                    return str(url), "json3"
+
+        # 其次 vtt 格式
+        for fmt in formats:
+            if fmt.get("ext") == "vtt":
+                url = fmt.get("url")
+                if url:
+                    return str(url), "vtt"
+
+        # 最后尝试任何可用格式
+        for fmt in formats:
+            url = fmt.get("url")
+            if url:
+                return str(url), fmt.get("ext", "vtt")
+
+        return None, ""
+
+    async def download_subtitle(
+        self,
+        video_url: str,
+        video_id: str,
+        cookie_file: Path,
+        output_dir: Path,
+        subtitle_lang: Optional[str] = None,
+    ) -> Optional[Path]:
+        """
+        使用 yt-dlp 下载字幕。
+
+        Args:
+            video_url: 视频 URL
+            video_id: 视频 ID
+            cookie_file: cookies 文件路径
+            output_dir: 输出目录
+            subtitle_lang: 指定字幕语言（None 表示按优先级自动选择）
+
+        Returns:
+            字幕文件路径，失败返回 None
+        """
+        if not YTDLP_AVAILABLE:
+            logger.error(f"[{self.downloader_name}] yt-dlp not available for subtitle download")
+            return None
+
+        logger.info(f"[{self.downloader_name}] Downloading subtitle for {video_id}")
+
+        ydl_opts = {
+            "cookiefile": str(cookie_file),
+            "quiet": False,
+            "no_warnings": False,
+            "skip_download": True,  # 不下载视频/音频
+            "writesubtitles": True,
+            "writeautomaticsub": True,
+            "subtitlesformat": "json3/vtt/best",
+            "outtmpl": str(output_dir / "%(id)s.%(ext)s"),
+            "paths": {"home": str(output_dir)},
+            # 使用与主下载器相同的客户端策略
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["tv_embedded", "web_creator"],
+                }
+            },
+        }
+
+        # 设置字幕语言
+        if subtitle_lang:
+            ydl_opts["subtitleslangs"] = [subtitle_lang]
+        else:
+            ydl_opts["subtitleslangs"] = SUBTITLE_PRIORITY
+
+        try:
+            # 在线程池中执行
+            await asyncio.to_thread(self._ytdlp_download_subtitle, video_url, ydl_opts)
+
+            # 查找下载的字幕文件
+            for file in output_dir.iterdir():
+                if file.stem.startswith(video_id) and file.suffix in [
+                    ".vtt", ".srt", ".json3", ".ttml", ".json"
+                ]:
+                    logger.info(
+                        f"[{self.downloader_name}] Subtitle downloaded: "
+                        f"{file.name} ({file.stat().st_size} bytes)"
+                    )
+                    return file
+
+            logger.warning(f"[{self.downloader_name}] No subtitle file found after download")
+            return None
+
+        except Exception as e:
+            logger.error(f"[{self.downloader_name}] Subtitle download failed: {e}")
+            return None
+
+    def _ytdlp_download_subtitle(self, video_url: str, ydl_opts: dict) -> None:
+        """在同步上下文中执行 yt-dlp 字幕下载（用于线程池）。"""
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([video_url])
 
     async def download_audio(
         self,
@@ -340,7 +660,8 @@ class AudioDownloader:
     def _ytdlp_extract_info(self, video_url: str, ydl_opts: dict) -> dict:
         """在同步上下文中执行 yt-dlp 提取（用于线程池）。"""
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            return ydl.extract_info(video_url, download=False)
+            result = ydl.extract_info(video_url, download=False)
+            return result if result else {}
 
     def _calculate_dynamic_chunks(
         self,
