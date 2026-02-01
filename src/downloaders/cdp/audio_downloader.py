@@ -342,6 +342,53 @@ class AudioDownloader:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             return ydl.extract_info(video_url, download=False)
 
+    def _calculate_dynamic_chunks(
+        self,
+        total_size: int,
+        min_chunk_mb: float = 2.0,
+        max_chunk_mb: float = 8.0,
+    ) -> list[tuple[int, int, int]]:
+        """
+        动态计算分片，每个分片大小在指定范围内随机。
+
+        模拟浏览器播放器的动态缓冲行为，分片大小不规整，
+        降低被风控系统识别为下载工具的风险。
+
+        Args:
+            total_size: 文件总大小（字节）
+            min_chunk_mb: 最小分片大小（MB）
+            max_chunk_mb: 最大分片大小（MB）
+
+        Returns:
+            List[(chunk_idx, start_byte, end_byte)]
+        """
+        import random
+
+        min_chunk = int(min_chunk_mb * 1024 * 1024)
+        max_chunk = int(max_chunk_mb * 1024 * 1024)
+
+        ranges = []
+        current_pos = 0
+        chunk_idx = 0
+
+        while current_pos < total_size:
+            remaining = total_size - current_pos
+
+            if remaining <= max_chunk:
+                # 剩余不足一个最大分片，直接取完
+                ranges.append((chunk_idx, current_pos, total_size - 1))
+                break
+
+            # 随机分片大小
+            chunk_size = random.randint(min_chunk, max_chunk)
+            end = current_pos + chunk_size - 1
+
+            ranges.append((chunk_idx, current_pos, end))
+            current_pos = end + 1
+            chunk_idx += 1
+
+        return ranges
+
     async def _download_with_curl_cffi_multipart(
         self,
         url: str,
@@ -350,17 +397,14 @@ class AudioDownloader:
         headers: Dict[str, str],
     ) -> bool:
         """
-        curl_cffi 分片多线程下载（实验性功能）。
+        curl_cffi 分片并发下载（模拟浏览器播放器行为）。
 
-        将文件分割为多个块并发下载，然后合并。适合大文件下载，
-        但需注意 YouTube 对并发请求的限制。
-
-        策略：
-        - 并发数：6个分片（平衡速度和反爬风险）
-        - 每个分片独立 Range 请求
-        - 所有分片共享相同的 Headers + TLS 指纹
-        - 按顺序合并，避免文件破损
-        - 支持分片级别的断点续传
+        改进策略（降低风控风险）：
+        - 动态分片：每个分片 2-8MB 随机大小，模拟播放器缓冲
+        - 并发控制：信号量限制最多 6 个并发（浏览器连接数限制）
+        - 顺序启动：按分片顺序启动任务，模拟播放器预加载
+        - 随机延迟：每个任务启动前添加随机延迟
+        - 进度日志：实时显示下载进度
 
         Args:
             url: 下载 URL
@@ -371,6 +415,8 @@ class AudioDownloader:
         Returns:
             bool: 下载是否成功
         """
+        import random
+
         if not expected_size:
             logger.warning(f"[{self.downloader_name}] Cannot use multipart without expected_size")
             return False
@@ -381,132 +427,214 @@ class AudioDownloader:
             logger.warning(f"[{self.downloader_name}] curl_cffi not installed, skipping multipart")
             return False
 
-        num_chunks = self.settings.cdp_multipart_chunks
+        # 动态计算分片（2-8MB 随机）
+        ranges = self._calculate_dynamic_chunks(expected_size)
+        num_chunks = len(ranges)
+
+        # 并发控制配置
+        max_concurrent = self.settings.cdp_multipart_chunks  # 复用配置项作为最大并发数
+        max_retries = 3  # 单个分片最大重试次数
+
         logger.info(
-            f"[{self.downloader_name}] Starting multipart download: {num_chunks} chunks, "
-            f"size={expected_size / 1024 / 1024:.2f}MB"
+            f"[{self.downloader_name}] Starting multipart download: "
+            f"{num_chunks} chunks (2-8MB each), max_concurrent={max_concurrent}, "
+            f"total_size={expected_size / 1024 / 1024:.2f}MB"
         )
 
-        # 计算每个分片的 Range
-        chunk_size = expected_size // num_chunks
-        ranges = []
-        for i in range(num_chunks):
-            start = i * chunk_size
-            # 最后一个分片包含剩余所有字节
-            end = start + chunk_size - 1 if i < num_chunks - 1 else expected_size - 1
-            ranges.append((i, start, end))
+        # 分片文件路径映射
+        part_files = {
+            idx: target_path.with_suffix(f"{target_path.suffix}.part{idx}")
+            for idx, _, _ in ranges
+        }
 
-        # 分片文件路径
-        part_files = [
-            target_path.with_suffix(f"{target_path.suffix}.part{i}")
-            for i in range(num_chunks)
-        ]
+        # 进度追踪
+        completed_chunks = 0
+        downloaded_bytes = 0
+        progress_lock = asyncio.Lock()
 
-        # 下载单个分片
-        async def download_chunk(chunk_idx: int, start: int, end: int) -> None:
-            """下载单个分片（在线程池中执行）"""
-            part_file = part_files[chunk_idx]
-            chunk_headers = headers.copy()
-            chunk_headers["Range"] = f"bytes={start}-{end}"
+        # 信号量控制并发
+        semaphore = asyncio.Semaphore(max_concurrent)
 
-            # 检查是否已下载（断点续传）
-            if part_file.exists():
-                existing_size = part_file.stat().st_size
-                expected_chunk_size = end - start + 1
-                if existing_size >= expected_chunk_size:
-                    logger.debug(
-                        f"[{self.downloader_name}] Chunk {chunk_idx} already downloaded, skipping"
+        async def download_chunk_with_retry(chunk_idx: int, start: int, end: int) -> int:
+            """
+            下载单个分片（带重试机制）。
+
+            Args:
+                chunk_idx: 分片索引
+                start: 起始字节
+                end: 结束字节
+
+            Returns:
+                int: 下载的字节数
+
+            Raises:
+                DownloaderError: 重试耗尽后仍失败
+            """
+            nonlocal completed_chunks, downloaded_bytes
+
+            async with semaphore:
+                # 随机启动延迟（100-400ms），模拟播放器渐进式请求
+                delay = random.uniform(0.1, 0.4)
+                await asyncio.sleep(delay)
+
+                part_file = part_files[chunk_idx]
+                chunk_size = end - start + 1
+                chunk_headers = headers.copy()
+                chunk_headers["Range"] = f"bytes={start}-{end}"
+
+                # 检查是否已下载（断点续传）
+                if part_file.exists():
+                    existing_size = part_file.stat().st_size
+                    if existing_size >= chunk_size:
+                        logger.debug(
+                            f"[{self.downloader_name}] Chunk {chunk_idx} already exists, skipping"
+                        )
+                        async with progress_lock:
+                            completed_chunks += 1
+                            downloaded_bytes += existing_size
+                        return existing_size
+
+                def _sync_download() -> int:
+                    """同步下载逻辑（在线程池中执行）"""
+                    response = curl_requests.get(
+                        url,
+                        headers=chunk_headers,
+                        impersonate="chrome120",
+                        verify=False,
+                        timeout=(30, 120),
+                        allow_redirects=True,
+                        stream=True,
                     )
-                    return
 
-            def _sync_download():
-                """同步下载逻辑（在线程池中执行）"""
-                response = curl_requests.get(
-                    url,
-                    headers=chunk_headers,
-                    impersonate="chrome120",
-                    verify=False,
-                    timeout=(30, 120),
-                    allow_redirects=True,
-                    stream=True,
+                    try:
+                        if response.status_code == 403:
+                            raise DownloaderError(
+                                message=f"HTTP 403 for chunk {chunk_idx}",
+                                error_code=ErrorCode.CDP_DOWNLOAD_403,
+                                downloader=self.downloader_name,
+                                http_status_code=403,
+                                stop_fallback=True,
+                            )
+
+                        if response.status_code not in (200, 206):
+                            raise DownloaderError(
+                                message=f"HTTP {response.status_code} for chunk {chunk_idx}",
+                                error_code=ErrorCode.CDP_DOWNLOAD_FAILED,
+                                downloader=self.downloader_name,
+                                http_status_code=response.status_code,
+                            )
+
+                        # 流式写入分片文件
+                        bytes_written = 0
+                        with part_file.open("wb") as f:
+                            for chunk_data in response.iter_content(chunk_size=8192):
+                                if chunk_data:
+                                    f.write(chunk_data)
+                                    bytes_written += len(chunk_data)
+
+                        return bytes_written
+                    finally:
+                        response.close()
+
+                # 重试逻辑
+                last_error: Optional[Exception] = None
+                for attempt in range(max_retries):
+                    try:
+                        bytes_downloaded = await asyncio.to_thread(_sync_download)
+
+                        # 更新进度
+                        async with progress_lock:
+                            completed_chunks += 1
+                            downloaded_bytes += bytes_downloaded
+                            progress_pct = (downloaded_bytes / expected_size) * 100
+                            logger.info(
+                                f"[{self.downloader_name}] Progress: {completed_chunks}/{num_chunks} chunks, "
+                                f"{downloaded_bytes / 1024 / 1024:.2f}/{expected_size / 1024 / 1024:.2f}MB "
+                                f"({progress_pct:.1f}%)"
+                            )
+
+                        return bytes_downloaded
+
+                    except DownloaderError as e:
+                        # 403 错误不重试，直接抛出
+                        if e.error_code == ErrorCode.CDP_DOWNLOAD_403:
+                            raise
+                        last_error = e
+                    except Exception as e:
+                        last_error = e
+
+                    # 重试前清理可能的部分文件
+                    if part_file.exists():
+                        part_file.unlink()
+
+                    # 指数退避延迟（1s, 2s, 4s）
+                    if attempt < max_retries - 1:
+                        retry_delay = (2 ** attempt) * (1 + random.uniform(0, 0.5))
+                        logger.warning(
+                            f"[{self.downloader_name}] Chunk {chunk_idx} failed (attempt {attempt + 1}/{max_retries}), "
+                            f"retrying in {retry_delay:.1f}s: {last_error}"
+                        )
+                        await asyncio.sleep(retry_delay)
+
+                # 所有重试都失败
+                raise DownloaderError(
+                    message=f"Chunk {chunk_idx} failed after {max_retries} retries: {last_error}",
+                    error_code=ErrorCode.CDP_DOWNLOAD_FAILED,
+                    downloader=self.downloader_name,
                 )
 
-                try:
-                    if response.status_code == 403:
-                        raise DownloaderError(
-                            message=f"HTTP 403 for chunk {chunk_idx}",
-                            error_code=ErrorCode.CDP_DOWNLOAD_403,
-                            downloader=self.downloader_name,
-                            http_status_code=403,
-                            stop_fallback=True,
-                        )
-
-                    if response.status_code not in (200, 206):
-                        raise DownloaderError(
-                            message=f"HTTP {response.status_code} for chunk {chunk_idx}",
-                            error_code=ErrorCode.CDP_DOWNLOAD_FAILED,
-                            downloader=self.downloader_name,
-                            http_status_code=response.status_code,
-                        )
-
-                    # 流式写入分片文件
-                    with part_file.open("wb") as f:
-                        for chunk_data in response.iter_content(chunk_size=8192):
-                            if chunk_data:
-                                f.write(chunk_data)
-
-                    logger.debug(
-                        f"[{self.downloader_name}] Chunk {chunk_idx} downloaded: "
-                        f"{part_file.stat().st_size / 1024:.2f}KB"
-                    )
-                finally:
-                    response.close()
-
-            await asyncio.to_thread(_sync_download)
-
-        # 并发下载所有分片
+        # 按顺序创建任务（信号量控制实际并发）
         try:
-            tasks = [download_chunk(idx, start, end) for idx, start, end in ranges]
+            tasks = []
+            for idx, start, end in ranges:
+                # 微小间隔确保任务按顺序排队获取信号量
+                await asyncio.sleep(0.02)  # 20ms
+                task = asyncio.create_task(download_chunk_with_retry(idx, start, end))
+                tasks.append(task)
+
             await asyncio.gather(*tasks)
+
         except DownloaderError:
             # 清理分片文件
-            for pf in part_files:
+            for pf in part_files.values():
                 if pf.exists():
                     pf.unlink()
             raise
         except Exception as e:
             logger.error(f"[{self.downloader_name}] Multipart download failed: {e}")
             # 清理分片文件
-            for pf in part_files:
+            for pf in part_files.values():
                 if pf.exists():
                     pf.unlink()
             return False
 
         # 合并分片
-        logger.info(f"[{self.downloader_name}] Merging chunks...")
+        logger.info(f"[{self.downloader_name}] Merging {num_chunks} chunks...")
         try:
             with target_path.open("wb") as outfile:
-                for i, part_file in enumerate(part_files):
+                for idx, _, _ in ranges:
+                    part_file = part_files[idx]
                     if not part_file.exists():
-                        raise Exception(f"Chunk {i} file not found: {part_file}")
+                        raise Exception(f"Chunk {idx} file not found: {part_file}")
 
                     with part_file.open("rb") as infile:
                         outfile.write(infile.read())
 
                     # 删除分片文件
                     part_file.unlink()
-                    logger.debug(f"[{self.downloader_name}] Merged and deleted chunk {i}")
 
             # 校验文件大小
             final_size = target_path.stat().st_size
             if final_size < expected_size * 0.95:
                 logger.warning(
-                    f"[{self.downloader_name}] Multipart size mismatch: got {final_size}, expected {expected_size}"
+                    f"[{self.downloader_name}] Multipart size mismatch: "
+                    f"got {final_size}, expected {expected_size}"
                 )
                 return False
 
             logger.info(
-                f"[{self.downloader_name}] Multipart download completed: {final_size / 1024 / 1024:.2f}MB"
+                f"[{self.downloader_name}] Multipart download completed: "
+                f"{final_size / 1024 / 1024:.2f}MB, {num_chunks} chunks merged"
             )
             return True
 
@@ -515,7 +643,7 @@ class AudioDownloader:
             # 清理残留文件
             if target_path.exists():
                 target_path.unlink()
-            for pf in part_files:
+            for pf in part_files.values():
                 if pf.exists():
                     pf.unlink()
             return False
