@@ -9,6 +9,7 @@ CDP 资源下载模块。
 """
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
@@ -33,6 +34,114 @@ SUBTITLE_PRIORITY = ["zh-Hans", "zh-Hant", "zh", "en"]
 
 # 非字幕类型的"语言"（需要过滤）
 NON_TRANSCRIPT_LANGS = {"live_chat", "live_chat_replay"}
+
+
+def _ms_to_srt_time(ms: int) -> str:
+    """
+    将毫秒转换为 SRT 时间格式。
+
+    Args:
+        ms: 毫秒数
+
+    Returns:
+        SRT 时间格式字符串 (HH:MM:SS,mmm)
+    """
+    hours = ms // 3600000
+    minutes = (ms % 3600000) // 60000
+    seconds = (ms % 60000) // 1000
+    milliseconds = ms % 1000
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d},{milliseconds:03d}"
+
+
+def convert_json3_to_srt(json3_path: Path) -> Optional[Path]:
+    """
+    将 YouTube json3 格式字幕转换为 SRT 格式。
+
+    json3 格式结构：
+    {
+        "events": [
+            {
+                "tStartMs": 0,        # 开始时间（毫秒）
+                "dDurationMs": 5000,  # 持续时间（毫秒）
+                "segs": [{"utf8": "文本"}]  # 文本片段
+            },
+            ...
+        ]
+    }
+
+    Args:
+        json3_path: json3 文件路径
+
+    Returns:
+        SRT 文件路径，转换失败返回 None
+    """
+    try:
+        with open(json3_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        events = data.get("events", [])
+        if not events:
+            logger.warning(f"[subtitle] No events found in {json3_path}")
+            return None
+
+        srt_lines = []
+        index = 1
+
+        for event in events:
+            # 跳过没有文本的事件（如样式定义）
+            segs = event.get("segs", [])
+            if not segs:
+                continue
+
+            # 提取文本
+            text = "".join(seg.get("utf8", "") for seg in segs).strip()
+            if not text:
+                continue
+
+            # 跳过换行符
+            if text == "\n":
+                continue
+
+            # 获取时间
+            start_ms = event.get("tStartMs", 0)
+            duration_ms = event.get("dDurationMs", 0)
+            end_ms = start_ms + duration_ms
+
+            # 生成 SRT 条目
+            start_time = _ms_to_srt_time(start_ms)
+            end_time = _ms_to_srt_time(end_ms)
+
+            srt_lines.append(str(index))
+            srt_lines.append(f"{start_time} --> {end_time}")
+            srt_lines.append(text)
+            srt_lines.append("")  # 空行分隔
+
+            index += 1
+
+        if not srt_lines:
+            logger.warning(f"[subtitle] No valid subtitles found in {json3_path}")
+            return None
+
+        # 写入 SRT 文件
+        srt_path = json3_path.with_suffix(".srt")
+        with open(srt_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(srt_lines))
+
+        # 删除原 json3 文件
+        json3_path.unlink()
+
+        logger.info(
+            f"[subtitle] Converted {json3_path.name} -> {srt_path.name} "
+            f"({index - 1} entries)"
+        )
+        return srt_path
+
+    except json.JSONDecodeError as e:
+        logger.error(f"[subtitle] Failed to parse json3: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"[subtitle] Failed to convert json3 to srt: {e}")
+        return None
 
 
 class AudioDownloader:
@@ -291,9 +400,12 @@ class AudioDownloader:
             # 提取字幕信息
             subtitles: List[SubtitleInfo] = []
             if include_transcript:
-                subtitles = self._extract_subtitle_info(info)
+                # 获取视频原始语言（用于优先选择原始语言字幕）
+                original_language = info.get("language")
+                subtitles = self._extract_subtitle_info(info, original_language)
                 logger.info(
-                    f"[{self.downloader_name}] Found {len(subtitles)} subtitle(s): "
+                    f"[{self.downloader_name}] Found {len(subtitles)} subtitle(s) "
+                    f"(video_lang={original_language}): "
                     f"{[s.lang for s in subtitles[:5]]}"
                     f"{'...' if len(subtitles) > 5 else ''}"
                 )
@@ -314,14 +426,24 @@ class AudioDownloader:
                 downloader=self.downloader_name,
             )
 
-    def _extract_subtitle_info(self, info: Dict[str, Any]) -> List[SubtitleInfo]:
+    def _extract_subtitle_info(
+        self,
+        info: Dict[str, Any],
+        original_language: Optional[str] = None,
+    ) -> List[SubtitleInfo]:
         """
         从 yt-dlp info 中提取字幕信息。
 
-        按优先级排序：中文 > 英文 > 其他，手动字幕 > 自动字幕。
+        优先级排序策略（从高到低）：
+        1. 带 -orig 后缀的字幕（视频原始语言）
+        2. 与视频 language 字段匹配的字幕
+        3. 用户偏好语言（zh-Hans > zh-Hant > zh > en）
+        4. 其他语言
+        5. 同语言下：手动字幕 > 自动字幕
 
         Args:
             info: yt-dlp 提取的视频信息
+            original_language: 视频原始语言（如 "en-US", "zh-CN"）
 
         Returns:
             按优先级排序的字幕列表
@@ -359,23 +481,61 @@ class AudioDownloader:
                         is_auto=True,
                     ))
 
+        # 提取原始语言的基础部分（如 "en-US" -> "en"）
+        orig_lang_base = None
+        if original_language:
+            orig_lang_base = original_language.split("-")[0].lower()
+
         # 按优先级排序
         def priority_key(s: SubtitleInfo) -> tuple:
+            # 获取字幕语言的基础部分
+            is_orig_suffix = s.lang.endswith("-orig")
+            lang_base = s.lang.replace("-orig", "").split("-")[0].lower()
+
+            # 检查是否匹配视频原始语言
+            matches_original = 0
+            if orig_lang_base and lang_base == orig_lang_base:
+                matches_original = 1
+
+            # 优先级 1：匹配视频原始语言 + 带 -orig 后缀（最高优先级）
+            # 优先级 2：匹配视频原始语言（不带 -orig）
+            # 这两个通过 matches_original 和 is_orig_suffix 组合实现
+            orig_priority = 0
+            if matches_original:
+                orig_priority = 2 if is_orig_suffix else 1
+
+            # 优先级 3：用户偏好语言
+            lang_without_orig = s.lang.replace("-orig", "")
             try:
-                lang_priority = float(SUBTITLE_PRIORITY.index(s.lang))
+                lang_priority = float(SUBTITLE_PRIORITY.index(lang_without_orig))
             except ValueError:
                 # 检查是否是优先语言的变体（如 zh-TW）
                 for i, prio_lang in enumerate(SUBTITLE_PRIORITY):
-                    if s.lang.startswith(prio_lang):
+                    if lang_without_orig.startswith(prio_lang):
                         lang_priority = i + 0.5
                         break
                 else:
                     lang_priority = float(len(SUBTITLE_PRIORITY))
-            # 手动字幕优先于自动字幕
+
+            # 优先级 4：手动字幕优先于自动字幕
             auto_priority = 1 if s.is_auto else 0
-            return (lang_priority, auto_priority)
+
+            # 返回排序键：值越小优先级越高
+            # (-orig_priority, lang_priority, auto_priority)
+            return (-orig_priority, lang_priority, auto_priority)
 
         subtitles.sort(key=priority_key)
+
+        # 记录排序结果（调试用）
+        if subtitles:
+            top = subtitles[0]
+            logger.debug(
+                f"[{self.downloader_name}] Top subtitle: {top.lang} "
+                f"(is_orig={top.lang.endswith('-orig')}, "
+                f"matches_video_lang={orig_lang_base and top.lang.startswith(orig_lang_base or '')}, "
+                f"is_auto={top.is_auto})"
+            )
+
         return subtitles
 
     def _find_best_subtitle_url(
@@ -451,7 +611,7 @@ class AudioDownloader:
             "skip_download": True,  # 不下载视频/音频
             "writesubtitles": True,
             "writeautomaticsub": True,
-            "subtitlesformat": "json3/vtt/best",
+            "subtitlesformat": "json3/vtt/best",  # 优先 json3（后续转换为 SRT）
             "outtmpl": str(output_dir / "%(id)s.%(ext)s"),
             "paths": {"home": str(output_dir)},
             # 使用与主下载器相同的客户端策略
@@ -472,16 +632,35 @@ class AudioDownloader:
             # 在线程池中执行
             await asyncio.to_thread(self._ytdlp_download_subtitle, video_url, ydl_opts)
 
-            # 查找下载的字幕文件
+            # 查找下载的字幕文件（优先 SRT 格式）
             for file in output_dir.iterdir():
                 if file.stem.startswith(video_id) and file.suffix in [
-                    ".vtt", ".srt", ".json3", ".ttml", ".json"
+                    ".srt", ".vtt", ".json3", ".ttml", ".json"
                 ]:
-                    logger.info(
-                        f"[{self.downloader_name}] Subtitle downloaded: "
-                        f"{file.name} ({file.stat().st_size} bytes)"
-                    )
-                    return file
+                    # 如果是 json3 格式，转换为 SRT
+                    if file.suffix == ".json3":
+                        logger.info(
+                            f"[{self.downloader_name}] Converting json3 to srt: {file.name}"
+                        )
+                        srt_file = convert_json3_to_srt(file)
+                        if srt_file:
+                            logger.info(
+                                f"[{self.downloader_name}] Subtitle converted: "
+                                f"{srt_file.name} ({srt_file.stat().st_size} bytes)"
+                            )
+                            return srt_file
+                        else:
+                            logger.warning(
+                                f"[{self.downloader_name}] Failed to convert json3, "
+                                "returning original file"
+                            )
+                            return file
+                    else:
+                        logger.info(
+                            f"[{self.downloader_name}] Subtitle downloaded: "
+                            f"{file.name} ({file.stat().st_size} bytes)"
+                        )
+                        return file
 
             logger.warning(f"[{self.downloader_name}] No subtitle file found after download")
             return None
