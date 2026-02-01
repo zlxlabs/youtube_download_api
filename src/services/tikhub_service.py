@@ -201,6 +201,8 @@ class TikHubService:
 
             api_url = f"{TIKHUB_SUBTITLE_API}?{urlencode(params)}"
 
+            # 详细日志：输出完整的 subtitle_url 以便调试
+            logger.info(f"TikHub API request - subtitle_url: {subtitle_url[:300]}...")
             logger.debug(f"Fetching subtitle from TikHub API: {api_url[:100]}...")
 
             # Make API request
