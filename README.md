@@ -6,10 +6,10 @@ Docker 部署的 YouTube 音频下载服务，提供 RESTful API 接口，支持
 
 - **RESTful API** - 完整的任务管理接口，X-API-Key 鉴权
 - **音频下载** - M4A/WebM 格式，128kbps 高质量音频（可配置是否转码）
-- **字幕提取** - JSON 格式，优先中英文字幕
+- **字幕提取** - JSON 格式，优先中文字幕（zh-Hans > zh-Hant > zh > en）
 - **灵活下载模式** - 支持仅音频/仅字幕/完整模式
 - **智能资源复用** - 文件级缓存，同视频资源跨任务共享
-- **多下载器降级** - yt-dlp + TikHub API 双重保障，自动降级切换
+- **多下载器降级** - CDP + yt-dlp + TikHub API 三重保障，自动降级切换
 - **熔断器保护** - 智能熔断机制，避免持续性故障影响服务
 - **IP 熔断机制** - 被动探测型分级 IP 熔断，智能应对 YouTube 风控
 - **风控绕过** - TLS 指纹模拟 + PO Token 机制
@@ -164,9 +164,11 @@ youtube-audio-api/
 
 | 下载器 | 说明 | 优点 | 成本 |
 |--------|------|------|------|
-| **CDP** | Chrome DevTools Protocol | 真实浏览器指纹、降低 403 风险 | 免费 |
+| **CDP** | Chrome DevTools Protocol | 真实浏览器指纹、支持音频+字幕、降低 403 风险 | 免费 |
 | **yt-dlp** | 本地 yt-dlp 库 | 免费、功能强大 | 免费 |
 | **TikHub** | TikHub API 服务 | 稳定、不受限流影响 | 0.002$/次 |
+
+**默认优先级**：CDP > yt-dlp > TikHub（音频和字幕下载均以 CDP 为最高优先级）
 
 **详细配置**：[下载器配置](docs/configuration/downloaders.md)
 
