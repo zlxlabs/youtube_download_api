@@ -662,7 +662,7 @@ class YouTubeDownloader:
 
             return TranscriptOnlyResult(
                 video_info=info_result.video_info,
-                has_transcript=True,
+                has_transcript=bool(transcript_path),
                 transcript_path=transcript_path,
             )
 

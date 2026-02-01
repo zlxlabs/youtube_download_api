@@ -27,6 +27,10 @@ SUBTITLE_PRIORITY = [
     "en",       # English
 ]
 
+# Maximum consecutive failures before giving up on subtitle fetching
+# This prevents trying all 150+ languages when TikHub API has a global issue
+MAX_CONSECUTIVE_FAILURES = 3
+
 # Non-transcript subtitle "languages" exposed by yt-dlp
 NON_TRANSCRIPT_LANGS = {
     "live_chat",
@@ -288,6 +292,7 @@ class TikHubService:
         )
 
         # Try each subtitle in priority order
+        consecutive_failures = 0
         for subtitle_info in subtitle_infos:
             output_path = output_dir / f"{video_id}.{subtitle_info.lang}.srt"
 
@@ -303,6 +308,15 @@ class TikHubService:
 
             if success:
                 return output_path
+
+            # Track consecutive failures to detect global API issues
+            consecutive_failures += 1
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                logger.warning(
+                    f"TikHub API failed {consecutive_failures} times consecutively, "
+                    f"stopping further attempts for video {video_id}"
+                )
+                break
 
             # Small delay between attempts
             await asyncio.sleep(0.5)
