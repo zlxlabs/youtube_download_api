@@ -348,6 +348,9 @@ class AudioDownloader:
         # 如果需要音频，设置格式选择
         if include_audio:
             ydl_opts["format"] = "bestaudio[protocol!^=http_dash_segments][protocol!=m3u8]/bestaudio"
+        else:
+            # 仅字幕模式：忽略格式错误（n challenge 失败不影响字幕获取）
+            ydl_opts["ignore_no_formats_error"] = True
 
         # 可选：注入 poToken
         if pot_token:
@@ -614,12 +617,8 @@ class AudioDownloader:
             "subtitlesformat": "json3/vtt/best",  # 优先 json3（后续转换为 SRT）
             "outtmpl": str(output_dir / "%(id)s.%(ext)s"),
             "paths": {"home": str(output_dir)},
-            # 使用与主下载器相同的客户端策略
-            "extractor_args": {
-                "youtube": {
-                    "player_client": ["tv_embedded", "web_creator"],
-                }
-            },
+            # 字幕下载不需要音视频格式，忽略格式错误
+            "ignore_no_formats_error": True,
         }
 
         # 设置字幕语言
