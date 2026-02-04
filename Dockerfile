@@ -97,12 +97,12 @@ RUN BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
 RUN mkdir -p /app/data/files/audio /app/data/files/transcript /app/data/logs
 
 # Remove unnecessary files to reduce size
+# NOTE: Keep pip for YTDLP_AUTO_UPDATE feature (yt-dlp uses pip for self-update)
 RUN find /usr/local/lib/python3.11/site-packages -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true && \
     find /usr/local/lib/python3.11/site-packages -type d -name "tests" -exec rm -rf {} + 2>/dev/null || true && \
     find /usr/local/lib/python3.11/site-packages -type d -name "test" -exec rm -rf {} + 2>/dev/null || true && \
     find /usr/local/lib/python3.11/site-packages -type f -name "*.pyc" -delete 2>/dev/null || true && \
     find /usr/local/lib/python3.11/site-packages -type f -name "*.pyo" -delete 2>/dev/null || true && \
-    rm -rf /usr/local/lib/python3.11/site-packages/pip* && \
     rm -rf /usr/local/lib/python3.11/site-packages/setuptools* && \
     # 移除 Python 包中的文档和示例
     find /usr/local/lib/python3.11/site-packages -type d -name "docs" -exec rm -rf {} + 2>/dev/null || true && \
@@ -126,5 +126,15 @@ EXPOSE ${PORT}
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:${PORT}/health || exit 1
 
-# Run the application (shell form to expand PORT env var)
-CMD ["sh", "-c", "python -m uvicorn src.main:app --host 0.0.0.0 --port ${PORT}"]
+# Run the application with optional yt-dlp auto-update
+# YTDLP_AUTO_UPDATE: update yt-dlp on startup (default: true)
+# Set to "false" to disable auto-update
+# This helps handle YouTube's frequent player.js changes
+# Uses yt-dlp's built-in -U flag which calls pip internally
+CMD ["sh", "-c", "\
+    if [ \"${YTDLP_AUTO_UPDATE:-true}\" = \"true\" ]; then \
+        echo '[startup] Checking yt-dlp updates...' && \
+        python -m yt_dlp -U && \
+        echo \"[startup] yt-dlp version: $(python -c 'import yt_dlp; print(yt_dlp.version.__version__)')\"; \
+    fi && \
+    python -m uvicorn src.main:app --host 0.0.0.0 --port ${PORT}"]
