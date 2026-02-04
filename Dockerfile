@@ -1,20 +1,4 @@
-# Stage 1: Download ffmpeg static binary
-FROM alpine:3.19 AS ffmpeg-downloader
-
-RUN apk add --no-cache curl tar xz
-
-# Download ffmpeg LGPL static build from BtbN (smaller than GPL version)
-# https://github.com/BtbN/FFmpeg-Builds
-# LGPL version is sufficient for audio transcoding (m4a/AAC)
-# GPL version (~386MB) vs LGPL version (~140MB)
-RUN curl -L --retry 3 --retry-delay 5 --retry-connrefused \
-    "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-lgpl.tar.xz" \
-    -o /tmp/ffmpeg.tar.xz && \
-    mkdir -p /tmp/ffmpeg && \
-    tar -xf /tmp/ffmpeg.tar.xz -C /tmp/ffmpeg --strip-components=1 && \
-    cp /tmp/ffmpeg/bin/ffmpeg /tmp/ffmpeg/bin/ffprobe /usr/local/bin/
-
-# Stage 2: Build Python dependencies with uv
+# Stage 1: Build Python dependencies with uv
 FROM python:3.11-slim AS builder
 
 WORKDIR /app
@@ -39,7 +23,7 @@ COPY pyproject.toml uv.lock README.md ./
 RUN uv export --no-dev --no-hashes -o requirements.txt && \
     uv pip install --system --no-cache --target=/app/deps -r requirements.txt
 
-# Stage 3: Final runtime image
+# Stage 2: Final runtime image
 FROM python:3.11-slim
 
 WORKDIR /app
@@ -51,6 +35,7 @@ WORKDIR /app
 # - unzip: deno installation
 # - libssl3: OpenSSL library for curl_cffi
 # - libcurl4: curl library for curl_cffi
+# - ffmpeg: audio transcoding (m4a/AAC)
 # JavaScript runtimes:
 # - Deno: for yt-dlp n challenge solving (nsig decryption)
 # - Node.js: additional JS runtime support
@@ -60,6 +45,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     unzip \
     libssl3 \
     libcurl4 \
+    ffmpeg \
     # Install Deno
     && curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh \
     && deno --version \
@@ -76,10 +62,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && rm -rf /tmp/* \
     && rm -rf /root/.cache
-
-# Copy ffmpeg binaries from downloader stage
-COPY --from=ffmpeg-downloader /usr/local/bin/ffmpeg /usr/local/bin/
-COPY --from=ffmpeg-downloader /usr/local/bin/ffprobe /usr/local/bin/
 
 # Copy Python dependencies from builder stage
 COPY --from=builder /app/deps /usr/local/lib/python3.11/site-packages/
