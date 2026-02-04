@@ -497,6 +497,16 @@ class DownloaderManager:
                 if circuit_breaker and downloader.should_trigger_circuit_breaker(e):
                     logger.debug(f"Error will count towards circuit breaker for {downloader.name}")
                     # 熔断器已经通过 call_async 记录了失败
+
+                    # 检查是否是全局性错误（如 nsig 失败），需要立即熔断
+                    from src.db.models import ErrorCode
+                    if e.error_code == ErrorCode.CDP_NSIG_FAILED:
+                        circuit_breaker.force_open(
+                            reason=f"nsig/n challenge failed - yt-dlp update required"
+                        )
+                        logger.warning(
+                            f"[{downloader.name}] Force opened circuit breaker due to nsig error"
+                        )
                 else:
                     logger.debug(f"Error will not trigger circuit breaker for {downloader.name}")
 

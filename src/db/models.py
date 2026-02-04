@@ -52,6 +52,7 @@ class ErrorCode(str, Enum):
     CDP_NO_COOKIES = "CDP_NO_COOKIES"  # No valid cookies
     CDP_NO_AUDIO_URL = "CDP_NO_AUDIO_URL"  # No audio URL from yt-dlp
     CDP_YTDLP_FAILED = "CDP_YTDLP_FAILED"  # yt-dlp parsing failed
+    CDP_NSIG_FAILED = "CDP_NSIG_FAILED"  # nsig/n challenge failed (global yt-dlp issue)
     CDP_DOWNLOAD_FAILED = "CDP_DOWNLOAD_FAILED"  # Download failed (general)
     CDP_DOWNLOAD_403 = "CDP_DOWNLOAD_403"  # HTTP 403 error
     CDP_DOWNLOAD_TIMEOUT = "CDP_DOWNLOAD_TIMEOUT"  # Download timeout

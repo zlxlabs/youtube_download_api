@@ -496,6 +496,7 @@ class CDPDownloader(BaseDownloader):
         - 连接失败
         - 连接超时
         - Chrome 未就绪
+        - nsig/n challenge 失败（全局性问题，yt-dlp 版本过旧）
 
         不触发熔断的错误：
         - 视频特定错误（如无音频 URL）
@@ -506,6 +507,7 @@ class CDPDownloader(BaseDownloader):
                 ErrorCode.CDP_CONNECTION_FAILED,
                 ErrorCode.CDP_CONNECTION_TIMEOUT,
                 ErrorCode.CDP_CHROME_NOT_READY,
+                ErrorCode.CDP_NSIG_FAILED,  # 全局性问题，需要更新 yt-dlp
             ]:
                 return True
         return False

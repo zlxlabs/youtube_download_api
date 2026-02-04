@@ -35,6 +35,34 @@ SUBTITLE_PRIORITY = ["zh-Hans", "zh-Hant", "zh", "en"]
 # 非字幕类型的"语言"（需要过滤）
 NON_TRANSCRIPT_LANGS = {"live_chat", "live_chat_replay"}
 
+# nsig/n challenge 相关错误消息模式
+# 这些错误表示 yt-dlp 无法处理 YouTube 的 player.js 签名，是全局性问题
+NSIG_ERROR_PATTERNS = [
+    "nsig extraction failed",
+    "Requested format is not available",
+    "n]' query parameter",
+    "unable to extract nsig",
+    "n query parameter not found",
+    "nsig function code",
+]
+
+
+def _is_nsig_error(error_msg: str) -> bool:
+    """
+    检测错误消息是否与 nsig/n challenge 相关。
+
+    nsig 错误是全局性问题，表示 yt-dlp 版本过旧无法处理
+    YouTube 当前的 player.js 签名算法。
+
+    Args:
+        error_msg: 错误消息
+
+    Returns:
+        bool: 是否是 nsig 相关错误
+    """
+    error_lower = error_msg.lower()
+    return any(pattern.lower() in error_lower for pattern in NSIG_ERROR_PATTERNS)
+
 
 def _ms_to_srt_time(ms: int) -> str:
     """
@@ -287,8 +315,18 @@ class AudioDownloader:
         except Exception as e:
             if isinstance(e, DownloaderError):
                 raise
+
+            # 检测 nsig/n challenge 错误（全局性问题）
+            error_msg = str(e)
+            if _is_nsig_error(error_msg):
+                raise DownloaderError(
+                    message=f"yt-dlp nsig extraction failed (yt-dlp update required): {error_msg}",
+                    error_code=ErrorCode.CDP_NSIG_FAILED,
+                    downloader=self.downloader_name,
+                )
+
             raise DownloaderError(
-                message=f"yt-dlp extraction failed: {str(e)}",
+                message=f"yt-dlp extraction failed: {error_msg}",
                 error_code=ErrorCode.CDP_YTDLP_FAILED,
                 downloader=self.downloader_name,
             )
@@ -423,8 +461,18 @@ class AudioDownloader:
         except Exception as e:
             if isinstance(e, DownloaderError):
                 raise
+
+            # 检测 nsig/n challenge 错误（全局性问题）
+            error_msg = str(e)
+            if _is_nsig_error(error_msg):
+                raise DownloaderError(
+                    message=f"yt-dlp nsig extraction failed (yt-dlp update required): {error_msg}",
+                    error_code=ErrorCode.CDP_NSIG_FAILED,
+                    downloader=self.downloader_name,
+                )
+
             raise DownloaderError(
-                message=f"yt-dlp extraction failed: {str(e)}",
+                message=f"yt-dlp extraction failed: {error_msg}",
                 error_code=ErrorCode.CDP_YTDLP_FAILED,
                 downloader=self.downloader_name,
             )

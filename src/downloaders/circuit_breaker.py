@@ -205,6 +205,30 @@ class CircuitBreaker:
                     f"{self.failure_count}/{self.failure_threshold}"
                 )
 
+    def force_open(self, reason: str = "") -> None:
+        """
+        强制打开熔断器（用于全局性错误）。
+
+        对于全局性错误（如 nsig 失败），不需要等待失败计数达到阈值，
+        直接打开熔断器，避免后续请求继续尝试必然失败的下载器。
+
+        Args:
+            reason: 强制打开的原因（用于日志）
+        """
+        if self.state == CircuitState.OPEN:
+            # 已经打开，刷新超时时间
+            self.last_failure_time = datetime.now()
+            logger.debug(
+                f"[CircuitBreaker:{self.name}] Already OPEN, refreshed timeout"
+            )
+            return
+
+        self.last_failure_time = datetime.now()
+        self._transition_to_open()
+        logger.warning(
+            f"[CircuitBreaker:{self.name}] Force opened: {reason or 'global error detected'}"
+        )
+
     def _transition_to_open(self) -> None:
         """转换到 OPEN 状态。"""
         self.state = CircuitState.OPEN
