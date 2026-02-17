@@ -992,6 +992,9 @@ class YouTubeDownloader:
         if "is a livestream" in error_msg or "live event" in error_msg:
             return ErrorCode.VIDEO_LIVE_STREAM, "Live streams are not supported", None
 
+        if "premieres in" in error_msg:
+            return ErrorCode.VIDEO_LIVE_STREAM, "Video is a scheduled premiere, not yet available", None
+
         if "http error 403" in error_msg or "forbidden" in error_msg:
             return ErrorCode.RATE_LIMITED, "Rate limited by YouTube (HTTP 403)", 403
 

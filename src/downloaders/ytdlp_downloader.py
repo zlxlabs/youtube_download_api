@@ -155,12 +155,24 @@ class YtdlpDownloader(BaseDownloader):
 
         except YtdlpDownloadError as e:
             http_status = getattr(e, "http_status_code", None)
-            stop_fallback = http_status == 403
+            # 视频级别错误（视频本身的问题，其他下载器也无法处理）
+            video_errors = {
+                ErrorCode.VIDEO_UNAVAILABLE,
+                ErrorCode.VIDEO_PRIVATE,
+                ErrorCode.VIDEO_REGION_BLOCKED,
+                ErrorCode.VIDEO_AGE_RESTRICTED,
+                ErrorCode.VIDEO_LIVE_STREAM,
+            }
+            stop_fallback = http_status == 403 or e.error_code in video_errors
 
             if stop_fallback:
+                reason = (
+                    "video-level issue"
+                    if e.error_code in video_errors
+                    else "local IP issue (HTTP 403)"
+                )
                 logger.warning(
-                    f"[ytdlp] HTTP 403 detected - local IP issue, "
-                    f"will not try other downloaders"
+                    f"[ytdlp] {reason} - will not try other downloaders"
                 )
 
             logger.error(

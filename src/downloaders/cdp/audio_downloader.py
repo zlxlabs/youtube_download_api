@@ -316,8 +316,18 @@ class AudioDownloader:
             if isinstance(e, DownloaderError):
                 raise
 
-            # 检测 nsig/n challenge 错误（全局性问题）
             error_msg = str(e)
+
+            # 检测直播预约/首播视频（视频级别问题，无需降级）
+            if "premieres in" in error_msg.lower():
+                raise DownloaderError(
+                    message="Video is a scheduled premiere, not yet available",
+                    error_code=ErrorCode.VIDEO_LIVE_STREAM,
+                    downloader=self.downloader_name,
+                    stop_fallback=True,
+                )
+
+            # 检测 nsig/n challenge 错误（全局性问题）
             if _is_nsig_error(error_msg):
                 raise DownloaderError(
                     message=f"yt-dlp nsig extraction failed (yt-dlp update required): {error_msg}",
@@ -462,8 +472,18 @@ class AudioDownloader:
             if isinstance(e, DownloaderError):
                 raise
 
-            # 检测 nsig/n challenge 错误（全局性问题）
             error_msg = str(e)
+
+            # 检测直播预约/首播视频（视频级别问题，无需降级）
+            if "premieres in" in error_msg.lower():
+                raise DownloaderError(
+                    message="Video is a scheduled premiere, not yet available",
+                    error_code=ErrorCode.VIDEO_LIVE_STREAM,
+                    downloader=self.downloader_name,
+                    stop_fallback=True,
+                )
+
+            # 检测 nsig/n challenge 错误（全局性问题）
             if _is_nsig_error(error_msg):
                 raise DownloaderError(
                     message=f"yt-dlp nsig extraction failed (yt-dlp update required): {error_msg}",
