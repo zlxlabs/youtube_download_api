@@ -10,6 +10,7 @@ CDP 资源下载模块。
 
 import asyncio
 import json
+import random
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
@@ -44,6 +45,17 @@ NSIG_ERROR_PATTERNS = [
     "n query parameter not found",
     "nsig function code",
 ]
+
+# 瞬时性错误模式（YouTube 偶尔返回不完整响应，重试大概率成功）
+TRANSIENT_ERROR_PATTERNS = [
+    "requested format is not available",
+]
+
+
+def _is_transient_error(error_msg: str) -> bool:
+    """检测错误消息是否为可重试的瞬时性错误。"""
+    error_lower = error_msg.lower()
+    return any(pattern in error_lower for pattern in TRANSIENT_ERROR_PATTERNS)
 
 
 def _is_nsig_error(error_msg: str) -> bool:
@@ -404,97 +416,139 @@ class AudioDownloader:
             ydl_opts["extractor_args"] = {"youtube": {"po_token": [pot_token]}}
             logger.info(f"[{self.downloader_name}] Using poToken for {video_id}")
 
-        try:
-            # 在线程池中执行（避免阻塞）
-            info = await asyncio.to_thread(self._ytdlp_extract_info, video_url, ydl_opts)
+        # 瞬时错误内部重试（YouTube 偶尔返回不完整格式列表）
+        max_transient_retries = 1
+        last_transient_error = None
 
-            if not info:
+        for attempt in range(max_transient_retries + 1):
+            try:
+                info = await self._extract_and_parse_video_info(
+                    video_url, video_id, ydl_opts, include_audio, include_transcript,
+                )
+                return info
+
+            except DownloaderError:
+                raise
+
+            except Exception as e:
+                error_msg = str(e)
+
+                # 检测直播预约/首播视频（视频级别问题，无需降级）
+                if "premieres in" in error_msg.lower():
+                    raise DownloaderError(
+                        message="Video is a scheduled premiere, not yet available",
+                        error_code=ErrorCode.VIDEO_LIVE_STREAM,
+                        downloader=self.downloader_name,
+                        stop_fallback=True,
+                    )
+
+                # 检测 nsig/n challenge 错误（全局性问题）
+                if _is_nsig_error(error_msg):
+                    raise DownloaderError(
+                        message=f"yt-dlp nsig extraction failed (yt-dlp update required): {error_msg}",
+                        error_code=ErrorCode.CDP_NSIG_FAILED,
+                        downloader=self.downloader_name,
+                    )
+
+                # 瞬时错误：内部重试一次
+                if _is_transient_error(error_msg) and attempt < max_transient_retries:
+                    delay = 3 + random.uniform(0, 2)
+                    logger.warning(
+                        f"[{self.downloader_name}] Transient error for {video_id}, "
+                        f"retrying in {delay:.1f}s ({attempt + 1}/{max_transient_retries}): "
+                        f"{error_msg[:100]}"
+                    )
+                    last_transient_error = error_msg
+                    await asyncio.sleep(delay)
+                    continue
+
                 raise DownloaderError(
-                    message="yt-dlp returned no info",
+                    message=f"yt-dlp extraction failed: {error_msg}",
                     error_code=ErrorCode.CDP_YTDLP_FAILED,
                     downloader=self.downloader_name,
                 )
 
-            title = info.get("title", f"youtube_{video_id}")
+        # 瞬时重试耗尽
+        raise DownloaderError(
+            message=f"yt-dlp transient error persisted after retries: {last_transient_error}",
+            error_code=ErrorCode.CDP_YTDLP_FAILED,
+            downloader=self.downloader_name,
+        )
 
-            # 提取音频信息
-            audio_info = None
-            if include_audio:
-                audio_url = info.get("url")
-                if audio_url:
-                    # 验证不是清单文件
-                    protocol = info.get("protocol", "")
-                    invalid_protocols = ["http_dash_segments", "m3u8", "m3u8_native"]
-                    url_lower = audio_url.lower()
+    async def _extract_and_parse_video_info(
+        self,
+        video_url: str,
+        video_id: str,
+        ydl_opts: Dict[str, Any],
+        include_audio: bool,
+        include_transcript: bool,
+    ) -> ExtractedInfo:
+        """
+        执行 yt-dlp 提取并解析视频信息。
 
-                    if not any(proto in protocol for proto in invalid_protocols) and \
-                       ".mpd" not in url_lower and ".m3u8" not in url_lower:
-                        ext = info.get("ext", "m4a")
-                        audio_info = AudioInfo(
-                            url=audio_url,
-                            itag=self._parse_itag(audio_url),
-                            mime_type=ext,
-                            title=title,
-                            filesize=info.get("filesize") or info.get("filesize_approx"),
-                            ext=ext,
-                        )
-                        logger.info(
-                            f"[{self.downloader_name}] Extracted audio: "
-                            f"itag={audio_info.itag}, ext={audio_info.ext}"
-                        )
-                    else:
-                        logger.warning(
-                            f"[{self.downloader_name}] Audio URL is manifest file, skipping"
-                        )
+        从 extract_video_info 中提取出来以支持瞬时错误重试。
+        """
+        # 在线程池中执行（避免阻塞）
+        info = await asyncio.to_thread(self._ytdlp_extract_info, video_url, ydl_opts)
 
-            # 提取字幕信息
-            subtitles: List[SubtitleInfo] = []
-            if include_transcript:
-                # 获取视频原始语言（用于优先选择原始语言字幕）
-                original_language = info.get("language")
-                subtitles = self._extract_subtitle_info(info, original_language)
-                logger.info(
-                    f"[{self.downloader_name}] Found {len(subtitles)} subtitle(s) "
-                    f"(video_lang={original_language}): "
-                    f"{[s.lang for s in subtitles[:5]]}"
-                    f"{'...' if len(subtitles) > 5 else ''}"
-                )
-
-            return ExtractedInfo(
-                audio_info=audio_info,
-                subtitles=subtitles,
-                title=title,
-                raw_info=info if self.settings.debug else None,
-            )
-
-        except Exception as e:
-            if isinstance(e, DownloaderError):
-                raise
-
-            error_msg = str(e)
-
-            # 检测直播预约/首播视频（视频级别问题，无需降级）
-            if "premieres in" in error_msg.lower():
-                raise DownloaderError(
-                    message="Video is a scheduled premiere, not yet available",
-                    error_code=ErrorCode.VIDEO_LIVE_STREAM,
-                    downloader=self.downloader_name,
-                    stop_fallback=True,
-                )
-
-            # 检测 nsig/n challenge 错误（全局性问题）
-            if _is_nsig_error(error_msg):
-                raise DownloaderError(
-                    message=f"yt-dlp nsig extraction failed (yt-dlp update required): {error_msg}",
-                    error_code=ErrorCode.CDP_NSIG_FAILED,
-                    downloader=self.downloader_name,
-                )
-
+        if not info:
             raise DownloaderError(
-                message=f"yt-dlp extraction failed: {error_msg}",
+                message="yt-dlp returned no info",
                 error_code=ErrorCode.CDP_YTDLP_FAILED,
                 downloader=self.downloader_name,
             )
+
+        title = info.get("title", f"youtube_{video_id}")
+
+        # 提取音频信息
+        audio_info = None
+        if include_audio:
+            audio_url = info.get("url")
+            if audio_url:
+                # 验证不是清单文件
+                protocol = info.get("protocol", "")
+                invalid_protocols = ["http_dash_segments", "m3u8", "m3u8_native"]
+                url_lower = audio_url.lower()
+
+                if not any(proto in protocol for proto in invalid_protocols) and \
+                   ".mpd" not in url_lower and ".m3u8" not in url_lower:
+                    ext = info.get("ext", "m4a")
+                    audio_info = AudioInfo(
+                        url=audio_url,
+                        itag=self._parse_itag(audio_url),
+                        mime_type=ext,
+                        title=title,
+                        filesize=info.get("filesize") or info.get("filesize_approx"),
+                        ext=ext,
+                    )
+                    logger.info(
+                        f"[{self.downloader_name}] Extracted audio: "
+                        f"itag={audio_info.itag}, ext={audio_info.ext}"
+                    )
+                else:
+                    logger.warning(
+                        f"[{self.downloader_name}] Audio URL is manifest file, skipping"
+                    )
+
+        # 提取字幕信息
+        subtitles: List[SubtitleInfo] = []
+        if include_transcript:
+            # 获取视频原始语言（用于优先选择原始语言字幕）
+            original_language = info.get("language")
+            subtitles = self._extract_subtitle_info(info, original_language)
+            logger.info(
+                f"[{self.downloader_name}] Found {len(subtitles)} subtitle(s) "
+                f"(video_lang={original_language}): "
+                f"{[s.lang for s in subtitles[:5]]}"
+                f"{'...' if len(subtitles) > 5 else ''}"
+            )
+
+        return ExtractedInfo(
+            audio_info=audio_info,
+            subtitles=subtitles,
+            title=title,
+            raw_info=info if self.settings.debug else None,
+        )
 
     def _extract_subtitle_info(
         self,
