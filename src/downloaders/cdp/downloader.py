@@ -451,13 +451,13 @@ class CDPDownloader(BaseDownloader):
         except Exception as e:
             # 检查是否是浏览器连接已关闭的错误
             error_msg = str(e).lower()
-            if "target" in error_msg and "closed" in error_msg:
+            if self._is_browser_connection_lost(error_msg):
                 # 浏览器连接已断开，清空引用以便下次重连
                 assert CDPDownloader._browser_lock is not None
                 async with CDPDownloader._browser_lock:
                     if CDPDownloader._browser is not None:
                         logger.warning(
-                            f"[cdp] Browser connection lost (target closed), "
+                            f"[cdp] Browser connection lost ({self._match_connection_error(error_msg)}), "
                             "clearing browser reference for reconnection"
                         )
                         CDPDownloader._browser = None
@@ -468,6 +468,31 @@ class CDPDownloader(BaseDownloader):
             # 处理错误
             await self._handle_download_error(e, video_id, task_id)
             raise
+
+    @staticmethod
+    def _is_browser_connection_lost(error_msg: str) -> bool:
+        """判断错误是否表示浏览器连接已断开（需要清空引用以触发重连）。"""
+        # "target closed" - Playwright CDP 连接目标关闭
+        if "target" in error_msg and "closed" in error_msg:
+            return True
+        # "the handler is closed" - 底层传输通道关闭（WriteUnixTransport closed）
+        if "handler" in error_msg and "closed" in error_msg:
+            return True
+        # "connection closed" - 通用连接关闭
+        if "connection" in error_msg and "closed" in error_msg:
+            return True
+        return False
+
+    @staticmethod
+    def _match_connection_error(error_msg: str) -> str:
+        """返回匹配到的连接错误类型（用于日志）。"""
+        if "target" in error_msg and "closed" in error_msg:
+            return "target closed"
+        if "handler" in error_msg and "closed" in error_msg:
+            return "handler closed"
+        if "connection" in error_msg and "closed" in error_msg:
+            return "connection closed"
+        return "unknown connection error"
 
     def should_retry(self, error: Exception) -> bool:
         """
