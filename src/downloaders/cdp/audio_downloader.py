@@ -39,7 +39,6 @@ NON_TRANSCRIPT_LANGS = {"live_chat", "live_chat_replay"}
 # 这些错误表示 yt-dlp 无法处理 YouTube 的 player.js 签名，是全局性问题
 NSIG_ERROR_PATTERNS = [
     "nsig extraction failed",
-    "Requested format is not available",
     "n]' query parameter",
     "unable to extract nsig",
     "n query parameter not found",
