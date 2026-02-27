@@ -207,6 +207,27 @@ class AudioDownloader:
         self.downloader_name = downloader_name
         self._transcode_service = TranscodeService()
 
+    def _build_extractor_args(self, pot_token: Optional[str] = None) -> Dict[str, Any]:
+        """
+        构建 yt-dlp extractor_args，包含 PO Token 服务地址配置。
+
+        确保 bgutil:http provider 能连接到正确的 POT 服务，
+        而不是使用默认的 127.0.0.1:4416（在 Docker 容器中不可达）。
+        """
+        youtube_args: Dict[str, list] = {}
+        if pot_token:
+            youtube_args["po_token"] = [pot_token]
+
+        args: Dict[str, Any] = {"youtube": youtube_args}
+
+        # 配置 bgutil:http PO Token provider 的服务地址
+        if self.settings.pot_server_url:
+            args["youtubepot-bgutilhttp"] = {
+                "base_url": [self.settings.pot_server_url],
+            }
+
+        return args
+
     async def extract_audio_url(
         self,
         video_url: str,
@@ -253,9 +274,9 @@ class AudioDownloader:
             "no_color": True,
         }
 
-        # 可选：注入 poToken
+        # 注入 extractor_args（PO Token 服务地址 + 可选 poToken）
+        ydl_opts["extractor_args"] = self._build_extractor_args(pot_token)
         if pot_token:
-            ydl_opts["extractor_args"] = {"youtube": {"po_token": [pot_token]}}
             logger.info(f"[{self.downloader_name}] Using poToken for {video_id}")
 
         try:
@@ -411,9 +432,9 @@ class AudioDownloader:
             # 仅字幕模式：忽略格式错误（n challenge 失败不影响字幕获取）
             ydl_opts["ignore_no_formats_error"] = True
 
-        # 可选：注入 poToken
+        # 注入 extractor_args（PO Token 服务地址 + 可选 poToken）
+        ydl_opts["extractor_args"] = self._build_extractor_args(pot_token)
         if pot_token:
-            ydl_opts["extractor_args"] = {"youtube": {"po_token": [pot_token]}}
             logger.info(f"[{self.downloader_name}] Using poToken for {video_id}")
 
         # 瞬时错误内部重试（YouTube 偶尔返回不完整格式列表）
@@ -740,6 +761,7 @@ class AudioDownloader:
             "paths": {"home": str(output_dir)},
             # 字幕下载不需要音视频格式，忽略格式错误
             "ignore_no_formats_error": True,
+            "extractor_args": self._build_extractor_args(),
         }
 
         # 设置字幕语言
@@ -1408,6 +1430,7 @@ class AudioDownloader:
             "no_warnings": True,
             "outtmpl": outtmpl,
             "noplaylist": True,
+            "extractor_args": self._build_extractor_args(),
         }
 
         try:

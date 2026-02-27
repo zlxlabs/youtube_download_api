@@ -335,7 +335,7 @@ async def health_check() -> HealthResponse:
     # Check PO Token provider
     try:
         async with httpx.AsyncClient(timeout=5) as client:
-            response = await client.get(f"{settings.pot_server_url}/health")
+            response = await client.get(f"{settings.pot_server_url}/ping")
             if response.status_code != 200:
                 components.pot_provider = f"unhealthy ({response.status_code})"
     except Exception as e:
