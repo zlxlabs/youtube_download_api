@@ -349,11 +349,16 @@ class AudioDownloader:
                 raise
 
             error_msg = str(e)
+            error_msg_lower = error_msg.lower()
 
-            # 检测直播预约/首播视频（视频级别问题，无需降级）
-            if "premieres in" in error_msg.lower():
+            # 检测直播/直播预约/首播视频（视频级别问题，无需降级）
+            if (
+                "premieres in" in error_msg_lower
+                or "live event" in error_msg_lower
+                or "is a livestream" in error_msg_lower
+            ):
                 raise DownloaderError(
-                    message="Video is a scheduled premiere, not yet available",
+                    message="Live streams are not supported",
                     error_code=ErrorCode.VIDEO_LIVE_STREAM,
                     downloader=self.downloader_name,
                     stop_fallback=True,
@@ -453,11 +458,16 @@ class AudioDownloader:
 
             except Exception as e:
                 error_msg = str(e)
+                error_msg_lower = error_msg.lower()
 
-                # 检测直播预约/首播视频（视频级别问题，无需降级）
-                if "premieres in" in error_msg.lower():
+                # 检测直播/直播预约/首播视频（视频级别问题，无需降级）
+                if (
+                    "premieres in" in error_msg_lower
+                    or "live event" in error_msg_lower
+                    or "is a livestream" in error_msg_lower
+                ):
                     raise DownloaderError(
-                        message="Video is a scheduled premiere, not yet available",
+                        message="Live streams are not supported",
                         error_code=ErrorCode.VIDEO_LIVE_STREAM,
                         downloader=self.downloader_name,
                         stop_fallback=True,
