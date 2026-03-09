@@ -336,13 +336,14 @@ class CDPDownloader(BaseDownloader):
                 # 4.5. 同步 Cookie 到共享位置（让 ytdlp 也能使用）
                 await self._sync_cookie_to_shared_location(cookie_file)
 
-                # 5. 关闭保留的旧 Page
+                # 5. 关闭保留的旧 Page（加超时保护）
                 if kept_page and not kept_page.is_closed():
                     try:
-                        await kept_page.close()
+                        await asyncio.wait_for(kept_page.close(), timeout=5)
                         logger.debug("[cdp] Closed kept page after new page created")
-                    except Exception as e:
-                        logger.debug(f"[cdp] Failed to close kept page: {e}")
+                    except (asyncio.TimeoutError, Exception) as e:
+                        logger.warning(f"[cdp] Failed to close kept page: {e}")
+                    self._behavior_simulator._owned_pages.discard(kept_page)
 
                 # 6. 启动后台人类行为模拟（异步，不阻塞）
                 background_task_started = await self._start_background_behavior(

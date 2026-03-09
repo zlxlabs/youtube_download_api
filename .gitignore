@@ -79,6 +79,7 @@ temp/
 *.bak
 nul
 docker/output
+docker/deploy_targets.json
 build-optimized.bat
 
 # Test scripts (root level only)

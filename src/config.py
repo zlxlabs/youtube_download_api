@@ -86,6 +86,11 @@ class Settings(BaseSettings):
         default=128, ge=64, le=320, description="Audio bitrate (kbps)"
     )
 
+    # 任务级超时（兜底保护）
+    task_timeout: int = Field(
+        default=300, ge=60, le=3600, description="Task-level timeout in seconds (safety net)"
+    )
+
     # ============ Storage Configuration ============
     data_dir: Path = Field(default=Path("./data"), description="Data storage directory")
     file_retention_days: int = Field(

@@ -59,6 +59,9 @@ class ErrorCode(str, Enum):
     CDP_SIZE_MISMATCH = "CDP_SIZE_MISMATCH"  # File size mismatch
     CDP_TRANSCODE_FAILED = "CDP_TRANSCODE_FAILED"  # Transcode to m4a failed
 
+    # Task-level errors
+    TASK_TIMEOUT = "TASK_TIMEOUT"  # Task-level timeout (safety net)
+
 
 class CallbackStatus(str, Enum):
     """Callback status enumeration."""
@@ -295,6 +298,11 @@ RETRY_CONFIG: dict[ErrorCode, dict[str, Any]] = {
         "jitter": 60,
     },
     ErrorCode.DOWNLOAD_FAILED: {
+        "max_retries": 1,
+        "backoff": [300],  # 5分钟后重试
+        "jitter": 60,
+    },
+    ErrorCode.TASK_TIMEOUT: {
         "max_retries": 1,
         "backoff": [300],  # 5分钟后重试
         "jitter": 60,

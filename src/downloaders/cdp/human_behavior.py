@@ -47,6 +47,7 @@ class HumanBehaviorSimulator:
             settings: 应用配置
         """
         self.settings = settings
+        self._owned_pages: set = set()  # 追踪本项目创建的页面
 
     async def cleanup_old_pages(
         self,
@@ -76,41 +77,31 @@ class HumanBehaviorSimulator:
         Returns:
             保留的 Page（需要在创建新 Page 后手动关闭），如果没有保留则返回 None
         """
-        if not context.pages:
-            logger.debug("[cdp] No old pages to clean up")
+        # 只清理 _owned_pages 中的页面，不碰 context 中其他页面
+        owned = [p for p in self._owned_pages if not p.is_closed()]
+        if not owned:
+            logger.debug("[cdp] No owned pages to clean up")
             return None
 
-        old_pages = list(context.pages)
-
-        # 如果只有 1 个 Page 且需要保留，不关闭
-        if len(old_pages) == 1 and keep_last:
-            logger.debug("[cdp] Only 1 page, keeping it alive")
-            return old_pages[0]
-
-        # 决定要关闭的 Page
-        if keep_last and len(old_pages) > 1:
-            pages_to_close = old_pages[:-1]
-            kept_page = old_pages[-1]
-            logger.info(
-                f"[cdp] Cleaning up {len(pages_to_close)} old page(s), "
-                f"keeping 1 alive (simulating closing old tabs)"
-            )
+        if keep_last and len(owned) >= 1:
+            # 保留最后一个 owned page（有 Chrome 存活保证）
+            pages_to_close = owned[:-1]  # 可能为空
+            kept_page = owned[-1]
         else:
-            pages_to_close = old_pages
+            pages_to_close = owned
             kept_page = None
-            logger.info(
-                f"[cdp] Cleaning up {len(old_pages)} old page(s) "
-                "(simulating closing old tabs)"
-            )
 
-        # 关闭旧 Page
-        for i, page in enumerate(pages_to_close):
+        for page in pages_to_close:
             try:
-                page_url = page.url if not page.is_closed() else "unknown"
-                await page.close()
-                logger.debug(f"[cdp] Closed old page {i+1}/{len(pages_to_close)}: {page_url}")
-            except Exception as e:
-                logger.debug(f"[cdp] Failed to close old page {i+1}: {e}")
+                await asyncio.wait_for(page.close(), timeout=5)
+            except (asyncio.TimeoutError, Exception) as e:
+                logger.warning(f"[cdp] Failed to close owned page: {e}")
+            self._owned_pages.discard(page)
+
+        if not pages_to_close:
+            logger.debug("[cdp] No owned pages to clean up (keeping 1)")
+        else:
+            logger.info(f"[cdp] Cleaned up {len(pages_to_close)} owned page(s)")
 
         return kept_page
 
@@ -148,6 +139,7 @@ class HumanBehaviorSimulator:
 
         # 总是创建新 Page
         page = await context.new_page()
+        self._owned_pages.add(page)  # 注册为 owned
         logger.debug(f"[cdp] Created new page for task {task_id}")
 
         try:
@@ -172,13 +164,13 @@ class HumanBehaviorSimulator:
                 await page.wait_for_selector("video", timeout=15000)
 
                 # 触发视频播放
-                await page.evaluate("""() => {
+                await asyncio.wait_for(page.evaluate("""() => {
                     const video = document.querySelector('video');
                     if (!video) return;
                     video.muted = true;
                     const p = video.play();
                     if (p && p.catch) p.catch(() => {});
-                }""")
+                }"""), timeout=10)
 
                 # 等待播放触发请求（关键：让浏览器有时间刷新 cookies/session）
                 await asyncio.sleep(2)
@@ -191,10 +183,16 @@ class HumanBehaviorSimulator:
             except Exception as e:
                 logger.debug(f"[cdp] Could not trigger playback for headers extraction: {e}")
 
-            # 使用 CDP 获取 cookies
-            cdp_session = await context.new_cdp_session(page)
-            cookies_result = await cdp_session.send("Network.getAllCookies")
-            cookies = cookies_result.get("cookies", [])
+            # 使用 CDP 获取 cookies（加超时保护）
+            try:
+                cdp_session = await asyncio.wait_for(context.new_cdp_session(page), timeout=10)
+                cookies_result = await asyncio.wait_for(
+                    cdp_session.send("Network.getAllCookies"), timeout=10
+                )
+                cookies = cookies_result.get("cookies", [])
+            except asyncio.TimeoutError:
+                logger.warning("[cdp] CDP session/cookies timed out, using empty cookies")
+                cookies = []
 
             # 写入 cookie 文件
             cookie_file = self.settings.data_dir / "tmp" / f"{task_id}.cookies.txt"
@@ -205,10 +203,10 @@ class HumanBehaviorSimulator:
             video_duration = None
             try:
                 if not page.is_closed():
-                    raw_duration = await page.evaluate("""() => {
+                    raw_duration = await asyncio.wait_for(page.evaluate("""() => {
                         const video = document.querySelector('video');
                         return video ? video.duration : null;
-                    }""")
+                    }"""), timeout=10)
 
                     # 检查视频时长有效性
                     if raw_duration is not None:
@@ -243,9 +241,10 @@ class HumanBehaviorSimulator:
         except Exception as e:
             # 出错时立即关闭 Page
             try:
-                await page.close()
+                await asyncio.wait_for(page.close(), timeout=5)
             except Exception:
                 pass
+            self._owned_pages.discard(page)
             raise
 
     async def background_human_behavior(
@@ -338,12 +337,12 @@ class HumanBehaviorSimulator:
             await self._sleep_with_page_check(page, watch_duration, video_id)
 
             # 4. 播放完成后，条件性暂停
-            # 只对最后一个 Page 执行暂停操作
+            # 只对最后一个 owned Page 执行暂停操作
             if not page.is_closed():
-                context = page.context
-                if len(context.pages) == 1:
-                    # 确认是最后一个 Page，执行暂停
-                    logger.debug(f"[cdp] Pausing video for {video_id} (last page)")
+                owned_count = len([p for p in self._owned_pages if not p.is_closed()])
+                if owned_count <= 1:
+                    # 确认是最后一个 owned Page，执行暂停
+                    logger.debug(f"[cdp] Pausing video for {video_id} (last owned page)")
                     await self._pause_video(page)
 
                     # 暂停后保持页面存活一段时间（模拟人类暂停后去做其他事）
@@ -356,7 +355,7 @@ class HumanBehaviorSimulator:
                 else:
                     logger.debug(
                         f"[cdp] Skipping pause for {video_id}: "
-                        f"not the last page ({len(context.pages)} pages exist)"
+                        f"not the last owned page ({owned_count} owned pages exist)"
                     )
 
             logger.info(
@@ -387,21 +386,23 @@ class HumanBehaviorSimulator:
                     logger.warning(f"[cdp] Failed to clean cookie file: {e}")
 
             # 关闭页面（如果还没被关闭）
-            # 注意：如果是最后一个 Page，保留它以避免 Chrome 退出
+            # 注意：如果是最后一个 owned Page，保留它以避免 Chrome 退出
             try:
                 if not page.is_closed():
-                    # 检查是否是最后一个 Page
-                    context = page.context
-                    if len(context.pages) > 1:
-                        await page.close()
+                    owned_count = len([p for p in self._owned_pages if not p.is_closed()])
+                    if owned_count > 1:
+                        await asyncio.wait_for(page.close(), timeout=5)
+                        self._owned_pages.discard(page)
                         logger.debug(f"[cdp] Closed page for {video_id}")
                     else:
+                        # 是最后一个 owned page，保留
                         logger.debug(
-                            f"[cdp] Keeping last page alive for {video_id} "
+                            f"[cdp] Keeping last owned page alive for {video_id} "
                             "(avoid Chrome exit)"
                         )
-            except Exception as e:
+            except (asyncio.TimeoutError, Exception) as e:
                 logger.debug(f"[cdp] Failed to close page (already closed?): {e}")
+                self._owned_pages.discard(page)
 
     async def _sleep_with_page_check(
         self,

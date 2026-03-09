@@ -238,8 +238,18 @@ class DownloadWorker:
         try:
             await self.db.update_task_status(task.id, TaskStatus.DOWNLOADING)
 
-            # Execute task (smart download - only what's needed)
-            result = await self._execute_task(task)
+            # Execute task (smart download - only what's needed, with timeout guard)
+            try:
+                result = await asyncio.wait_for(
+                    self._execute_task(task),
+                    timeout=self.settings.task_timeout
+                )
+            except asyncio.TimeoutError:
+                logger.error(f"Task {task.id} timed out after {self.settings.task_timeout}s")
+                raise DownloaderError(
+                    message=f"Task timed out after {self.settings.task_timeout}s",
+                    error_code=ErrorCode.TASK_TIMEOUT,
+                )
 
             # 如果是探测尝试，分析结果并更新熔断状态
             if is_probe and isinstance(result.get("downloader_result"), DownloaderResult):
