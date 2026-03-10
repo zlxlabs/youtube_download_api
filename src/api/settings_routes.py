@@ -229,10 +229,7 @@ async def get_config() -> ConfigResponse:
     """
     settings = get_settings()
 
-    # 获取构建时间，如果是占位符则返回 "development"
     build_time = src.__build_time__
-    if "PLACEHOLDER" in build_time:
-        build_time = "development"
 
     return ConfigResponse(
         timezone=settings.tz,

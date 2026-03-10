@@ -18,8 +18,8 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 COPY pyproject.toml uv.lock README.md ./
 
 # Export dependencies to requirements.txt and install
-# --no-dev: 排除开发依赖
-# --no-hashes: 简化 requirements.txt 格式
+# --no-dev: exclude dev dependencies
+# --no-hashes: simplify requirements.txt format
 RUN uv export --no-dev --no-hashes -o requirements.txt && \
     uv pip install --system --no-cache --target=/app/deps -r requirements.txt
 
@@ -66,34 +66,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy uv from builder stage (for runtime yt-dlp auto-update)
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/
 
-# Copy Python dependencies from builder stage
+# Copy Python dependencies from builder stage, then clean up unnecessary files
+# This layer only rebuilds when pyproject.toml/uv.lock change
 COPY --from=builder /app/deps /usr/local/lib/python3.11/site-packages/
-
-# Copy source code
-COPY src/ ./src/
-
-# 注入构建时间到 __init__.py
-# 使用 ISO 8601 格式的 UTC 时间戳
-RUN BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
-    sed -i "s/BUILD_TIMESTAMP_PLACEHOLDER/${BUILD_TIME}/g" ./src/__init__.py && \
-    echo "Build time injected: ${BUILD_TIME}"
-
-# Create data directories
-RUN mkdir -p /app/data/files/audio /app/data/files/transcript /app/data/logs
-
-# Remove unnecessary files to reduce size
 RUN find /usr/local/lib/python3.11/site-packages -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true && \
     find /usr/local/lib/python3.11/site-packages -type d -name "tests" -exec rm -rf {} + 2>/dev/null || true && \
     find /usr/local/lib/python3.11/site-packages -type d -name "test" -exec rm -rf {} + 2>/dev/null || true && \
     find /usr/local/lib/python3.11/site-packages -type f -name "*.pyc" -delete 2>/dev/null || true && \
     find /usr/local/lib/python3.11/site-packages -type f -name "*.pyo" -delete 2>/dev/null || true && \
     rm -rf /usr/local/lib/python3.11/site-packages/setuptools* && \
-    # 移除 Python 包中的文档和示例
     find /usr/local/lib/python3.11/site-packages -type d -name "docs" -exec rm -rf {} + 2>/dev/null || true && \
     find /usr/local/lib/python3.11/site-packages -type d -name "examples" -exec rm -rf {} + 2>/dev/null || true && \
-    # 清理所有缓存
     rm -rf /root/.cache && \
     rm -rf /tmp/*
+
+# Create data directories (stable layer, rarely changes)
+RUN mkdir -p /app/data/files/audio /app/data/files/transcript /app/data/logs
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
@@ -109,6 +97,17 @@ EXPOSE ${PORT}
 # Health check (uses PORT env var)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:${PORT}/health || exit 1
+
+# --- Everything above this line is cached when only source code changes ---
+
+# Copy source code (this is the layer that changes most frequently)
+COPY src/ ./src/
+
+# Inject build time via build arg -> env var (no file modification needed)
+# Usage: docker build --build-arg BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) .
+# If not provided, defaults to "unknown"
+ARG BUILD_TIME=unknown
+ENV BUILD_TIME=${BUILD_TIME}
 
 # Run the application with optional yt-dlp auto-update
 # YTDLP_AUTO_UPDATE: update yt-dlp on startup (default: true)

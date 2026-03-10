@@ -41,13 +41,17 @@ if not exist "%OUTPUT_DIR%" mkdir "%OUTPUT_DIR%"
 echo Output directory: %OUTPUT_DIR%
 echo.
 
+REM Get UTC build time in ISO 8601 format
+for /f "delims=" %%T in ('powershell -Command "[DateTime]::UtcNow.ToString(\"yyyy-MM-ddTHH:mm:ssZ\")"') do set BUILD_TIME=%%T
+
 REM Switch to project root directory
 cd /d "%~dp0.."
 
 echo [2/5] Building Docker image...
 echo Image tag: %IMAGE_TAG%
+echo Build time: %BUILD_TIME%
 echo.
-docker build -t %IMAGE_TAG% -t %IMAGE_LATEST% -f Dockerfile .
+docker build --build-arg BUILD_TIME=%BUILD_TIME% -t %IMAGE_TAG% -t %IMAGE_LATEST% -f Dockerfile .
 if errorlevel 1 (
     echo [ERROR] Image build failed!
     pause
