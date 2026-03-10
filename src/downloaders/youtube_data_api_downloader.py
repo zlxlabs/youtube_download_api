@@ -231,6 +231,8 @@ class YoutubeDataApiDownloader(BaseDownloader):
                 "upload_date": upload_date,
                 "view_count": int(statistics.get("viewCount", 0)) or None,
                 "thumbnail": thumbnail,
+                # 直播状态: "none" | "upcoming" | "live"
+                "live_broadcast_content": snippet.get("liveBroadcastContent", "none"),
             }
 
             # 尝试获取字幕列表（可选，需要额外 API 调用）

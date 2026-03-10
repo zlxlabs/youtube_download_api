@@ -47,10 +47,14 @@ class DownloaderNotAvailable(DownloaderError):
 class AllDownloadersFailed(DownloaderError):
     """所有下载器都失败异常。"""
 
-    def __init__(self, errors: list[str]):
+    def __init__(
+        self,
+        errors: list[str],
+        error_code: ErrorCode = ErrorCode.DOWNLOAD_FAILED,
+    ):
         self.errors = errors
-        error_msg = "\n".join(f"  - {e}" for e in errors)
+        error_msg = "\n".join(f"  · {e}" for e in errors)
         super().__init__(
             message=f"All downloaders failed:\n{error_msg}",
-            error_code=ErrorCode.DOWNLOAD_FAILED,
+            error_code=error_code,
         )
