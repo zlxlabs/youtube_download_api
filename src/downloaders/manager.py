@@ -530,7 +530,8 @@ class DownloaderManager:
                         f"other downloaders will also fail with this issue"
                     )
                     # 直接抛出异常，不再尝试其他下载器
-                    raise AllDownloadersFailed(errors)
+                    # 保留原始错误码（如 VIDEO_LIVE_STREAM），避免降级为 DOWNLOAD_FAILED
+                    raise AllDownloadersFailed(errors, error_code=e.error_code)
 
                 # 继续尝试下一个下载器（降级）
                 # 注意：此时已经过了下载器内部的重试（最多3次）
@@ -556,7 +557,15 @@ class DownloaderManager:
         # 显示统计信息
         logger.info(f"Downloader stats: {self.stats.get_summary()}")
 
-        raise AllDownloadersFailed(errors)
+        # 如果最后一个错误是视频级别问题，保留其错误码
+        from src.db.models import ErrorCode
+        final_error_code = (
+            last_error.error_code
+            if isinstance(last_error, DownloaderError)
+            and last_error.error_code != ErrorCode.DOWNLOAD_FAILED
+            else ErrorCode.DOWNLOAD_FAILED
+        )
+        raise AllDownloadersFailed(errors, error_code=final_error_code)
 
     def _get_max_retries_for_error(self, error: DownloaderError) -> int:
         """
