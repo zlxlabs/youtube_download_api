@@ -392,7 +392,20 @@ class DownloaderManager:
             )
 
             # 检查是否为未开始的直播/预约直播/正在直播，提前拒绝下载
+            # 旧缓存可能缺少 live_broadcast_content 字段，强制刷新一次以补全
             live_status = metadata_dict.get("live_broadcast_content")
+            if live_status is None:
+                logger.info(
+                    f"Metadata for {video_id} missing live_broadcast_content, "
+                    f"refreshing to check live status"
+                )
+                refreshed = await self.get_metadata(
+                    video_url, video_id, force_refresh=True
+                )
+                if refreshed:
+                    metadata_dict = refreshed
+                    live_status = metadata_dict.get("live_broadcast_content")
+
             if live_status in ("upcoming", "live"):
                 from src.db.models import ErrorCode
                 logger.warning(
