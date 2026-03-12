@@ -140,6 +140,8 @@ class VideoInfo:
     upload_date: Optional[str] = None
     view_count: Optional[int] = None
     thumbnail: Optional[str] = None
+    # 直播状态: "none" | "upcoming" | "live"
+    live_broadcast_content: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
@@ -152,6 +154,7 @@ class VideoInfo:
             "upload_date": self.upload_date,
             "view_count": self.view_count,
             "thumbnail": self.thumbnail,
+            "live_broadcast_content": self.live_broadcast_content,
         }
 
     @classmethod
@@ -168,6 +171,7 @@ class VideoInfo:
             upload_date=data.get("upload_date"),
             view_count=data.get("view_count"),
             thumbnail=data.get("thumbnail"),
+            live_broadcast_content=data.get("live_broadcast_content"),
         )
 
 

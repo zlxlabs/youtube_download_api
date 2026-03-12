@@ -391,15 +391,15 @@ class DownloaderManager:
                 f"(title: {metadata_dict.get('title', 'N/A')[:50]})"
             )
 
-            # 检查是否为未开始的直播/预约直播，提前拒绝下载
-            live_status = metadata_dict.get("live_broadcast_content", "none")
-            if live_status == "upcoming":
+            # 检查是否为未开始的直播/预约直播/正在直播，提前拒绝下载
+            live_status = metadata_dict.get("live_broadcast_content")
+            if live_status in ("upcoming", "live"):
                 from src.db.models import ErrorCode
                 logger.warning(
-                    f"Video {video_id} is an upcoming live broadcast, skipping download"
+                    f"Video {video_id} is a live broadcast (status: {live_status}), skipping download"
                 )
                 raise AllDownloadersFailed(
-                    errors=[f"Video is a scheduled live broadcast (status: {live_status}), not yet available"],
+                    errors=[f"Video is a live broadcast (status: {live_status}), not available for download"],
                     error_code=ErrorCode.VIDEO_LIVE_STREAM,
                 )
 
@@ -946,6 +946,7 @@ class DownloaderManager:
                 upload_date=metadata.get("upload_date"),
                 view_count=metadata.get("view_count"),
                 thumbnail=metadata.get("thumbnail"),
+                live_broadcast_content=metadata.get("live_broadcast_content"),
             )
 
             # 检查是否已存在
