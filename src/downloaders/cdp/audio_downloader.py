@@ -209,12 +209,17 @@ class AudioDownloader:
 
     def _build_extractor_args(self, pot_token: Optional[str] = None) -> Dict[str, Any]:
         """
-        构建 yt-dlp extractor_args，包含 PO Token 服务地址配置。
+        构建 yt-dlp extractor_args，包含 PO Token 服务地址和 player client 配置。
 
         确保 bgutil:http provider 能连接到正确的 POT 服务，
         而不是使用默认的 127.0.0.1:4416（在 Docker 容器中不可达）。
         """
-        youtube_args: Dict[str, list] = {}
+        # Player client 选择策略（与 core/downloader.py 保持一致）
+        # tv_embedded 已被 yt-dlp 废弃（2026.03+）
+        youtube_args: Dict[str, list] = {
+            "player_client": ["web_creator"] if self.settings.cookie_file else ["ios", "web_creator"],
+            "player_js_version": ["actual"],
+        }
         if pot_token:
             youtube_args["po_token"] = [pot_token]
 
@@ -227,6 +232,13 @@ class AudioDownloader:
             }
 
         return args
+
+    def _build_base_opts(self) -> Dict[str, Any]:
+        """构建 yt-dlp 基础选项（remote_components 等）。"""
+        return {
+            # 启用远程组件下载，用于解决 n challenge
+            "remote_components": {"ejs:github"},
+        }
 
     async def extract_audio_url(
         self,
@@ -272,9 +284,10 @@ class AudioDownloader:
             "simulate": False,
             "extract_flat": False,
             "no_color": True,
+            **self._build_base_opts(),
         }
 
-        # 注入 extractor_args（PO Token 服务地址 + 可选 poToken）
+        # 注入 extractor_args（PO Token 服务地址 + player_client + 可选 poToken）
         ydl_opts["extractor_args"] = self._build_extractor_args(pot_token)
         if pot_token:
             logger.info(f"[{self.downloader_name}] Using poToken for {video_id}")
@@ -428,6 +441,7 @@ class AudioDownloader:
             "simulate": False,
             "extract_flat": False,
             "no_color": True,
+            **self._build_base_opts(),
         }
 
         # 如果需要音频，设置格式选择

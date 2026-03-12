@@ -57,8 +57,9 @@ yt-dlp + bgutil POT Provider ——> 下载音频
 4. `yt-dlp` 下载音频。
 
 保持 `player_client` 的优先级：
-- 有 Cookie：`tv_embedded` -> `web_creator`
-- 无 Cookie：`tv_embedded` -> `ios` -> `web_creator`
+- 有 Cookie：`web_creator`
+- 无 Cookie：`ios` -> `web_creator`
+- 注意：`tv_embedded` 已被 yt-dlp 废弃（2026.03+）
 
 ## 核心配置清单
 

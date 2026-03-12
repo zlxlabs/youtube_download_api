@@ -290,22 +290,24 @@ class YouTubeDownloader:
         # 导致常规 HTTP 格式不可用 (yt-dlp#12482)。
         #
         # 客户端选择策略：
-        # - tv_embedded 优先：嵌入式电视客户端，限制较少，兼容性好
-        # - web_creator 备选：支持 cookies + PO Token
+        # - web_creator 优先：支持 cookies + PO Token，兼容性好
         # - ios 备选：不需要认证，速度快
+        # 注意：tv_embedded 已被 yt-dlp 废弃（2026.03+）
         #
         # player_js_version=actual: 使用实际的 player.js 版本而非缓存版本
         # 这有助于解决 YouTube 更新 player.js 后的兼容性问题
         if self.settings.cookie_file:
-            # 有 cookies 时，tv_embedded 优先，web_creator 备选
+            # 有 cookies 时，web_creator 优先（支持 cookies + PO Token）
+            # 注意：tv_embedded 已被 yt-dlp 废弃，不再使用
             youtube_args = {
-                "player_client": ["tv_embedded", "web_creator"],
+                "player_client": ["web_creator"],
                 "player_js_version": ["actual"],
             }
         else:
-            # 无 cookies 时，tv_embedded 优先，ios 和 web_creator 备选
+            # 无 cookies 时，ios 优先（不需要认证），web_creator 备选
+            # 注意：tv_embedded 已被 yt-dlp 废弃，不再使用
             youtube_args = {
-                "player_client": ["tv_embedded", "ios", "web_creator"],
+                "player_client": ["ios", "web_creator"],
                 "player_js_version": ["actual"],
             }
 

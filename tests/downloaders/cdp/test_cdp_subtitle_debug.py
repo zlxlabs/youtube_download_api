@@ -366,7 +366,7 @@ async def test_ytdlp_download_subtitle(cookie_file: Path, output_dir: Path) -> O
         # 使用与主下载器相同的客户端策略 (这个可能是问题所在！)
         "extractor_args": {
             "youtube": {
-                "player_client": ["tv_embedded", "web_creator"],
+                "player_client": ["web_creator"],
             }
         },
     }
