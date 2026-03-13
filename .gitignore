@@ -80,6 +80,8 @@ temp/
 nul
 docker/output
 docker/deploy_targets.json
+docker/push_to_acr.bat
+docker/pull_and_deploy.sh
 build-optimized.bat
 
 # Test scripts (root level only)
