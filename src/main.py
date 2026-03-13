@@ -332,15 +332,18 @@ async def health_check() -> HealthResponse:
         components.database = f"error: {e}"
         logger.error(f"Database health check failed: {e}")
 
-    # Check PO Token provider
-    try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            response = await client.get(f"{settings.pot_server_url}/ping")
-            if response.status_code != 200:
-                components.pot_provider = f"unhealthy ({response.status_code})"
-    except Exception as e:
-        components.pot_provider = f"unreachable: {e}"
-        logger.warning(f"PO Token provider health check failed: {e}")
+    # Check PO Token provider (仅在功能启用时检查)
+    if settings.cdp_enable_pot_token:
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                response = await client.get(f"{settings.pot_server_url}/ping")
+                if response.status_code != 200:
+                    components.pot_provider = f"unhealthy ({response.status_code})"
+        except Exception as e:
+            components.pot_provider = f"unreachable: {e}"
+            logger.warning(f"PO Token provider health check failed: {e}")
+    else:
+        components.pot_provider = "disabled"
 
     # Check disk space
     if file_service:

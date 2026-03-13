@@ -13,8 +13,6 @@ services:
       - TZ=Asia/Shanghai
     env_file:
       - .env
-    depends_on:
-      - pot-provider
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
       interval: 30s
@@ -28,3 +26,5 @@ services:
     restart: unless-stopped
     ports:
       - "${POT_PORT:-4416}:4416"
+    profiles:
+      - pot
