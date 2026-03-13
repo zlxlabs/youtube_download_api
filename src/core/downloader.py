@@ -311,13 +311,16 @@ class YouTubeDownloader:
                 "player_js_version": ["actual"],
             }
 
-        opts["extractor_args"] = {
-            "youtube": youtube_args,
-            # bgutil:http provider 配置（web_creator 客户端需要 PO Token）
-            "youtubepot-bgutilhttp": {
+        extractor_args: Dict[str, Any] = {"youtube": youtube_args}
+
+        # 仅在 PO Token 功能启用时配置 bgutil:http provider
+        # 未启用时注入此配置会导致 yt-dlp 尝试连接 pot-provider 并无限挂起
+        if self.settings.cdp_enable_pot_token and self.settings.pot_server_url:
+            extractor_args["youtubepot-bgutilhttp"] = {
                 "base_url": [self.settings.pot_server_url],
-            },
-        }
+            }
+
+        opts["extractor_args"] = extractor_args
 
         # 启用远程组件下载，用于解决 n challenge
         # 这允许 deno 下载所需的 npm 包来解决 YouTube 的 JS 挑战

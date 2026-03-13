@@ -225,8 +225,9 @@ class AudioDownloader:
 
         args: Dict[str, Any] = {"youtube": youtube_args}
 
-        # 配置 bgutil:http PO Token provider 的服务地址
-        if self.settings.pot_server_url:
+        # 仅在 PO Token 功能启用时配置 bgutil:http provider 的服务地址
+        # 未启用时注入此配置会导致 yt-dlp 尝试连接 pot-provider 并无限挂起
+        if self.settings.cdp_enable_pot_token and self.settings.pot_server_url:
             args["youtubepot-bgutilhttp"] = {
                 "base_url": [self.settings.pot_server_url],
             }
