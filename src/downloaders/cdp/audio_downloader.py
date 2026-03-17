@@ -213,6 +213,9 @@ class AudioDownloader:
 
         确保 bgutil:http provider 能连接到正确的 POT 服务，
         而不是使用默认的 127.0.0.1:4416（在 Docker 容器中不可达）。
+
+        注意：仅在 pot-provider 健康时注入 bgutil 配置，
+        否则 yt-dlp 的 bgutil 插件会无限重试导致任务超时。
         """
         # Player client 选择策略（与 core/downloader.py 保持一致）
         # tv_embedded 已被 yt-dlp 废弃（2026.03+）
@@ -225,12 +228,21 @@ class AudioDownloader:
 
         args: Dict[str, Any] = {"youtube": youtube_args}
 
-        # 仅在 PO Token 功能启用时配置 bgutil:http provider 的服务地址
-        # 未启用时注入此配置会导致 yt-dlp 尝试连接 pot-provider 并无限挂起
+        # 仅在 PO Token 功能启用且 pot-provider 健康时注入 bgutil 配置
+        # pot-provider 不可用时注入此配置会导致 yt-dlp 的 bgutil 插件
+        # 无限重试获取 PO Token，最终耗尽任务超时时间
         if self.settings.cdp_enable_pot_token and self.settings.pot_server_url:
-            args["youtubepot-bgutilhttp"] = {
-                "base_url": [self.settings.pot_server_url],
-            }
+            from src.downloaders.pot_health import PotProviderHealthTracker
+            tracker = PotProviderHealthTracker.get_instance()
+            if tracker.is_available():
+                args["youtubepot-bgutilhttp"] = {
+                    "base_url": [self.settings.pot_server_url],
+                }
+            else:
+                logger.warning(
+                    f"[{self.downloader_name}] Skipping bgutil config injection: "
+                    f"pot-provider unavailable (failures: {tracker.consecutive_failures})"
+                )
 
         return args
 

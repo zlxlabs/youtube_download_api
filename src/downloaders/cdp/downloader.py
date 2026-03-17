@@ -743,6 +743,10 @@ class CDPDownloader(BaseDownloader):
         """
         安全获取 PO Token（失败不抛出异常）。
 
+        集成 PotProviderHealthTracker：
+        - pot-provider 不可用时跳过请求（避免无谓等待）
+        - 成功/失败时更新健康状态
+
         Args:
             video_id: 视频 ID
 
@@ -752,12 +756,28 @@ class CDPDownloader(BaseDownloader):
         if not self.settings.cdp_enable_pot_token:
             return None
 
+        from src.downloaders.pot_health import PotProviderHealthTracker
+        tracker = PotProviderHealthTracker.get_instance()
+
+        # pot-provider 不可用时跳过（冷却期内不浪费时间）
+        if not tracker.is_available():
+            logger.debug(
+                f"[cdp] Skipping poToken for {video_id}: "
+                f"provider unavailable (failures: {tracker.consecutive_failures})"
+            )
+            return None
+
         try:
             pot_token = await self._get_pot_token(video_id)
-            if not pot_token:
+            if pot_token:
+                tracker.record_success()
+                return pot_token
+            else:
+                tracker.record_failure()
                 logger.warning(f"[cdp] Failed to get poToken for {video_id}")
-            return pot_token
+                return None
         except Exception as e:
+            tracker.record_failure()
             logger.warning(f"[cdp] poToken acquisition error: {e}")
             return None
 
