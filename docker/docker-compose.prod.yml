@@ -21,8 +21,17 @@ services:
       start_period: 10s
 
   pot-provider:
-    image: brainicism/bgutil-ytdlp-pot-provider
+    # Rust 实现，性能更好、资源占用更低、维护更活跃
+    # API 兼容原版 brainicism/bgutil-ytdlp-pot-provider
+    # 如需切回原版: brainicism/bgutil-ytdlp-pot-provider:1.3.1
+    image: ghcr.io/jim60105/bgutil-pot:latest
     container_name: pot-provider
     restart: unless-stopped
     ports:
       - "${POT_PORT:-4416}:4416"
+    healthcheck:
+      test: [ "CMD", "wget", "-q", "--spider", "http://localhost:4416/ping" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s

@@ -116,7 +116,7 @@ ENV BUILD_TIME=${BUILD_TIME}
 CMD ["sh", "-c", "\
     if [ \"${YTDLP_AUTO_UPDATE:-true}\" = \"true\" ]; then \
         echo '[startup] Checking yt-dlp updates...' && \
-        uv pip install --system --upgrade --no-deps yt-dlp yt-dlp-ejs 2>&1 \
+        uv pip install --system --upgrade --no-deps yt-dlp yt-dlp-ejs bgutil-ytdlp-pot-provider 2>&1 \
         || echo '[startup] yt-dlp update failed, continuing with current version'; \
         echo \"[startup] yt-dlp version: $(python -c 'import yt_dlp; print(yt_dlp.version.__version__)')\"; \
     fi && \
