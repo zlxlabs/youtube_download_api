@@ -26,5 +26,3 @@ services:
     restart: unless-stopped
     ports:
       - "${POT_PORT:-4416}:4416"
-    profiles:
-      - pot

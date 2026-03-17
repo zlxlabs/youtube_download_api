@@ -170,6 +170,26 @@ youtube-audio-api/
 
 **默认优先级**：CDP > yt-dlp > TikHub（音频和字幕下载均以 CDP 为最高优先级）
 
+### 下载链路依赖
+
+```
+CDP 下载器
+  |-- Chrome (remote debugging) : 提供真实浏览器 cookies/headers
+  |-- yt-dlp                    : 使用 cookies 提取音频流 URL 并下载
+  |-- pot-provider              : 生成 GVS PO Token，解决 YouTube 风控实验
+  |      (brainicism/bgutil-ytdlp-pot-provider, 随 docker-compose 自动启动)
+  |-- deno                      : 解决 yt-dlp n challenge (URL 签名解密)
+
+yt-dlp 下载器
+  |-- yt-dlp                    : 独立下载，依赖 cookies + PO Token
+  |-- pot-provider              : 同上
+  |-- deno                      : 同上
+```
+
+> YouTube 正在逐步对部分视频强制要求 GVS PO Token（A/B 实验），
+> 未提供 PO Token 时所有音频格式会被跳过。pot-provider 默认随服务启动，
+> 通过 `CDP_ENABLE_POT_TOKEN=true` 启用。
+
 **详细配置**：[下载器配置](docs/configuration/downloaders.md)
 
 ## 参与贡献
