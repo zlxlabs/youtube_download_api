@@ -16,7 +16,9 @@ dependencies = [
     # yt-dlp 使用预发布版本以支持 curl-cffi 0.14.0
     "curl-cffi>=0.14.0",
     "yt-dlp[default,curl-cffi]>=2026.1.19",
-    "bgutil-ytdlp-pot-provider>=1.3.1",
+    # bgutil PO Token 插件在 Dockerfile CMD 中根据 POT_PROVIDER_TYPE 动态安装
+    # rust: bgutil-ytdlp-pot-provider-rs (from GitHub)
+    # nodejs: bgutil-ytdlp-pot-provider (from PyPI)
     # CDP Downloader (Playwright)
     "playwright>=1.40.0",
     # Database

@@ -7,7 +7,7 @@ Uses pydantic-settings to load and validate configuration from environment varia
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -39,6 +39,10 @@ class Settings(BaseSettings):
     )
 
     # ============ PO Token Service ============
+    pot_provider_type: Literal["rust", "nodejs"] = Field(
+        default="rust",
+        description="PO Token Provider implementation: 'rust' (recommended, lighter) or 'nodejs' (original brainicism)",
+    )
     pot_server_url: str = Field(
         default="http://pot-provider:4416",
         description="PO Token provider server URL",

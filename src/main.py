@@ -185,7 +185,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     ip_ban_breaker = download_worker.ip_ban_breaker if download_worker else None
     await notify_service.notify_startup(__version__, ip_ban_breaker)
 
-    logger.info("Application started successfully")
+    logger.info(
+        f"Application started successfully "
+        f"(pot_provider={settings.pot_provider_type}, pot_token={'enabled' if settings.cdp_enable_pot_token else 'disabled'})"
+    )
 
     yield
 

@@ -59,15 +59,6 @@ wheels = [
 ]
 
 [[package]]
-name = "bgutil-ytdlp-pot-provider"
-version = "1.3.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/ad/3f/fae025f0f4f4e8c40ca24a97f618abba82ad2a221d37ac3df7d6ff705df2/bgutil_ytdlp_pot_provider-1.3.1.tar.gz", hash = "sha256:130635912e2450757438f72068b900076ac1a62d9f26a00afbe6f2ab258e8b25", size = 11466, upload-time = "2026-03-07T00:28:23.234Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/74/5e/c7e388dd92667cb8c1d6ebbef3bd87dd2245a388b6819cbc2bea7c01c1cb/bgutil_ytdlp_pot_provider-1.3.1-py3-none-any.whl", hash = "sha256:e62b21f9b2e4479d59af87a8900387c34892e8d7fdb223f266749a90e0be22de", size = 12125, upload-time = "2026-03-07T00:28:22.004Z" },
-]
-
-[[package]]
 name = "brotli"
 version = "1.2.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1714,7 +1705,6 @@ source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
     { name = "apscheduler" },
-    { name = "bgutil-ytdlp-pot-provider" },
     { name = "cachetools" },
     { name = "curl-cffi" },
     { name = "fastapi" },
@@ -1751,7 +1741,6 @@ dev = [
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.19.0" },
     { name = "apscheduler", specifier = ">=3.10.0" },
-    { name = "bgutil-ytdlp-pot-provider", specifier = ">=1.3.1" },
     { name = "cachetools", specifier = ">=5.3.0" },
     { name = "curl-cffi", specifier = ">=0.14.0" },
     { name = "fastapi", specifier = ">=0.104.0" },

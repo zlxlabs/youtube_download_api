@@ -109,14 +109,35 @@ COPY src/ ./src/
 ARG BUILD_TIME=unknown
 ENV BUILD_TIME=${BUILD_TIME}
 
+# PO Token Provider type: rust (default) or nodejs
+# Controls which bgutil yt-dlp plugin to install at startup
+ENV POT_PROVIDER_TYPE=rust
+
 # Run the application with optional yt-dlp auto-update
 # YTDLP_AUTO_UPDATE: update yt-dlp on startup (default: true)
 # Set to "false" to disable auto-update
 # This helps handle YouTube's frequent player.js changes
 CMD ["sh", "-c", "\
+    if [ \"${POT_PROVIDER_TYPE}\" = \"nodejs\" ]; then \
+        POT_PKG='bgutil-ytdlp-pot-provider'; \
+        POT_PKG_REMOVE='bgutil-ytdlp-pot-provider-rs'; \
+    else \
+        POT_PKG='bgutil-ytdlp-pot-provider-rs'; \
+        POT_PKG_REMOVE='bgutil-ytdlp-pot-provider'; \
+    fi && \
+    echo \"[startup] PO Token Provider: ${POT_PROVIDER_TYPE} (package: ${POT_PKG})\" && \
+    uv pip uninstall --system ${POT_PKG_REMOVE} 2>/dev/null || true && \
+    if [ \"${POT_PROVIDER_TYPE}\" = \"nodejs\" ]; then \
+        uv pip install --system --no-deps ${POT_PKG} 2>&1 \
+        || echo \"[startup] ${POT_PKG} install failed\"; \
+    else \
+        uv pip install --system --no-deps \
+            \"bgutil-ytdlp-pot-provider-rs @ git+https://github.com/jim60105/bgutil-ytdlp-pot-provider-rs.git#subdirectory=plugin\" 2>&1 \
+        || echo '[startup] bgutil-rs plugin install failed'; \
+    fi && \
     if [ \"${YTDLP_AUTO_UPDATE:-true}\" = \"true\" ]; then \
         echo '[startup] Checking yt-dlp updates...' && \
-        uv pip install --system --upgrade --no-deps yt-dlp yt-dlp-ejs bgutil-ytdlp-pot-provider 2>&1 \
+        uv pip install --system --upgrade --no-deps yt-dlp yt-dlp-ejs 2>&1 \
         || echo '[startup] yt-dlp update failed, continuing with current version'; \
         echo \"[startup] yt-dlp version: $(python -c 'import yt_dlp; print(yt_dlp.version.__version__)')\"; \
     fi && \
