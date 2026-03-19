@@ -84,7 +84,6 @@ docker/deploy_targets.json
 docker/push_to_acr.bat
 docker/push_to_acr.sh
 docker/pull_and_deploy.sh
-docker/docker-compose.prod.yml
 build-optimized.bat
 
 # Test scripts (root level only)

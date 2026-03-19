@@ -1,0 +1,31 @@
+version: "3.8"
+
+services:
+  youtube-api:
+    image: youtube-api:latest
+    container_name: youtube-api
+    restart: unless-stopped
+    ports:
+      - "${HOST_PORT:-8000}:8000"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - TZ=Asia/Shanghai
+    env_file:
+      - .env
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  pot-provider:
+    # PO Token Provider (通过 .env 中 POT_PROVIDER_IMAGE 切换实现)
+    # rust (默认): ghcr.io/jim60105/bgutil-pot:latest
+    # nodejs:      brainicism/bgutil-ytdlp-pot-provider:1.3.1
+    image: ${POT_PROVIDER_IMAGE:-ghcr.io/jim60105/bgutil-pot:latest}
+    container_name: pot-provider
+    restart: unless-stopped
+    ports:
+      - "${POT_PORT:-4416}:4416"
