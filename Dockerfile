@@ -132,7 +132,7 @@ CMD ["sh", "-c", "\
         || echo \"[startup] ${POT_PKG} install failed\"; \
     else \
         uv pip install --system --no-deps \
-            \"bgutil-ytdlp-pot-provider-rs @ git+https://github.com/jim60105/bgutil-ytdlp-pot-provider-rs.git#subdirectory=plugin\" 2>&1 \
+            \"bgutil-ytdlp-pot-provider-rs @ https://github.com/jim60105/bgutil-ytdlp-pot-provider-rs/archive/refs/heads/master.tar.gz#subdirectory=plugin\" 2>&1 \
         || echo '[startup] bgutil-rs plugin install failed'; \
     fi && \
     if [ \"${YTDLP_AUTO_UPDATE:-true}\" = \"true\" ]; then \
