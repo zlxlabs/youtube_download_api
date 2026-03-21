@@ -223,6 +223,8 @@ class ComponentStatus(BaseModel):
     database: str = "ok"
     pot_provider: str = "ok"
     disk_space: str = "ok"
+    ip_ban: str = "normal"
+    config_warnings: list[str] = Field(default_factory=list)
 
 
 class QueueStatus(BaseModel):

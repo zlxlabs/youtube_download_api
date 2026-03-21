@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncGenerator
 
+import fastapi.responses
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
@@ -35,6 +36,7 @@ from src.downloaders.manager import DownloaderManager
 from src.services.callback_service import CallbackService
 from src.services.file_service import FileService
 from src.services.manual_upload_service import ManualUploadService
+from src.services.metrics import MetricsCollector
 from src.services.notify import NotificationService
 from src.services.task_service import TaskService
 from src.services.transcode_service import TranscodeService
@@ -54,6 +56,8 @@ download_worker: DownloadWorker | None = None
 worker_task: asyncio.Task | None = None
 scheduler: AsyncIOScheduler | None = None
 startup_time: float = 0
+metrics_collector: MetricsCollector | None = None
+config_warnings: list[str] = []
 
 
 @asynccontextmanager
@@ -66,6 +70,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     global db, task_service, file_service, callback_service, notify_service
     global transcode_service, downloader_manager, manual_upload_service
     global download_worker, worker_task, scheduler, startup_time
+    global metrics_collector, config_warnings
 
     settings = get_settings()
 
@@ -74,6 +79,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     setup_logger(log_dir=log_dir, debug=settings.debug)
 
     logger.info(f"Starting YouTube Audio API v{__version__}")
+
+    # Validate configuration consistency
+    config_warnings = settings.validate_consistency()
+    if config_warnings:
+        for warning in config_warnings:
+            logger.warning(f"[config] {warning}")
+        logger.warning(
+            f"[config] {len(config_warnings)} configuration warning(s) detected"
+        )
+
+    # Initialize metrics collector
+    metrics_collector = MetricsCollector()
+    metrics_collector.set_config_warnings(len(config_warnings))
 
     # Ensure directories exist
     settings.ensure_directories()
@@ -138,6 +156,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         file_service=file_service,
         callback_service=callback_service,
         notify_service=notify_service,
+        metrics_collector=metrics_collector,
     )
 
     # Link downloader manager to notification service (for stats in notifications)
@@ -319,7 +338,7 @@ async def health_check() -> HealthResponse:
 
     Returns service status, component health, and queue statistics.
     """
-    global db, startup_time
+    global db, startup_time, download_worker, config_warnings
 
     settings = get_settings()
     components = ComponentStatus()
@@ -353,6 +372,14 @@ async def health_check() -> HealthResponse:
         if not file_service.check_disk_space(required_mb=100):
             components.disk_space = "low"
 
+    # IP ban state
+    if download_worker and download_worker.ip_ban_breaker:
+        ban_state = download_worker.ip_ban_breaker.get_state()
+        components.ip_ban = ban_state.current_level.value
+
+    # Config warnings (captured at startup)
+    components.config_warnings = config_warnings
+
     # Calculate uptime
     uptime = int(time.time() - startup_time) if startup_time else 0
 
@@ -371,6 +398,53 @@ async def health_check() -> HealthResponse:
         components=components,
         queue=queue,
         uptime=uptime,
+    )
+
+
+# ==================== Metrics Endpoint ====================
+
+
+@app.get(
+    "/metrics",
+    tags=["Monitoring"],
+    summary="Prometheus metrics",
+    description="Expose Prometheus metrics for monitoring.",
+)
+async def metrics_endpoint() -> fastapi.responses.Response:
+    """
+    Prometheus metrics endpoint.
+
+    Syncs latest state from all components before generating output.
+    """
+    global metrics_collector, download_worker, db
+
+    if not metrics_collector:
+        return fastapi.responses.Response(
+            content=b"# Metrics collector not initialized\n",
+            media_type="text/plain; version=0.0.4; charset=utf-8",
+        )
+
+    # Sync latest stats from components before scrape
+    try:
+        if download_worker:
+            manager = download_worker.downloader_manager
+            metrics_collector.sync_downloader_stats(manager.get_stats_summary())
+            metrics_collector.sync_circuit_breaker_states(
+                manager.get_circuit_breaker_states()
+            )
+            ban_state = download_worker.ip_ban_breaker.get_state()
+            metrics_collector.sync_ip_ban_state(ban_state.to_dict())
+
+        if db:
+            queue_stats = await db.get_queue_stats()
+            metrics_collector.sync_queue_stats(queue_stats)
+    except Exception as e:
+        logger.warning(f"Error syncing metrics: {e}")
+
+    output = metrics_collector.generate_metrics()
+    return fastapi.responses.Response(
+        content=output,
+        media_type="text/plain; version=0.0.4; charset=utf-8",
     )
 
 

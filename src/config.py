@@ -510,6 +510,77 @@ class Settings(BaseSettings):
         self.audio_dir.mkdir(parents=True, exist_ok=True)
         self.transcript_dir.mkdir(parents=True, exist_ok=True)
 
+    def validate_consistency(self) -> list[str]:
+        """
+        Validate cross-field configuration consistency.
+
+        Checks for contradictory or suspicious configuration combinations
+        that won't prevent startup but may indicate misconfiguration.
+
+        Returns:
+            List of warning messages (empty if all checks pass)
+        """
+        warnings: list[str] = []
+
+        # CDP enabled but no URLs configured
+        if self.cdp_enabled and not self.cdp_url_list:
+            warnings.append(
+                "CDP_ENABLED=true but CDP_URLS is empty -- "
+                "CDP downloader will not work"
+            )
+
+        # CDP human behavior requires single concurrency
+        if (
+            self.cdp_human_behavior_enabled
+            and self.download_concurrency > 1
+        ):
+            warnings.append(
+                "CDP_HUMAN_BEHAVIOR_ENABLED=true but DOWNLOAD_CONCURRENCY>1 -- "
+                "human behavior simulation requires single concurrency"
+            )
+
+        # CDP in audio priority but CDP not enabled
+        if not self.cdp_enabled and "cdp" in self.audio_download_priority.lower():
+            warnings.append(
+                "CDP appears in AUDIO_DOWNLOAD_PRIORITY but CDP_ENABLED=false -- "
+                "CDP downloader will be skipped"
+            )
+
+        # PO Token enabled but CDP not enabled
+        if self.cdp_enable_pot_token and not self.cdp_enabled:
+            warnings.append(
+                "CDP_ENABLE_POT_TOKEN=true but CDP_ENABLED=false -- "
+                "PO Token has no effect without CDP"
+            )
+
+        # No notification channel configured
+        if not self.wecom_webhook_url:
+            warnings.append(
+                "WECOM_WEBHOOK_URL is empty -- "
+                "no notification channel configured, failures will only appear in logs"
+            )
+
+        # Deprecated config still in use with non-default values
+        if self.task_interval_min != 60 or self.task_interval_max != 600:
+            warnings.append(
+                "TASK_INTERVAL_MIN/MAX are deprecated -- "
+                "use AUDIO_INTERVAL_MIN/MAX and TRANSCRIPT_INTERVAL_MIN/MAX instead"
+            )
+
+        # No downloaders configured for audio
+        audio_priorities = [
+            p.strip()
+            for p in self.audio_download_priority.split(",")
+            if p.strip()
+        ]
+        if not audio_priorities:
+            warnings.append(
+                "AUDIO_DOWNLOAD_PRIORITY is empty -- "
+                "no audio downloaders configured"
+            )
+
+        return warnings
+
 
 @lru_cache
 def get_settings() -> Settings:

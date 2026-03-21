@@ -9,6 +9,7 @@ import asyncio
 import random
 import tempfile
 import traceback
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -35,6 +36,7 @@ from src.db.models import (
 )
 from src.services.callback_service import CallbackService
 from src.services.file_service import FileService
+from src.services.metrics import MetricsCollector
 from src.services.notify import NotificationService
 from src.services.task_service import TaskService
 from src.utils.logger import logger
@@ -55,6 +57,7 @@ class DownloadWorker:
         file_service: FileService,
         callback_service: CallbackService,
         notify_service: NotificationService,
+        metrics_collector: Optional[MetricsCollector] = None,
     ):
         """
         Initialize download worker.
@@ -66,6 +69,7 @@ class DownloadWorker:
             file_service: File service.
             callback_service: Callback service.
             notify_service: Notification service.
+            metrics_collector: Prometheus metrics collector (optional).
         """
         self.db = db
         self.settings = settings
@@ -73,6 +77,7 @@ class DownloadWorker:
         self.file_service = file_service
         self.callback_service = callback_service
         self.notify_service = notify_service
+        self.metrics_collector = metrics_collector
 
         # 使用下载器管理器（支持多下载器降级 + 元数据缓存）
         self.downloader_manager = DownloaderManager(settings, db)
@@ -197,9 +202,81 @@ class DownloadWorker:
 
         return wait_time
 
+    async def _get_executable_task(
+        self,
+    ) -> tuple[Optional[Task], Optional[ExecutionDecision]]:
+        """
+        从队列中获取一个可执行的任务，跳过被 IP 熔断阻止的任务。
+
+        IP ban skip flow:
+          1. Pop task from queue
+          2. Check IP ban compatibility
+          3. If incompatible -> re-queue task, try next one
+          4. If compatible (or probe allowed) -> return task
+          5. If queue exhausted -> sleep(min(ban_remaining, 60s)), return None
+
+        Returns:
+            (task, decision) tuple. task=None if no executable task found.
+        """
+        deferred_tasks: list[tuple[int, str]] = []
+        max_attempts = 20  # 避免无限循环，最多扫描 20 个任务
+
+        try:
+            for _ in range(max_attempts):
+                task = await self.task_service.get_next_task()
+                if not task:
+                    break
+
+                # 检查 IP 熔断状态
+                decision = await self._check_ip_ban_and_decide(task)
+
+                if decision and decision.action == "delay":
+                    # 任务被 IP 熔断阻止，重新入队并尝试下一个
+                    queue_priority = self._calculate_requeue_priority(task)
+                    deferred_tasks.append((queue_priority, task.id))
+                    logger.debug(
+                        f"Task {task.id} skipped due to IP ban "
+                        f"({decision.reason}), trying next task"
+                    )
+                    continue
+
+                # 找到可执行的任务
+                return task, decision
+
+            # 队列中没有可执行的任务
+            if deferred_tasks:
+                ban_remaining = self.ip_ban_breaker.get_remaining_time()
+                sleep_time = min(ban_remaining, 60) if ban_remaining > 0 else 30
+                logger.info(
+                    f"All {len(deferred_tasks)} queued tasks blocked by IP ban, "
+                    f"sleeping {sleep_time}s (ban remaining: {ban_remaining}s)"
+                )
+                await asyncio.sleep(sleep_time)
+
+            return None, None
+
+        finally:
+            # 将所有被跳过的任务放回队列
+            for priority, task_id in deferred_tasks:
+                await self.task_service.task_queue.put((priority, task_id))
+
+    def _calculate_requeue_priority(self, task: Task) -> int:
+        """计算重新入队的优先级（保持原始优先级）。"""
+        from src.db.models import calculate_queue_priority
+        return calculate_queue_priority(
+            user_priority=task.priority,
+            include_audio=task.include_audio,
+            include_transcript=task.include_transcript,
+        )
+
     async def _process_next_task(self) -> None:
         """
         Process the next task from the queue.
+
+        IP ban skip mechanism:
+        When IP ban is active, incompatible tasks (e.g. audio tasks during AUDIO_BANNED)
+        are re-queued and skipped. The worker tries to find a compatible task from the queue.
+        If no compatible task is found, sleeps until the ban remaining time (capped at 60s).
 
         Handles cancellation gracefully - if cancelled during download,
         the task is reset to pending status for retry on next startup.
@@ -208,7 +285,9 @@ class DownloadWorker:
         if not self._running:
             return
 
-        task = await self.task_service.get_next_task()
+        # 尝试从队列中取出一个可执行的任务
+        # IP 熔断时跳过不兼容的任务（重新入队），避免阻塞 Worker
+        task, decision = await self._get_executable_task()
 
         if not task:
             await asyncio.sleep(1)
@@ -216,17 +295,6 @@ class DownloadWorker:
 
         self._current_task = task
         logger.info(f"Processing task: {task.id} ({task.video_id})")
-
-        # 检查 IP 熔断状态
-        decision = await self._check_ip_ban_and_decide(task)
-
-        if decision and decision.action == "delay":
-            # 任务需要延迟
-            logger.info(f"Task {task.id} delayed: {decision.reason}")
-            # TODO: 实现任务延迟逻辑（更新任务的 retry_after 时间）
-            # 暂时先等待一段时间
-            await asyncio.sleep(min(decision.delay_seconds, 60))  # 最多等 60 秒
-            return
 
         # 记录是否是探测尝试
         is_probe = decision.is_probe if decision else False
@@ -264,6 +332,17 @@ class DownloadWorker:
             await self._update_task_completed_with_retry(task.id, result)
 
             logger.info(f"Task {task.id} completed successfully")
+
+            # Record metrics: task completed + lifecycle duration
+            if self.metrics_collector:
+                self.metrics_collector.record_task_completed("completed")
+                now = datetime.now(timezone.utc)
+                if task.created_at and task.started_at:
+                    queue_time = (task.started_at - task.created_at).total_seconds()
+                    self.metrics_collector.record_task_duration("queue", queue_time)
+                if task.started_at:
+                    download_time = (now - task.started_at).total_seconds()
+                    self.metrics_collector.record_task_duration("download", download_time)
 
             # 更新自适应间隔（成功）
             self._on_task_success()
@@ -641,6 +720,10 @@ class DownloadWorker:
             error_code=error.error_code,
             error_message=error.message,
         )
+
+        # Record metrics: task failed
+        if self.metrics_collector:
+            self.metrics_collector.record_task_completed("failed")
 
         task_updated = await self.db.get_task(task.id)
         if task_updated:

@@ -39,6 +39,8 @@ dependencies = [
     "cachetools>=5.3.0",
     # YouTube Data API v3
     "google-api-python-client>=2.100.0",
+    # Monitoring
+    "prometheus-client>=0.20.0",
 ]
 
 [project.optional-dependencies]
