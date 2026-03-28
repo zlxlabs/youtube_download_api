@@ -4,6 +4,10 @@
 用于诊断 TikHub 下载器的连接问题。
 """
 
+import pytest
+pytestmark = pytest.mark.requires_external
+
+
 import asyncio
 import os
 import sys

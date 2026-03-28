@@ -16,7 +16,6 @@ from pydantic import ValidationError
 
 from src.api.schemas import CreateTaskRequest, TaskResponse
 from src.config import Settings
-from src.core.downloader import DownloadResult, TranscriptOnlyResult
 from src.core.worker import DownloadWorker
 from src.db.database import Database
 from src.db.models import FileRecord, FileType, Task, TaskStatus, VideoInfo

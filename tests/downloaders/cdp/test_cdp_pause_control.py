@@ -8,6 +8,10 @@ CDP 视频播放暂停控制 - 本地测试脚本
 4. 验证多任务 Page 管理
 """
 
+import pytest
+pytestmark = pytest.mark.requires_external
+
+
 import asyncio
 import sys
 from pathlib import Path

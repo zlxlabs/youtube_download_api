@@ -15,6 +15,10 @@ CDP 多客户端隔离性测试
    curl http://localhost:9222/json/version
 """
 
+import pytest
+pytestmark = pytest.mark.requires_external
+
+
 import asyncio
 import time
 import sys

@@ -4,6 +4,10 @@
 完整测试从获取字幕 URL 到下载字幕文件的流程。
 """
 
+import pytest
+pytestmark = pytest.mark.requires_external
+
+
 import asyncio
 import os
 import sys

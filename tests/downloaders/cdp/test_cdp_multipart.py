@@ -15,6 +15,10 @@ CDP 分片多线程下载测试脚本。
    uv run python tests/downloaders/cdp/test_cdp_multipart.py
 """
 
+import pytest
+pytestmark = pytest.mark.requires_external
+
+
 import asyncio
 import os
 import sys

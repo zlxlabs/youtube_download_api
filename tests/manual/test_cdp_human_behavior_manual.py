@@ -32,6 +32,10 @@ CDP 人类行为模拟手动测试脚本。
 - 如果启动第二个任务，旧标签页是否被关闭
 """
 
+import pytest
+pytestmark = pytest.mark.manual
+
+
 import asyncio
 import os
 import sys

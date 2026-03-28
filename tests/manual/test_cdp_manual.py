@@ -17,6 +17,10 @@ CDP 下载器手动测试脚本。
    python tests/test_cdp_manual.py
 """
 
+import pytest
+pytestmark = pytest.mark.manual
+
+
 import asyncio
 import os
 import sys

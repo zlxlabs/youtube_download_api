@@ -4,6 +4,10 @@
 演示新的重试逻辑：最多重试 3 次，指数退避 (1s, 2s, 4s)。
 """
 
+import pytest
+pytestmark = pytest.mark.manual
+
+
 import asyncio
 import os
 import sys

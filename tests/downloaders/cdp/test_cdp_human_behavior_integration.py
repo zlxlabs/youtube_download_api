@@ -31,6 +31,8 @@ from src.downloaders.cdp import CDPDownloader
 from src.utils.logger import logger
 
 # 跳过测试如果 Playwright 不可用
+pytestmark = pytest.mark.requires_external
+
 pytest.importorskip("playwright", reason="Playwright is required for CDP tests")
 
 

@@ -4,6 +4,10 @@
 诊断 httpx 客户端的代理使用情况。
 """
 
+import pytest
+pytestmark = pytest.mark.manual
+
+
 import asyncio
 import os
 import sys

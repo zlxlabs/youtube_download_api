@@ -4,6 +4,10 @@
 模拟实际的下载场景，测试完整流程。
 """
 
+import pytest
+pytestmark = pytest.mark.requires_external
+
+
 import asyncio
 import os
 import sys

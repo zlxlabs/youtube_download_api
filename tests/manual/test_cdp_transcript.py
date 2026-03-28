@@ -7,6 +7,10 @@ CDP 下载器字幕下载端到端测试。
     uv run python tests/manual/test_cdp_transcript.py
 """
 
+import pytest
+pytestmark = pytest.mark.manual
+
+
 import asyncio
 import sys
 from pathlib import Path

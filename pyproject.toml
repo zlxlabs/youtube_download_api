@@ -70,9 +70,7 @@ dev = [
     "types-aiofiles>=23.2.0",
 ]
 
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-testpaths = ["tests"]
+# pytest config unified in pytest.ini
 
 [tool.mypy]
 python_version = "3.11"

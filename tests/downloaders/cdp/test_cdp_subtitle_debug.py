@@ -14,6 +14,10 @@ CDP 字幕下载调试测试脚本。
     uv run python tests/downloaders/cdp/test_cdp_subtitle_debug.py
 """
 
+import pytest
+pytestmark = pytest.mark.requires_external
+
+
 import asyncio
 import json
 import os

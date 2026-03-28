@@ -6,6 +6,8 @@ YouTube Data API v3 下载器集成测试。
 
 import pytest
 
+pytestmark = pytest.mark.requires_external
+
 from src.config import get_settings
 from src.downloaders.models import DownloaderType
 from src.downloaders.youtube_data_api_downloader import YoutubeDataApiDownloader

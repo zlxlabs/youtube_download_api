@@ -68,13 +68,16 @@ async def file_service(
 
 
 @pytest.fixture
-def mock_downloader() -> AsyncMock:
-    """Mock yt-dlp downloader."""
-    from src.core.downloader import DownloadResult, TranscriptOnlyResult
+def mock_downloader_manager() -> AsyncMock:
+    """Mock DownloaderManager (current interface used by DownloadWorker)."""
+    from src.downloaders.models import DownloaderResult, VideoMetadata
 
-    downloader = AsyncMock()
-    downloader.download.return_value = DownloadResult(
-        video_info=VideoInfo(
+    manager = AsyncMock()
+    manager.download_with_fallback = AsyncMock(return_value=DownloaderResult(
+        success=True,
+        downloader="cdp",
+        video_metadata=VideoMetadata(
+            video_id="test123",
             title="Test Video",
             author="Test Author",
             duration=60,
@@ -82,30 +85,22 @@ def mock_downloader() -> AsyncMock:
         ),
         audio_path=Path("/tmp/test.m4a"),
         transcript_path=Path("/tmp/test.en.srt"),
-    )
-    # 默认模拟有字幕的情况
-    downloader.extract_transcript_only.return_value = TranscriptOnlyResult(
-        video_info=VideoInfo(
-            title="Test Video",
-            author="Test Author",
-            duration=60,
-            channel_id="UC123456",
-        ),
         has_transcript=True,
-        transcript_path=Path("/tmp/test.en.srt"),
-    )
-    return downloader
+    ))
+    return manager
 
 
 @pytest.fixture
-def mock_downloader_no_transcript() -> AsyncMock:
-    """Mock downloader for videos without transcript."""
-    from src.core.downloader import DownloadResult, TranscriptOnlyResult
+def mock_downloader_manager_no_transcript() -> AsyncMock:
+    """Mock DownloaderManager for videos without transcript."""
+    from src.downloaders.models import DownloaderResult, VideoMetadata
 
-    downloader = AsyncMock()
-    # 下载时没有字幕
-    downloader.download.return_value = DownloadResult(
-        video_info=VideoInfo(
+    manager = AsyncMock()
+    manager.download_with_fallback = AsyncMock(return_value=DownloaderResult(
+        success=True,
+        downloader="cdp",
+        video_metadata=VideoMetadata(
+            video_id="test123",
             title="Test Video No Subs",
             author="Test Author",
             duration=60,
@@ -113,19 +108,9 @@ def mock_downloader_no_transcript() -> AsyncMock:
         ),
         audio_path=Path("/tmp/test.m4a"),
         transcript_path=None,
-    )
-    # 提取字幕时发现没有字幕
-    downloader.extract_transcript_only.return_value = TranscriptOnlyResult(
-        video_info=VideoInfo(
-            title="Test Video No Subs",
-            author="Test Author",
-            duration=60,
-            channel_id="UC123456",
-        ),
         has_transcript=False,
-        transcript_path=None,
-    )
-    return downloader
+    ))
+    return manager
 
 
 @pytest.fixture
