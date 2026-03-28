@@ -1,6 +1,7 @@
 import io
 import shutil
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import UploadFile
@@ -11,30 +12,6 @@ from src.db.models import VideoInfo
 from src.services.file_service import FileService
 from src.services.manual_upload_service import ManualUploadError, ManualUploadService
 from src.services.transcode_service import TranscodeError
-
-
-class DummyMetadataService:
-    async def fetch_youtube_metadata(self, video_url: str, video_id: str) -> VideoInfo:
-        return VideoInfo(title="Test Title", author="Test Author", duration=123)
-
-    def merge_metadata(self, auto_metadata: VideoInfo, manual_metadata: dict | None) -> VideoInfo:
-        result = VideoInfo()
-        if auto_metadata:
-            result.title = auto_metadata.title
-            result.author = auto_metadata.author
-            result.channel_id = auto_metadata.channel_id
-            result.duration = auto_metadata.duration
-            result.description = auto_metadata.description
-            result.upload_date = auto_metadata.upload_date
-            result.view_count = auto_metadata.view_count
-            result.thumbnail = auto_metadata.thumbnail
-
-        if manual_metadata:
-            if manual_metadata.get("title"):
-                result.title = manual_metadata["title"]
-            if manual_metadata.get("author"):
-                result.author = manual_metadata["author"]
-        return result
 
 
 class DummyTranscodeService:
@@ -71,14 +48,21 @@ async def test_manual_upload_success(tmp_path: Path):
     await db.connect()
 
     file_service = FileService(db, settings)
-    metadata_service = DummyMetadataService()
     transcode_service = DummyTranscodeService()
+
+    # Mock DownloaderManager, get_metadata 返回测试元数据
+    downloader_manager = MagicMock()
+    downloader_manager.get_metadata = AsyncMock(return_value={
+        "title": "Test Title",
+        "author": "Test Author",
+        "duration": 123,
+    })
 
     service = ManualUploadService(
         db=db,
         file_service=file_service,
         transcode_service=transcode_service,
-        metadata_service=metadata_service,
+        downloader_manager=downloader_manager,
         settings=settings,
     )
 
@@ -119,14 +103,21 @@ async def test_manual_upload_metadata_cached_on_failure(tmp_path: Path):
     await db.connect()
 
     file_service = FileService(db, settings)
-    metadata_service = DummyMetadataService()
     transcode_service = FailingTranscodeService()
+
+    # Mock DownloaderManager, get_metadata 返回测试元数据
+    downloader_manager = MagicMock()
+    downloader_manager.get_metadata = AsyncMock(return_value={
+        "title": "Test Title",
+        "author": "Test Author",
+        "duration": 123,
+    })
 
     service = ManualUploadService(
         db=db,
         file_service=file_service,
         transcode_service=transcode_service,
-        metadata_service=metadata_service,
+        downloader_manager=downloader_manager,
         settings=settings,
     )
 

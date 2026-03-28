@@ -62,22 +62,25 @@ class TestCleanupOldPages:
         """测试清理多个 Page。"""
         # 模拟 3 个 Page
         page1 = AsyncMock()
-        page1.is_closed.return_value = False
+        page1.is_closed = MagicMock(return_value=False)
         page1.url = "https://www.youtube.com/watch?v=test1"
 
         page2 = AsyncMock()
-        page2.is_closed.return_value = False
+        page2.is_closed = MagicMock(return_value=False)
         page2.url = "https://www.youtube.com/watch?v=test2"
 
         page3 = AsyncMock()
-        page3.is_closed.return_value = False
+        page3.is_closed = MagicMock(return_value=False)
         page3.url = "https://www.youtube.com/watch?v=test3"
+
+        # 注册到 _owned_pages（cleanup_old_pages 只清理 owned pages）
+        simulator._owned_pages = {page1, page2, page3}
 
         context = MagicMock()
         context.pages = [page1, page2, page3]
 
-        # 调用清理
-        await simulator.cleanup_old_pages(context)
+        # 调用清理（keep_last=True 会保留最后一个）
+        kept = await simulator.cleanup_old_pages(context, keep_last=False)
 
         # 验证：所有 Page 都被关闭
         page1.close.assert_called_once()
@@ -87,20 +90,23 @@ class TestCleanupOldPages:
     @pytest.mark.asyncio
     async def test_cleanup_page_already_closed(self, simulator):
         """测试清理已关闭的 Page（不抛异常）。"""
-        # 模拟已关闭的 Page
+        # 模拟已关闭的 Page（is_closed 返回 True）
         page = AsyncMock()
-        page.is_closed.return_value = True
+        page.is_closed = MagicMock(return_value=True)
         page.url = "https://www.youtube.com/watch?v=test"
         page.close.side_effect = Exception("Page already closed")
+
+        # 注册到 _owned_pages
+        simulator._owned_pages = {page}
 
         context = MagicMock()
         context.pages = [page]
 
-        # 调用清理（应该捕获异常）
-        await simulator.cleanup_old_pages(context)
+        # 调用清理（is_closed=True 的页面会被 cleanup 过滤掉）
+        await simulator.cleanup_old_pages(context, keep_last=False)
 
-        # 验证：尝试关闭
-        page.close.assert_called_once()
+        # 验证：is_closed=True 的页面不会被尝试关闭（被过滤了）
+        page.close.assert_not_called()
 
 
 class TestSleepWithPageCheck:

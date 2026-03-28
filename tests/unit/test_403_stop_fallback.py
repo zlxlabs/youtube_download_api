@@ -41,7 +41,8 @@ async def test_403_error_stops_fallback(tmp_path):
     # 创建两个模拟的下载器
     mock_downloader1 = MagicMock()
     mock_downloader1.name = "ytdlp"
-    mock_downloader1.download = AsyncMock(
+    mock_downloader1.supports_resource_download = True
+    mock_downloader1.download_resources = AsyncMock(
         side_effect=DownloaderError(
             message="HTTP 403 Forbidden",
             error_code=ErrorCode.RATE_LIMITED,
@@ -55,17 +56,23 @@ async def test_403_error_stops_fallback(tmp_path):
 
     mock_downloader2 = MagicMock()
     mock_downloader2.name = "tikhub"
-    mock_downloader2.download = AsyncMock()
+    mock_downloader2.supports_resource_download = True
+    mock_downloader2.download_resources = AsyncMock()
     mock_downloader2.should_retry = MagicMock(return_value=False)
     mock_downloader2.should_trigger_circuit_breaker = MagicMock(return_value=False)
 
     # 创建下载器管理器
     mock_settings = MagicMock(spec=Settings)
     mock_settings.circuit_breaker_enabled = False
+    mock_settings.audio_download_priority = "ytdlp,tikhub"
+    mock_settings.transcript_only_priority = "ytdlp,tikhub"
     manager = DownloaderManager(mock_settings)
 
     # 手动设置下载器列表
     manager.downloaders = [mock_downloader1, mock_downloader2]
+
+    # Mock get_metadata 以跳过元数据获取
+    manager.get_metadata = AsyncMock(return_value=None)
 
     # 执行下载（应该在第一个下载器失败后就停止）
     with pytest.raises(AllDownloadersFailed) as exc_info:
@@ -78,10 +85,10 @@ async def test_403_error_stops_fallback(tmp_path):
         )
 
     # 验证：只尝试了第一个下载器（ytdlp）
-    assert mock_downloader1.download.call_count == 1, "应该调用了第一个下载器"
+    assert mock_downloader1.download_resources.call_count == 1, "应该调用了第一个下载器"
 
     # 验证：没有尝试第二个下载器（tikhub）
-    assert mock_downloader2.download.call_count == 0, "不应该调用第二个下载器"
+    assert mock_downloader2.download_resources.call_count == 0, "不应该调用第二个下载器"
 
     # 验证：错误信息中包含第一个下载器的错误
     error = exc_info.value
@@ -96,7 +103,8 @@ async def test_other_errors_continue_fallback(tmp_path):
     # 创建两个模拟的下载器
     mock_downloader1 = MagicMock()
     mock_downloader1.name = "ytdlp"
-    mock_downloader1.download = AsyncMock(
+    mock_downloader1.supports_resource_download = True
+    mock_downloader1.download_resources = AsyncMock(
         side_effect=DownloaderError(
             message="Network timeout",
             error_code=ErrorCode.NETWORK_ERROR,
@@ -110,7 +118,8 @@ async def test_other_errors_continue_fallback(tmp_path):
 
     mock_downloader2 = MagicMock()
     mock_downloader2.name = "tikhub"
-    mock_downloader2.download = AsyncMock(
+    mock_downloader2.supports_resource_download = True
+    mock_downloader2.download_resources = AsyncMock(
         side_effect=DownloaderError(
             message="Another error",
             error_code=ErrorCode.DOWNLOAD_FAILED,
@@ -125,10 +134,15 @@ async def test_other_errors_continue_fallback(tmp_path):
     # 创建下载器管理器
     mock_settings = MagicMock(spec=Settings)
     mock_settings.circuit_breaker_enabled = False
+    mock_settings.audio_download_priority = "ytdlp,tikhub"
+    mock_settings.transcript_only_priority = "ytdlp,tikhub"
     manager = DownloaderManager(mock_settings)
 
     # 手动设置下载器列表
     manager.downloaders = [mock_downloader1, mock_downloader2]
+
+    # Mock get_metadata 以跳过元数据获取
+    manager.get_metadata = AsyncMock(return_value=None)
 
     # 执行下载（应该尝试所有下载器）
     with pytest.raises(AllDownloadersFailed):
@@ -141,10 +155,10 @@ async def test_other_errors_continue_fallback(tmp_path):
         )
 
     # 验证：尝试了第一个下载器
-    assert mock_downloader1.download.call_count == 1, "应该调用了第一个下载器"
+    assert mock_downloader1.download_resources.call_count == 1, "应该调用了第一个下载器"
 
     # 验证：也尝试了第二个下载器（降级）
-    assert mock_downloader2.download.call_count == 1, "应该调用了第二个下载器（降级）"
+    assert mock_downloader2.download_resources.call_count == 1, "应该调用了第二个下载器（降级）"
 
 
 def test_403_error_flag_in_exception():

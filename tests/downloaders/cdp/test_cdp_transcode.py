@@ -23,6 +23,7 @@ def settings():
         api_key="test-key",
         audio_quality=128,
         data_dir=Path("./test_data"),
+        cdp_transcode_to_m4a=True,
     )
 
 
@@ -152,10 +153,10 @@ async def test_download_audio_converts_webm(audio_downloader, tmp_path):
     )
 
     # Mock _download_with_curl_cffi（返回 webm 文件）
-    webm_file = tmp_path / "Test_Video_itag251.webm"
+    webm_file = tmp_path / "Test Video_itag251.webm"
     webm_file.write_text("fake webm content")
 
-    m4a_file = tmp_path / "Test_Video_itag251.m4a"
+    m4a_file = tmp_path / "Test Video_itag251.m4a"
     m4a_file.write_text("fake m4a content")
 
     with patch.object(

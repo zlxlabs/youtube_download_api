@@ -88,12 +88,14 @@ class TestMetadataCompletion:
         manager = DownloaderManager(settings)
 
         # Mock get_metadata 返回完整元数据
+        # 包含 live_broadcast_content 以避免触发二次刷新
         manager.get_metadata = AsyncMock(return_value={
             "title": "Complete Title",
             "author": "Complete Author",
             "channel_id": "CompleteChannel",
             "duration": 200,
             "description": "Complete description",
+            "live_broadcast_content": "none",
         })
 
         # Mock 下载器返回不完整元数据
