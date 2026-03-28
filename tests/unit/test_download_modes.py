@@ -20,6 +20,7 @@ from src.core.downloader import DownloadResult, TranscriptOnlyResult
 from src.core.worker import DownloadWorker
 from src.db.database import Database
 from src.db.models import FileRecord, FileType, Task, TaskStatus, VideoInfo
+from src.downloaders.models import DownloaderResult, VideoMetadata
 from src.services.callback_service import CallbackService
 from src.services.file_service import FileService
 from src.services.notify import NotificationService
@@ -371,7 +372,10 @@ class TestResourceCaching:
 
 
 class TestWorkerExecutionModes:
-    """Test DownloadWorker execution for different modes."""
+    """Test DownloadWorker execution for different modes.
+
+    Worker uses downloader_manager.download_with_fallback() which returns DownloaderResult.
+    """
 
     @pytest_asyncio.fixture
     async def worker_deps(
@@ -391,36 +395,44 @@ class TestWorkerExecutionModes:
             "notify_service": notify_service,
         }
 
+    def _make_metadata(self, video_id: str, title: str = "Test Video") -> VideoMetadata:
+        """Helper to create VideoMetadata."""
+        return VideoMetadata(
+            video_id=video_id,
+            title=title,
+            author="Test Author",
+            duration=60,
+            channel_id="UC123456",
+        )
+
     @pytest.mark.asyncio
     async def test_execute_full_mode_with_transcript(
-        self, worker_deps: dict, mock_downloader: AsyncMock, temp_dir: Path, test_db: Database
+        self, worker_deps: dict, temp_dir: Path, test_db: Database
     ):
         """Test full mode execution when transcript is available."""
         worker = DownloadWorker(**worker_deps)
-        worker.downloader = mock_downloader
 
         video_id = "fullmode123"
         await test_db.get_or_create_video_resource(video_id)
 
         # Create actual temp files for mock to return
         audio_file = temp_dir / "test.m4a"
-        transcript_file = temp_dir / "test.en.json"
+        transcript_file = temp_dir / "test.en.srt"
         audio_file.write_text("mock audio content")
         transcript_file.write_text("mock transcript content")
 
-        # Update mock to return actual file paths
-        mock_downloader.download.return_value = DownloadResult(
-            video_info=VideoInfo(
-                title="Test Video",
-                author="Test Author",
-                duration=60,
-                channel_id="UC123456",
-            ),
+        # Mock downloader_manager.download_with_fallback
+        mock_manager = AsyncMock()
+        mock_manager.download_with_fallback = AsyncMock(return_value=DownloaderResult(
+            success=True,
+            downloader="cdp",
+            video_metadata=self._make_metadata(video_id),
             audio_path=audio_file,
             transcript_path=transcript_file,
-        )
+            has_transcript=True,
+        ))
+        worker.downloader_manager = mock_manager
 
-        # Create task with full mode
         task = Task(
             id="test-task-001",
             video_id=video_id,
@@ -436,35 +448,31 @@ class TestWorkerExecutionModes:
         assert result["transcript_file_id"] is not None
         assert result["reused_audio"] is False
         assert result["reused_transcript"] is False
-        mock_downloader.download.assert_called_once()
-        mock_downloader.extract_transcript_only.assert_not_called()
+        mock_manager.download_with_fallback.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_execute_audio_only_mode(
-        self, worker_deps: dict, mock_downloader: AsyncMock, temp_dir: Path, test_db: Database
+        self, worker_deps: dict, temp_dir: Path, test_db: Database
     ):
         """Test audio-only mode execution."""
         worker = DownloadWorker(**worker_deps)
-        worker.downloader = mock_downloader
 
         video_id = "audioonly123"
         await test_db.get_or_create_video_resource(video_id)
 
-        # Create actual temp file for mock to return
         audio_file = temp_dir / "test2.m4a"
         audio_file.write_text("mock audio content")
 
-        # Update mock to return actual file path (no transcript)
-        mock_downloader.download.return_value = DownloadResult(
-            video_info=VideoInfo(
-                title="Test Video",
-                author="Test Author",
-                duration=60,
-                channel_id="UC123456",
-            ),
+        mock_manager = AsyncMock()
+        mock_manager.download_with_fallback = AsyncMock(return_value=DownloaderResult(
+            success=True,
+            downloader="cdp",
+            video_metadata=self._make_metadata(video_id),
             audio_path=audio_file,
             transcript_path=None,
-        )
+            has_transcript=False,
+        ))
+        worker.downloader_manager = mock_manager
 
         task = Task(
             id="test-task-002",
@@ -481,34 +489,31 @@ class TestWorkerExecutionModes:
         assert result["transcript_file_id"] is None
         assert result["reused_audio"] is False
         assert result["reused_transcript"] is False
-        mock_downloader.download.assert_called_once()
+        mock_manager.download_with_fallback.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_execute_transcript_only_with_available_transcript(
-        self, worker_deps: dict, mock_downloader: AsyncMock, temp_dir: Path, test_db: Database
+        self, worker_deps: dict, temp_dir: Path, test_db: Database
     ):
         """Test transcript-only mode when transcript is available."""
         worker = DownloadWorker(**worker_deps)
-        worker.downloader = mock_downloader
 
         video_id = "subsonly123"
         await test_db.get_or_create_video_resource(video_id)
 
-        # Create actual temp file for mock to return
-        transcript_file = temp_dir / "test3.en.json"
+        transcript_file = temp_dir / "test3.en.srt"
         transcript_file.write_text("mock transcript content")
 
-        # Update mock for transcript-only extraction
-        mock_downloader.extract_transcript_only.return_value = TranscriptOnlyResult(
-            video_info=VideoInfo(
-                title="Test Video",
-                author="Test Author",
-                duration=60,
-                channel_id="UC123456",
-            ),
-            has_transcript=True,
+        mock_manager = AsyncMock()
+        mock_manager.download_with_fallback = AsyncMock(return_value=DownloaderResult(
+            success=True,
+            downloader="cdp",
+            video_metadata=self._make_metadata(video_id),
+            audio_path=None,
             transcript_path=transcript_file,
-        )
+            has_transcript=True,
+        ))
+        worker.downloader_manager = mock_manager
 
         task = Task(
             id="test-task-003",
@@ -525,36 +530,43 @@ class TestWorkerExecutionModes:
         assert result["transcript_file_id"] is not None
         assert result["reused_audio"] is False
         assert result["reused_transcript"] is False
-        # Should call extract_transcript_only, not download
-        mock_downloader.extract_transcript_only.assert_called_once()
-        mock_downloader.download.assert_not_called()
+        mock_manager.download_with_fallback.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_execute_transcript_only_fallback_to_audio(
-        self, worker_deps: dict, mock_downloader_no_transcript: AsyncMock, temp_dir: Path, test_db: Database
+        self, worker_deps: dict, temp_dir: Path, test_db: Database
     ):
         """Test transcript-only mode fallback to audio when no transcript available."""
         worker = DownloadWorker(**worker_deps)
-        worker.downloader = mock_downloader_no_transcript
 
         video_id = "nosubs12345"
         await test_db.get_or_create_video_resource(video_id)
 
-        # Create actual temp file for fallback audio download
         audio_file = temp_dir / "test4.m4a"
         audio_file.write_text("mock audio content")
 
-        # Update mock download to return actual file path
-        mock_downloader_no_transcript.download.return_value = DownloadResult(
-            video_info=VideoInfo(
-                title="Test Video No Subs",
-                author="Test Author",
-                duration=60,
-                channel_id="UC123456",
+        # First call: transcript-only, returns no transcript
+        # Second call: audio fallback
+        mock_manager = AsyncMock()
+        mock_manager.download_with_fallback = AsyncMock(side_effect=[
+            DownloaderResult(
+                success=True,
+                downloader="cdp",
+                video_metadata=self._make_metadata(video_id, "Test Video No Subs"),
+                audio_path=None,
+                transcript_path=None,
+                has_transcript=False,
             ),
-            audio_path=audio_file,
-            transcript_path=None,
-        )
+            DownloaderResult(
+                success=True,
+                downloader="cdp",
+                video_metadata=self._make_metadata(video_id, "Test Video No Subs"),
+                audio_path=audio_file,
+                transcript_path=None,
+                has_transcript=False,
+            ),
+        ])
+        worker.downloader_manager = mock_manager
 
         task = Task(
             id="test-task-004",
@@ -569,17 +581,15 @@ class TestWorkerExecutionModes:
 
         assert result["audio_file_id"] is not None  # Audio downloaded as fallback
         assert result["transcript_file_id"] is None
-        # Should call extract_transcript_only first, then download as fallback
-        mock_downloader_no_transcript.extract_transcript_only.assert_called_once()
-        mock_downloader_no_transcript.download.assert_called_once()
+        # Should call download_with_fallback twice: transcript first, then audio fallback
+        assert mock_manager.download_with_fallback.call_count == 2
 
     @pytest.mark.asyncio
     async def test_execute_with_existing_resources_reuse(
-        self, worker_deps: dict, mock_downloader: AsyncMock, temp_dir: Path, test_db: Database, test_settings: Settings
+        self, worker_deps: dict, temp_dir: Path, test_db: Database, test_settings: Settings
     ):
         """Test that worker reuses existing resources and only downloads missing ones."""
         worker = DownloadWorker(**worker_deps)
-        worker.downloader = mock_downloader
 
         video_id = "reuse123456"
         await test_db.get_or_create_video_resource(video_id)
@@ -604,23 +614,21 @@ class TestWorkerExecutionModes:
         )
         await test_db.create_file(audio_record)
 
-        # Create temp transcript file for mock
-        transcript_file = temp_dir / "new-transcript.en.json"
+        transcript_file = temp_dir / "new-transcript.en.srt"
         transcript_file.write_text("new transcript")
 
-        # Since audio exists, worker will call extract_transcript_only (not download)
-        mock_downloader.extract_transcript_only.return_value = TranscriptOnlyResult(
-            video_info=VideoInfo(
-                title="Test Video",
-                author="Test Author",
-                duration=60,
-                channel_id="UC123456",
-            ),
-            has_transcript=True,
+        # Audio already exists, so only transcript is downloaded
+        mock_manager = AsyncMock()
+        mock_manager.download_with_fallback = AsyncMock(return_value=DownloaderResult(
+            success=True,
+            downloader="cdp",
+            video_metadata=self._make_metadata(video_id),
+            audio_path=None,
             transcript_path=transcript_file,
-        )
+            has_transcript=True,
+        ))
+        worker.downloader_manager = mock_manager
 
-        # Task requests both but audio already exists
         task = Task(
             id="test-task-005",
             video_id=video_id,
