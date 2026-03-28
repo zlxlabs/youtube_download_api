@@ -11,6 +11,7 @@ CDP 资源下载模块。
 import asyncio
 import json
 import random
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
@@ -206,6 +207,155 @@ class AudioDownloader:
         self.settings = settings
         self.downloader_name = downloader_name
         self._transcode_service = TranscodeService()
+
+    @staticmethod
+    def _sanitize_download_headers(headers: Dict[str, str]) -> Dict[str, str]:
+        """
+        清理浏览器捕获的 headers，移除可能与 Range 请求冲突的头。
+
+        浏览器捕获的 googlevideo.com 请求 headers 可能包含
+        range/if-range/if-modified-since 等头，与我们自己设置的
+        Range header 冲突导致 403。
+        """
+        # 需要移除的头（大小写不敏感匹配）
+        remove_keys = {
+            "range", "if-range", "if-modified-since", "if-none-match",
+            "if-match", "content-length", "content-type",
+        }
+        cleaned = {}
+        for k, v in headers.items():
+            if k.lower() not in remove_keys:
+                cleaned[k] = v
+        return cleaned
+
+    # curl_cffi 支持的 Chrome impersonate 版本映射
+    _IMPERSONATE_VERSIONS: Dict[int, str] = {
+        99: "chrome99", 100: "chrome100", 101: "chrome101",
+        104: "chrome104", 107: "chrome107", 110: "chrome110",
+        116: "chrome116", 119: "chrome119", 120: "chrome120",
+        123: "chrome123", 124: "chrome124", 131: "chrome131",
+        133: "chrome133a", 136: "chrome136", 142: "chrome142",
+    }
+    _IMPERSONATE_KEYS = sorted(_IMPERSONATE_VERSIONS.keys())
+
+    @staticmethod
+    def _get_impersonate_target(headers: Dict[str, str]) -> str:
+        """
+        从浏览器 headers 的 User-Agent 中提取 Chrome 版本，
+        生成 curl_cffi 的 impersonate 目标。
+
+        避免硬编码 chrome120 与实际浏览器版本不匹配导致 TLS 指纹差异。
+        """
+        ua = headers.get("user-agent", "") or headers.get("User-Agent", "")
+        match = re.search(r"Chrome/(\d+)", ua)
+        if match:
+            version = int(match.group(1))
+            # 选择最接近的支持版本
+            closest = min(
+                AudioDownloader._IMPERSONATE_KEYS,
+                key=lambda v: abs(v - version),
+            )
+            return AudioDownloader._IMPERSONATE_VERSIONS[closest]
+        return "chrome120"
+
+    @staticmethod
+    def _log_403_diagnostic(
+        response: Any,
+        url: str,
+        headers: Dict[str, str],
+        context: str = "",
+    ):
+        """
+        记录 403 错误的详细诊断信息，帮助定位 YouTube 拒绝原因。
+
+        Args:
+            response: HTTP 响应对象
+            url: 请求 URL
+            headers: 请求 headers
+            context: 上下文描述（如 "chunk 1" 或 "single-thread"）
+        """
+        # 解析 URL 关键参数（不记录完整 URL，太长且含敏感信息）
+        parsed = urlparse(url)
+        params = parse_qs(parsed.query)
+
+        url_diagnostic = {
+            "host": parsed.hostname,
+            "has_n_param": "n" in params,
+            "has_sig": "sig" in params or "lsig" in params,
+            "expire": params.get("expire", ["?"])[0],
+            "itag": params.get("itag", ["?"])[0],
+        }
+
+        # 响应 body（通常包含 YouTube 的拒绝原因）
+        response_body = ""
+        try:
+            response_body = response.text[:500] if hasattr(response, "text") else ""
+        except Exception:
+            response_body = "<unable to read>"
+
+        # 响应 headers
+        resp_headers = {}
+        try:
+            resp_headers = dict(response.headers) if hasattr(response, "headers") else {}
+        except Exception:
+            pass
+
+        # 请求 headers 脱敏（移除 cookie 值，只保留 key）
+        req_header_keys = list(headers.keys())
+        has_cookie = any(k.lower() == "cookie" for k in req_header_keys)
+
+        logger.error(
+            f"[403 Diagnostic] {context}\n"
+            f"  URL info: {url_diagnostic}\n"
+            f"  Request header keys: {req_header_keys} (has_cookie={has_cookie})\n"
+            f"  Response status: {response.status_code}\n"
+            f"  Response headers: {resp_headers}\n"
+            f"  Response body: {response_body}"
+        )
+
+    def _validate_audio_url(self, audio_url: str, video_id: str):
+        """
+        验证 yt-dlp 提取的音频 URL 关键参数完整性。
+
+        检查 n 参数是否存在（n 参数解密失败会导致 403），
+        以及签名参数是否存在。
+        """
+        parsed = urlparse(audio_url)
+        params = parse_qs(parsed.query)
+
+        # 检查 n 参数（YouTube 限速/鉴权关键参数）
+        if "n" not in params:
+            logger.warning(
+                f"[{self.downloader_name}] Audio URL for {video_id} "
+                f"missing 'n' parameter - may cause 403"
+            )
+
+        # 检查签名参数
+        if "sig" not in params and "lsig" not in params:
+            logger.warning(
+                f"[{self.downloader_name}] Audio URL for {video_id} "
+                f"missing signature parameters"
+            )
+
+        # 检查过期时间
+        expire = params.get("expire", [None])[0]
+        if expire:
+            import time
+            try:
+                expire_ts = int(expire)
+                remaining = expire_ts - int(time.time())
+                if remaining < 300:  # 不足 5 分钟
+                    logger.warning(
+                        f"[{self.downloader_name}] Audio URL for {video_id} "
+                        f"expires in {remaining}s - may be too short"
+                    )
+                else:
+                    logger.debug(
+                        f"[{self.downloader_name}] Audio URL for {video_id} "
+                        f"expires in {remaining}s ({remaining // 3600}h {(remaining % 3600) // 60}m)"
+                    )
+            except (ValueError, TypeError):
+                pass
 
     def _build_extractor_args(self, pot_token: Optional[str] = None) -> Dict[str, Any]:
         """
@@ -583,6 +733,8 @@ class AudioDownloader:
                         f"[{self.downloader_name}] Extracted audio: "
                         f"itag={audio_info.itag}, ext={audio_info.ext}"
                     )
+                    # 验证 URL 关键参数完整性
+                    self._validate_audio_url(audio_url, video_id)
                 else:
                     logger.warning(
                         f"[{self.downloader_name}] Audio URL is manifest file, skipping"
@@ -914,15 +1066,20 @@ class AudioDownloader:
                     final_path = await self._convert_to_m4a_if_needed(target_path, output_dir)
                     return final_path
             except DownloaderError as e:
-                # 403 错误：停止尝试，直接抛出（触发 IP 熔断）
                 if e.error_code == ErrorCode.CDP_DOWNLOAD_403:
-                    logger.error(f"[{self.downloader_name}] HTTP 403 detected, stopping download attempts")
-                    raise
-                errors.append(f"curl_cffi_multipart: {e.message}")
-                logger.warning(
-                    f"[{self.downloader_name}] curl_cffi multipart download failed: {e.message}, "
-                    "falling back to single-thread"
-                )
+                    # 分片下载 403：不直接放弃，降级到单线程尝试
+                    # 403 可能是分片 Range 请求方式导致，不一定是 IP 级封锁
+                    errors.append(f"curl_cffi_multipart: {e.message}")
+                    logger.warning(
+                        f"[{self.downloader_name}] Multipart got 403, "
+                        "falling back to single-thread (403 may be Range-specific)"
+                    )
+                else:
+                    errors.append(f"curl_cffi_multipart: {e.message}")
+                    logger.warning(
+                        f"[{self.downloader_name}] curl_cffi multipart download failed: {e.message}, "
+                        "falling back to single-thread"
+                    )
             except Exception as e:
                 errors.append(f"curl_cffi_multipart: {str(e)}")
                 logger.warning(
@@ -945,9 +1102,12 @@ class AudioDownloader:
                     final_path = await self._convert_to_m4a_if_needed(target_path, output_dir)
                     return final_path
             except DownloaderError as e:
-                # 403 错误：停止尝试，直接抛出（触发 IP 熔断）
+                # 单线程也 403：确认是 URL/IP 级问题，直接抛出
                 if e.error_code == ErrorCode.CDP_DOWNLOAD_403:
-                    logger.error(f"[{self.downloader_name}] HTTP 403 detected, stopping download attempts")
+                    logger.error(
+                        f"[{self.downloader_name}] Single-thread also got 403, "
+                        "confirming URL/IP level restriction"
+                    )
                     raise
                 errors.append(f"curl_cffi: {e.message}")
                 logger.warning(f"[{self.downloader_name}] curl_cffi download failed: {e.message}")
@@ -1106,6 +1266,11 @@ class AudioDownloader:
             logger.warning(f"[{self.downloader_name}] curl_cffi not installed, skipping multipart")
             return False
 
+        # 清理浏览器 headers，避免 Range 冲突
+        clean_headers = self._sanitize_download_headers(headers)
+        # 动态匹配 Chrome 版本
+        impersonate_target = self._get_impersonate_target(headers)
+
         # 动态计算分片（2-8MB 随机）
         ranges = self._calculate_dynamic_chunks(expected_size)
         num_chunks = len(ranges)
@@ -1117,7 +1282,8 @@ class AudioDownloader:
         logger.info(
             f"[{self.downloader_name}] Starting multipart download: "
             f"{num_chunks} chunks (2-8MB each), max_concurrent={max_concurrent}, "
-            f"total_size={expected_size / 1024 / 1024:.2f}MB"
+            f"total_size={expected_size / 1024 / 1024:.2f}MB, "
+            f"impersonate={impersonate_target}"
         )
 
         # 分片文件路径映射
@@ -1158,7 +1324,7 @@ class AudioDownloader:
 
                 part_file = part_files[chunk_idx]
                 chunk_size = end - start + 1
-                chunk_headers = headers.copy()
+                chunk_headers = clean_headers.copy()
                 chunk_headers["Range"] = f"bytes={start}-{end}"
 
                 # 检查是否已下载（断点续传）
@@ -1178,7 +1344,7 @@ class AudioDownloader:
                     response = curl_requests.get(
                         url,
                         headers=chunk_headers,
-                        impersonate="chrome120",
+                        impersonate=impersonate_target,  # type: ignore[arg-type]
                         verify=False,
                         timeout=(30, 120),
                         allow_redirects=True,
@@ -1187,6 +1353,12 @@ class AudioDownloader:
 
                     try:
                         if response.status_code == 403:
+                            # 记录详细的 403 诊断信息
+                            AudioDownloader._log_403_diagnostic(
+                                response, url, chunk_headers,
+                                context=f"multipart chunk {chunk_idx} "
+                                        f"(range={start}-{end})",
+                            )
                             raise DownloaderError(
                                 message=f"HTTP 403 for chunk {chunk_idx}",
                                 error_code=ErrorCode.CDP_DOWNLOAD_403,
@@ -1352,7 +1524,13 @@ class AudioDownloader:
             logger.warning(f"[{self.downloader_name}] curl_cffi not installed, skipping")
             return False
 
-        logger.debug(f"[{self.downloader_name}] Attempting download with curl_cffi")
+        # 清理 headers 并动态匹配 Chrome 版本
+        clean_headers = self._sanitize_download_headers(headers)
+        impersonate_target = self._get_impersonate_target(headers)
+        logger.debug(
+            f"[{self.downloader_name}] Attempting download with curl_cffi "
+            f"(impersonate={impersonate_target})"
+        )
 
         temp_path = target_path.with_suffix(target_path.suffix + ".part")
         resume_from = temp_path.stat().st_size if temp_path.exists() else 0
@@ -1363,18 +1541,17 @@ class AudioDownloader:
             return True
 
         # 设置 Range header（断点续传）
-        request_headers = headers.copy()
+        request_headers = clean_headers.copy()
         if resume_from:
             request_headers["Range"] = f"bytes={resume_from}-"
 
         try:
-            # 使用 curl_cffi 流式下载（Chrome 120 TLS 指纹）
             def _curl_cffi_download():
                 """同步流式下载（在线程池中执行）"""
                 response = curl_requests.get(
                     url,
                     headers=request_headers,
-                    impersonate="chrome120",
+                    impersonate=impersonate_target,  # type: ignore[arg-type]
                     verify=False,
                     timeout=(30, 120),
                     allow_redirects=True,
@@ -1384,8 +1561,13 @@ class AudioDownloader:
                 try:
                     # 检查状态码
                     if response.status_code == 403:
+                        # 记录详细的 403 诊断信息
+                        AudioDownloader._log_403_diagnostic(
+                            response, url, request_headers,
+                            context="single-thread download",
+                        )
                         raise DownloaderError(
-                            message=f"HTTP 403 for {url}",
+                            message="HTTP 403 (single-thread)",
                             error_code=ErrorCode.CDP_DOWNLOAD_403,
                             downloader=self.downloader_name,
                             http_status_code=403,
