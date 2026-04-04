@@ -267,6 +267,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except asyncio.CancelledError:
             pass
 
+    # Close all downloaders (HTTP clients, browser instances, etc.)
+    if downloader_manager:
+        try:
+            await downloader_manager.close()
+            logger.info("DownloaderManager closed successfully")
+        except Exception as e:
+            logger.error(f"Error closing DownloaderManager: {e}")
+
     # Close database
     if db:
         await db.disconnect()

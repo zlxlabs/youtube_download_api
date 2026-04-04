@@ -13,9 +13,13 @@ services:
       - TZ=Asia/Shanghai
     env_file:
       - .env
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
-      interval: 30s
+      interval: 60s
       timeout: 10s
       retries: 3
       start_period: 10s

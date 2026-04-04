@@ -132,6 +132,35 @@ class CDPDownloader(BaseDownloader):
                 "or disable human behavior (CDP_HUMAN_BEHAVIOR_ENABLED=false)."
             )
 
+    async def close(self) -> None:
+        """
+        关闭 CDP 下载器，释放所有资源。
+
+        清理顺序：
+        1. 关闭 HumanBehaviorSimulator 持有的 owned pages
+        2. 关闭共享 Browser 实例
+        3. 重置类级别状态
+        """
+        # 关闭 behavior simulator 持有的 owned pages
+        if self._behavior_simulator:
+            for page in list(self._behavior_simulator._owned_pages):
+                try:
+                    if not page.is_closed():
+                        await page.close()
+                except Exception:
+                    pass
+            self._behavior_simulator._owned_pages.clear()
+
+        # 关闭共享 Browser 实例
+        if CDPDownloader._browser is not None:
+            try:
+                await CDPDownloader._browser.close()
+                logger.info("[cdp] Browser closed")
+            except Exception as e:
+                logger.debug(f"[cdp] Error closing browser: {e}")
+            finally:
+                CDPDownloader._browser = None
+
     # ========== BaseDownloader 接口实现 ==========
 
     @property

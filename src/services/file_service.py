@@ -325,7 +325,8 @@ class FileService:
         for dir_path in [self.settings.audio_dir, self.settings.transcript_dir]:
             if dir_path.exists():
                 for subdir in dir_path.iterdir():
-                    if subdir.is_dir() and not any(subdir.iterdir()):
+                    # next() 只检查第一个条目即返回，避免 generator 持有 fd
+                    if subdir.is_dir() and next(subdir.iterdir(), None) is None:
                         try:
                             subdir.rmdir()
                             logger.debug(f"Removed empty directory: {subdir}")
@@ -334,19 +335,75 @@ class FileService:
 
     def get_disk_usage(self) -> dict[str, int]:
         """
-        Get disk usage statistics.
+        Get disk usage statistics (用于 admin 面板展示).
+
+        注意: 此方法会扫描目录计算大小，不适合在 health check 等高频路径调用。
 
         Returns:
             Dictionary with usage statistics.
         """
         audio_size = self._get_dir_size(self.settings.audio_dir)
         transcript_size = self._get_dir_size(self.settings.transcript_dir)
+        free_space = self._get_free_space_bytes()
 
-        # Get disk free space
+        return {
+            "audio_size": audio_size,
+            "transcript_size": transcript_size,
+            "total_size": audio_size + transcript_size,
+            "free_space": free_space,
+        }
+
+    def _get_dir_size(self, dir_path: Path) -> int:
+        """
+        Get total size of directory using os.scandir (fd-safe).
+
+        使用 os.scandir + 递归栈替代 rglob，避免同时打开过多 fd。
+        每层目录的 scandir iterator 在遍历完后自动关闭。
+
+        Args:
+            dir_path: Directory path.
+
+        Returns:
+            Total size in bytes.
+        """
+        if not dir_path.exists():
+            return 0
+
+        import os
+
+        total = 0
+        # 用显式栈替代递归，避免深层目录的栈溢出
+        dirs_to_scan = [str(dir_path)]
+        while dirs_to_scan:
+            current = dirs_to_scan.pop()
+            try:
+                with os.scandir(current) as entries:
+                    for entry in entries:
+                        try:
+                            if entry.is_file(follow_symlinks=False):
+                                total += entry.stat(follow_symlinks=False).st_size
+                            elif entry.is_dir(follow_symlinks=False):
+                                dirs_to_scan.append(entry.path)
+                        except OSError:
+                            pass
+            except (OSError, PermissionError):
+                # 目录不可访问则跳过
+                pass
+
+        return total
+
+    def _get_free_space_bytes(self) -> int:
+        """
+        Get free disk space in bytes using OS-level API (O(1), no directory scan).
+
+        Returns:
+            Free space in bytes, 0 if unable to determine.
+        """
+        import os
+
         try:
-            import os
             stat = os.statvfs(self.data_dir)
-            free_space = stat.f_bavail * stat.f_frsize
+            return stat.f_bavail * stat.f_frsize
         except (OSError, AttributeError):
             # Windows fallback
             try:
@@ -358,43 +415,15 @@ class FileService:
                     None,
                     ctypes.pointer(free_bytes),
                 )
-                free_space = free_bytes.value
+                return free_bytes.value
             except Exception:
-                free_space = 0
-
-        return {
-            "audio_size": audio_size,
-            "transcript_size": transcript_size,
-            "total_size": audio_size + transcript_size,
-            "free_space": free_space,
-        }
-
-    def _get_dir_size(self, dir_path: Path) -> int:
-        """
-        Get total size of directory.
-
-        Args:
-            dir_path: Directory path.
-
-        Returns:
-            Total size in bytes.
-        """
-        if not dir_path.exists():
-            return 0
-
-        total = 0
-        for file in dir_path.rglob("*"):
-            if file.is_file():
-                try:
-                    total += file.stat().st_size
-                except OSError:
-                    pass
-
-        return total
+                return 0
 
     def check_disk_space(self, required_mb: int = 100) -> bool:
         """
         Check if sufficient disk space is available.
+
+        直接用 OS API 获取可用空间，不扫描目录。O(1) 操作。
 
         Args:
             required_mb: Required free space in MB.
@@ -402,6 +431,5 @@ class FileService:
         Returns:
             True if sufficient space available.
         """
-        usage = self.get_disk_usage()
-        free_mb = usage["free_space"] / (1024 * 1024)
+        free_mb = self._get_free_space_bytes() / (1024 * 1024)
         return free_mb >= required_mb

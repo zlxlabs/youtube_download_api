@@ -1001,7 +1001,11 @@ class DownloaderManager:
                 downloader.reset_cancel()
 
     async def close(self) -> None:
-        """关闭所有下载器（释放资源）。"""
+        """关闭所有下载器（释放资源）。异常隔离，确保每个 downloader 都有机会被清理。"""
         for downloader in self.downloaders:
             if hasattr(downloader, "close"):
-                await downloader.close()
+                try:
+                    await downloader.close()
+                    logger.info(f"Downloader {downloader.name} closed")
+                except Exception as e:
+                    logger.error(f"Error closing downloader {downloader.name}: {e}")

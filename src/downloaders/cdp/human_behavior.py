@@ -184,6 +184,7 @@ class HumanBehaviorSimulator:
                 logger.debug(f"[cdp] Could not trigger playback for headers extraction: {e}")
 
             # 使用 CDP 获取 cookies（加超时保护）
+            cdp_session = None
             try:
                 cdp_session = await asyncio.wait_for(context.new_cdp_session(page), timeout=10)
                 cookies_result = await asyncio.wait_for(
@@ -193,6 +194,13 @@ class HumanBehaviorSimulator:
             except asyncio.TimeoutError:
                 logger.warning("[cdp] CDP session/cookies timed out, using empty cookies")
                 cookies = []
+            finally:
+                # 必须 detach CDP session，否则 WebSocket fd 泄漏
+                if cdp_session is not None:
+                    try:
+                        await cdp_session.detach()
+                    except Exception:
+                        pass
 
             # 写入 cookie 文件
             cookie_file = self.settings.data_dir / "tmp" / f"{task_id}.cookies.txt"
