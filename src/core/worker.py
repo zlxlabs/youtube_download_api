@@ -728,12 +728,19 @@ class DownloadWorker:
         task_updated = await self.db.get_task(task.id)
         if task_updated:
             # 提取失败的下载器列表（如果是 AllDownloadersFailed 错误）
+            # errors 格式: ["ytdlp: error message", "tikhub: error message"]
+            # 注意: 快速失败场景（如直播检测）errors 不含下载器名称，需过滤
             failed_downloaders = None
             if isinstance(error, AllDownloadersFailed):
-                # errors 格式: ["ytdlp: error message", "tikhub: error message"]
-                failed_downloaders = [
-                    err.split(":")[0].strip() for err in error.errors if ":" in err
+                known_downloaders = {"cdp", "ytdlp", "tikhub"}
+                parsed = [
+                    err.split(":")[0].strip()
+                    for err in error.errors
+                    if ":" in err
                 ]
+                failed_downloaders = [
+                    name for name in parsed if name in known_downloaders
+                ] or None
 
             await self.notify_service.notify_failed(
                 task_updated, error.message, failed_downloaders=failed_downloaders

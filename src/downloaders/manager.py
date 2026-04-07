@@ -411,8 +411,8 @@ class DownloaderManager:
                 logger.warning(
                     f"Video {video_id} is a live broadcast (status: {live_status}), skipping download"
                 )
-                raise AllDownloadersFailed(
-                    errors=[f"Video is a live broadcast (status: {live_status}), not available for download"],
+                raise DownloaderError(
+                    message=f"Video is a live broadcast (status: {live_status}), not available for download",
                     error_code=ErrorCode.VIDEO_LIVE_STREAM,
                 )
 
