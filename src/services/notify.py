@@ -22,6 +22,32 @@ EXPECTED_VIDEO_ERRORS = {
     ErrorCode.VIDEO_AGE_RESTRICTED,  # 年龄限制
     ErrorCode.VIDEO_LIVE_STREAM,  # 直播流（未开始的直播等）
 }
+
+# 各错误码对应的建议操作
+ERROR_SUGGESTIONS: dict[ErrorCode, str] = {
+    # 可直接重试
+    ErrorCode.CDP_DOWNLOAD_403: "CDN 节点偶发限流，**直接重试**通常可解决",
+    ErrorCode.CDP_DOWNLOAD_TIMEOUT: "下载超时，**直接重试**",
+    ErrorCode.CDP_DOWNLOAD_FAILED: "下载失败，**直接重试**；若持续失败请检查服务日志",
+    ErrorCode.NETWORK_ERROR: "网络异常，**直接重试**；若持续失败请检查代理连通性",
+    ErrorCode.TASK_TIMEOUT: "任务超时，**直接重试**",
+    ErrorCode.RATE_LIMITED: "请求频率过高，等待几分钟后**重试**",
+    # 视频本身问题，无法解决
+    ErrorCode.VIDEO_UNAVAILABLE: "视频已删除或不存在，无法下载",
+    ErrorCode.VIDEO_PRIVATE: "私密视频，无法下载",
+    ErrorCode.VIDEO_REGION_BLOCKED: "视频在当前地区受限，无法下载",
+    ErrorCode.VIDEO_AGE_RESTRICTED: "年龄限制视频，需要有效的已登录 Cookie",
+    ErrorCode.VIDEO_LIVE_STREAM: "直播视频暂不支持下载",
+    # 系统/环境问题，需要人工介入
+    ErrorCode.CDP_CONNECTION_FAILED: "Chrome 连接失败，检查 Chrome 是否正在运行",
+    ErrorCode.CDP_CONNECTION_TIMEOUT: "Chrome 连接超时，检查 Chrome 状态和网络",
+    ErrorCode.CDP_CHROME_NOT_READY: "Chrome 未就绪，稍等后重试或重启 Chrome",
+    ErrorCode.CDP_NO_COOKIES: "Cookie 获取失败，检查 Chrome 是否已登录 YouTube",
+    ErrorCode.CDP_YTDLP_FAILED: "yt-dlp 解析失败，可尝试**重试**；若持续失败请更新 yt-dlp",
+    ErrorCode.CDP_NSIG_FAILED: "n-sig 解密失败，请更新 yt-dlp 版本",
+    ErrorCode.CDP_SIZE_MISMATCH: "文件完整性校验失败，**直接重试**",
+    ErrorCode.CDP_TRANSCODE_FAILED: "音频转码失败，检查 ffmpeg 是否正常",
+}
 from src.utils.helpers import format_duration, format_timedelta
 from src.utils.logger import logger
 
@@ -695,6 +721,10 @@ class NotificationService:
                 if open_circuits:
                     circuit_breaker_info = f"🔌 **Circuit Open**: {', '.join(c.upper() for c in open_circuits)}\n"
 
+            # 根据错误码获取建议操作
+            suggestion = ERROR_SUGGESTIONS.get(task.error_code, "")
+            suggestion_section = f"\n> {suggestion}\n" if suggestion else ""
+
             content = f"""# {title_emoji} {title_text}
 
 🎬 **Video**: {title}
@@ -702,7 +732,7 @@ class NotificationService:
 
 💥 **Error Code**: `{error_code}`
 📋 **Error Message**: {error}
-
+{suggestion_section}
 {downloader_info}{circuit_breaker_info}📅 **Created**: {created_time}
 ▶️ **Started**: {started_time}
 ⏳ **Wait Time**: {wait_time}
