@@ -209,6 +209,54 @@ class AudioDownloader:
         self._transcode_service = TranscodeService()
 
     @staticmethod
+    def _get_cdn_fallback_urls(url: str) -> List[str]:
+        """
+        解析 googlevideo.com URL 中的 mn 参数，生成备用 CDN 节点 URL 列表。
+
+        YouTube CDN URL 格式：
+          https://rr{N}---{node}.googlevideo.com/videoplayback?..&mn={node1},{node2}&..
+
+        mn 参数列出所有可用节点，URL 签名（sig/lsig）不绑定 hostname，
+        可直接替换 hostname 切换节点，无需重新提取 URL。
+
+        Args:
+            url: 原始 googlevideo.com 音频 URL
+
+        Returns:
+            切换到各备用节点后的 URL 列表，若无备用节点则返回空列表
+        """
+        parsed = urlparse(url)
+        if not parsed.hostname or "googlevideo.com" not in parsed.hostname:
+            return []
+
+        # 提取 mn 参数（备用节点列表）
+        params = parse_qs(parsed.query)
+        mn_raw = params.get("mn", [""])[0]
+        if not mn_raw:
+            return []
+        mn_nodes = [n for n in mn_raw.split(",") if n]
+        if len(mn_nodes) <= 1:
+            return []
+
+        # 从当前 hostname 提取 rr{N} 前缀
+        rr_match = re.match(r"(rr\d+)---(.+)\.googlevideo\.com", parsed.hostname)
+        if not rr_match:
+            return []
+        rr_prefix = rr_match.group(1)
+        current_node = rr_match.group(2)
+
+        # 为每个备用节点生成替换 hostname 后的 URL
+        alternatives = []
+        for node in mn_nodes:
+            if node == current_node:
+                continue
+            new_host = f"{rr_prefix}---{node}.googlevideo.com"
+            new_netloc = parsed.netloc.replace(parsed.hostname, new_host)
+            new_url = url.replace(parsed.netloc, new_netloc, 1)
+            alternatives.append(new_url)
+        return alternatives
+
+    @staticmethod
     def _sanitize_download_headers(headers: Dict[str, str]) -> Dict[str, str]:
         """
         清理浏览器捕获的 headers，移除可能与 Range 请求冲突的头。
@@ -1103,12 +1151,10 @@ class AudioDownloader:
                     return final_path
             except DownloaderError as e:
                 if e.error_code == ErrorCode.CDP_DOWNLOAD_403:
-                    # 单线程也 403：curl-cffi 被拒，但 yt-dlp 使用不同 HTTP 栈可能成功
-                    # 例如：PO Token 导致路由到对 curl-cffi 更严格的 CDN 节点
                     errors.append(f"curl_cffi: {e.message}")
                     logger.warning(
                         f"[{self.downloader_name}] Single-thread also got 403, "
-                        "falling back to yt-dlp (different HTTP stack may succeed)"
+                        "trying alternative CDN nodes"
                     )
                 else:
                     errors.append(f"curl_cffi: {e.message}")
@@ -1116,6 +1162,39 @@ class AudioDownloader:
             except Exception as e:
                 errors.append(f"curl_cffi: {str(e)}")
                 logger.warning(f"[{self.downloader_name}] curl_cffi download failed: {e}")
+
+        # 2.5. CDN 节点切换：解析 mn 参数，依次尝试备用节点
+        # YouTube 在 URL 中内嵌多个可用节点，签名不绑定 hostname，可直接替换
+        if self.settings.cdp_use_curl_cffi:
+            fallback_urls = self._get_cdn_fallback_urls(audio_info.url)
+            for alt_url in fallback_urls:
+                alt_host = urlparse(alt_url).hostname or alt_url[:50]
+                logger.info(
+                    f"[{self.downloader_name}] Trying alternative CDN node: {alt_host}"
+                )
+                try:
+                    success = await self._download_with_curl_cffi(
+                        url=alt_url,
+                        target_path=target_path,
+                        expected_size=audio_info.filesize,
+                        headers=headers,
+                    )
+                    if success:
+                        logger.info(
+                            f"[{self.downloader_name}] Downloaded via alternative CDN node: {alt_host}"
+                        )
+                        final_path = await self._convert_to_m4a_if_needed(target_path, output_dir)
+                        return final_path
+                except DownloaderError as e:
+                    errors.append(f"cdn_fallback({alt_host}): {e.message}")
+                    logger.warning(
+                        f"[{self.downloader_name}] Alternative CDN node {alt_host} also got 403"
+                    )
+                except Exception as e:
+                    errors.append(f"cdn_fallback({alt_host}): {str(e)}")
+                    logger.warning(
+                        f"[{self.downloader_name}] Alternative CDN node {alt_host} failed: {e}"
+                    )
 
         # 3. 兜底：yt-dlp 直接下载（使用 cookies）
         logger.warning(f"[{self.downloader_name}] Falling back to yt-dlp download")
