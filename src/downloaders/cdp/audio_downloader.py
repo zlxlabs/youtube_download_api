@@ -1102,15 +1102,17 @@ class AudioDownloader:
                     final_path = await self._convert_to_m4a_if_needed(target_path, output_dir)
                     return final_path
             except DownloaderError as e:
-                # 单线程也 403：确认是 URL/IP 级问题，直接抛出
                 if e.error_code == ErrorCode.CDP_DOWNLOAD_403:
-                    logger.error(
+                    # 单线程也 403：curl-cffi 被拒，但 yt-dlp 使用不同 HTTP 栈可能成功
+                    # 例如：PO Token 导致路由到对 curl-cffi 更严格的 CDN 节点
+                    errors.append(f"curl_cffi: {e.message}")
+                    logger.warning(
                         f"[{self.downloader_name}] Single-thread also got 403, "
-                        "confirming URL/IP level restriction"
+                        "falling back to yt-dlp (different HTTP stack may succeed)"
                     )
-                    raise
-                errors.append(f"curl_cffi: {e.message}")
-                logger.warning(f"[{self.downloader_name}] curl_cffi download failed: {e.message}")
+                else:
+                    errors.append(f"curl_cffi: {e.message}")
+                    logger.warning(f"[{self.downloader_name}] curl_cffi download failed: {e.message}")
             except Exception as e:
                 errors.append(f"curl_cffi: {str(e)}")
                 logger.warning(f"[{self.downloader_name}] curl_cffi download failed: {e}")
