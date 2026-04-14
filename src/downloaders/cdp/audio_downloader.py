@@ -1730,12 +1730,7 @@ class AudioDownloader:
             "no_warnings": True,
             "outtmpl": outtmpl,
             "noplaylist": True,
-            # 此处故意不使用 bgutil/PO token 配置：
-            # ios client 不需要 GVS PO Token，且 YouTube 对 ios 请求的
-            # CDN 路由策略不同，可绕过 web_creator + PO token 导致的 403。
-            "extractor_args": {
-                "youtube": {"player_client": ["ios"]},
-            },
+            "extractor_args": self._build_extractor_args(),
         }
 
         try:
