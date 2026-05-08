@@ -77,6 +77,7 @@ class CDPDownloader(BaseDownloader):
     """
 
     # ========== 类级别共享状态 ==========
+    _playwright: Optional[object] = None  # Playwright client (node driver)
     _browser: Optional[Browser] = None
     _browser_lock: Optional[asyncio.Lock] = None  # 延迟初始化
     _last_health_check: float = 0
@@ -160,6 +161,16 @@ class CDPDownloader(BaseDownloader):
                 logger.debug(f"[cdp] Error closing browser: {e}")
             finally:
                 CDPDownloader._browser = None
+
+        # 停止 Playwright client (释放 node driver 进程)
+        if CDPDownloader._playwright is not None:
+            try:
+                await CDPDownloader._playwright.stop()
+                logger.info("[cdp] Playwright driver stopped")
+            except Exception as e:
+                logger.debug(f"[cdp] Error stopping playwright: {e}")
+            finally:
+                CDPDownloader._playwright = None
 
     # ========== BaseDownloader 接口实现 ==========
 
@@ -611,6 +622,16 @@ class CDPDownloader(BaseDownloader):
                     )
                     CDPDownloader._browser = None
 
+            # 停止旧的 Playwright driver (防止 node 进程累积)
+            if CDPDownloader._playwright is not None:
+                try:
+                    await CDPDownloader._playwright.stop()
+                    logger.debug("[cdp] Stopped old playwright driver before reconnect")
+                except Exception as e:
+                    logger.debug(f"[cdp] Error stopping old playwright: {e}")
+                finally:
+                    CDPDownloader._playwright = None
+
             # 需要建立新连接
             cdp_urls = self.settings.cdp_url_list
 
@@ -634,12 +655,21 @@ class CDPDownloader(BaseDownloader):
                 # 尝试连接
                 try:
                     logger.info(f"[cdp] Connecting to {cdp_url}")
-                    playwright = await async_playwright().start()
-                    browser = await playwright.chromium.connect_over_cdp(
-                        cdp_url, timeout=self.settings.cdp_timeout * 1000
-                    )
+                    pw_instance = await async_playwright().start()
+                    try:
+                        browser = await pw_instance.chromium.connect_over_cdp(
+                            cdp_url, timeout=self.settings.cdp_timeout * 1000
+                        )
+                    except Exception:
+                        # 连接失败时立即清理 playwright driver
+                        try:
+                            await pw_instance.stop()
+                        except Exception:
+                            pass
+                        raise
 
                     # 更新全局状态
+                    CDPDownloader._playwright = pw_instance
                     CDPDownloader._browser = browser
 
                     # 更新实例健康状态
