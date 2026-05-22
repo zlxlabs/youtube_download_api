@@ -17,6 +17,11 @@ services:
       nofile:
         soft: 65536
         hard: 65536
+    # 内存上限：防止潜在泄漏蔓延到宿主机
+    # memswap_limit == mem_limit 即禁用 swap：泄漏时快速 OOMKill 后由 restart 拉起
+    mem_limit: 2g
+    memswap_limit: 2g
+    mem_reservation: 512m
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
       interval: 60s
