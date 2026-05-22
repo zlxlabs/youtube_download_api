@@ -5,7 +5,15 @@ Aggregates metrics from various components (DownloaderManager, IPBanCircuitBreak
 TaskService) and exposes them via prometheus-client for /metrics endpoint scraping.
 """
 
+import os
 from typing import Optional
+
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:  # pragma: no cover - 仅在依赖缺失时触发
+    PSUTIL_AVAILABLE = False
+    psutil = None  # type: ignore
 
 from prometheus_client import (
     CollectorRegistry,
@@ -16,6 +24,25 @@ from prometheus_client import (
 )
 
 from src.utils.logger import logger
+
+# 子进程分类：用于聚合 child_process_count 指标
+# 顺序敏感：先匹配更具体的关键字
+_CHILD_PROCESS_KEYWORDS: tuple[tuple[str, str], ...] = (
+    ("yt-dlp", "yt-dlp"),
+    ("yt_dlp", "yt-dlp"),
+    ("node", "node"),
+    ("chromium", "chrome"),
+    ("chrome", "chrome"),
+)
+
+
+def _classify_child_process(name: str) -> str:
+    """根据进程名归类到固定 type，未知归为 other。"""
+    lowered = name.lower()
+    for keyword, typ in _CHILD_PROCESS_KEYWORDS:
+        if keyword in lowered:
+            return typ
+    return "other"
 
 
 class MetricsCollector:
@@ -102,6 +129,30 @@ class MetricsCollector:
             registry=self.registry,
         )
 
+        # -- Long-running runtime metrics（内存/资源泄漏可观测性）--
+        self.process_rss_bytes = Gauge(
+            "ytdl_process_rss_bytes",
+            "Process resident set size in bytes",
+            registry=self.registry,
+        )
+        self.dict_size = Gauge(
+            "ytdl_dict_size",
+            "Tracked container size by name (leak surveillance)",
+            ["name"],
+            registry=self.registry,
+        )
+        self.child_process_count = Gauge(
+            "ytdl_child_process_count",
+            "Child process count by type",
+            ["type"],
+            registry=self.registry,
+        )
+
+        # 缓存 psutil.Process 实例，避免每次 syscall 重新打开
+        self._process: Optional["psutil.Process"] = (
+            psutil.Process(os.getpid()) if PSUTIL_AVAILABLE else None
+        )
+
         # Internal tracking: last synced downloader stats snapshot
         # Used to compute deltas for counter increments
         self._last_downloader_stats: dict[str, dict[str, int]] = {}
@@ -179,6 +230,54 @@ class MetricsCollector:
         self.task_queue_depth.labels(priority="downloading").set(
             queue_stats.get("downloading", 0)
         )
+
+    def sync_runtime_state(self, task_queue_size: Optional[int] = None) -> None:
+        """收集长期运行可观测性指标：RSS、关键 dict 大小、子进程数。
+
+        所有 psutil 调用都吞异常并跳过对应指标，保证 /metrics 端点稳定。
+
+        Args:
+            task_queue_size: 任务队列当前深度（asyncio.PriorityQueue.qsize），
+                由调用方在 scrape 前传入，避免该模块直接依赖 task_service。
+        """
+        # 1) 进程 RSS
+        if self._process is not None:
+            try:
+                rss = self._process.memory_info().rss
+                self.process_rss_bytes.set(rss)
+            except Exception as e:
+                logger.debug(f"[metrics] failed to read RSS: {e}")
+
+        # 2) 追踪关键 dict 大小（防累积告警）
+        try:
+            from src.downloaders.cdp.downloader import CDPDownloader
+
+            self.dict_size.labels(name="notification_cache").set(
+                len(CDPDownloader._notification_cache)
+            )
+            self.dict_size.labels(name="cdp_health_status").set(
+                len(CDPDownloader._cdp_health_status)
+            )
+        except Exception as e:
+            logger.debug(f"[metrics] failed to read CDP dict sizes: {e}")
+
+        if task_queue_size is not None:
+            self.dict_size.labels(name="task_queue").set(task_queue_size)
+
+        # 3) 子进程计数（防 node driver / yt-dlp 进程泄漏回归）
+        counts = {"yt-dlp": 0, "node": 0, "chrome": 0, "other": 0}
+        if self._process is not None:
+            try:
+                for child in self._process.children(recursive=True):
+                    try:
+                        counts[_classify_child_process(child.name())] += 1
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):  # type: ignore[union-attr]
+                        # 进程可能在迭代中消失，跳过即可
+                        continue
+            except Exception as e:
+                logger.debug(f"[metrics] failed to enumerate children: {e}")
+        for typ, count in counts.items():
+            self.child_process_count.labels(type=typ).set(count)
 
     def record_task_completed(self, status: str) -> None:
         """Record a task completion with its final status."""

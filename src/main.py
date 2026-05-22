@@ -9,7 +9,7 @@ import sys
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 
 import fastapi.responses
 import httpx
@@ -446,6 +446,16 @@ async def metrics_endpoint() -> fastapi.responses.Response:
         if db:
             queue_stats = await db.get_queue_stats()
             metrics_collector.sync_queue_stats(queue_stats)
+
+        # 长期运行可观测性：RSS / 关键 dict size / 子进程数
+        # 任务队列深度从 task_service 取（避免 metrics 模块反向依赖 task_service）
+        queue_size: Optional[int] = None
+        try:
+            if task_service is not None:
+                queue_size = task_service.task_queue.qsize()
+        except Exception:
+            queue_size = None
+        metrics_collector.sync_runtime_state(task_queue_size=queue_size)
     except Exception as e:
         logger.warning(f"Error syncing metrics: {e}")
 

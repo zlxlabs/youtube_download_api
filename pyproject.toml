@@ -41,6 +41,8 @@ dependencies = [
     "google-api-python-client>=2.100.0",
     # Monitoring
     "prometheus-client>=0.20.0",
+    # Process / memory introspection for runtime metrics
+    "psutil>=5.9.0",
 ]
 
 [project.optional-dependencies]
