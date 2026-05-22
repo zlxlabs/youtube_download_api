@@ -49,6 +49,34 @@ class HumanBehaviorSimulator:
         self.settings = settings
         self._owned_pages: set = set()  # 追踪本项目创建的页面
 
+    @staticmethod
+    def _safe_is_closed(page) -> bool:
+        """容错判断 Page 是否已关闭。
+
+        Page.is_closed() 在 CDP session 断开等异常情况下会抛错。
+        我们将这类异常视为"已关闭"，避免阻塞清理逻辑。
+        """
+        try:
+            return bool(page.is_closed())
+        except Exception:
+            return True
+
+    def _sweep_dead_pages(self) -> int:
+        """清理 _owned_pages 中已关闭或失效的 Page 引用。
+
+        必须在所有 _owned_pages 读路径前调用，防止外部关闭的 Page
+        因为引用没被 discard 而长期累积。
+
+        Returns:
+            被剔除的引用数。
+        """
+        live = {p for p in self._owned_pages if not self._safe_is_closed(p)}
+        removed = len(self._owned_pages) - len(live)
+        if removed:
+            self._owned_pages = live
+            logger.debug(f"[cdp] Swept {removed} dead page ref(s) from _owned_pages")
+        return removed
+
     async def cleanup_old_pages(
         self,
         context: BrowserContext,
@@ -77,8 +105,10 @@ class HumanBehaviorSimulator:
         Returns:
             保留的 Page（需要在创建新 Page 后手动关闭），如果没有保留则返回 None
         """
+        # 先 sweep 掉已失效引用，避免被外部关闭的 Page 长期累积
+        self._sweep_dead_pages()
         # 只清理 _owned_pages 中的页面，不碰 context 中其他页面
-        owned = [p for p in self._owned_pages if not p.is_closed()]
+        owned = [p for p in self._owned_pages if not self._safe_is_closed(p)]
         if not owned:
             logger.debug("[cdp] No owned pages to clean up")
             return None
@@ -347,7 +377,10 @@ class HumanBehaviorSimulator:
             # 4. 播放完成后，条件性暂停
             # 只对最后一个 owned Page 执行暂停操作
             if not page.is_closed():
-                owned_count = len([p for p in self._owned_pages if not p.is_closed()])
+                self._sweep_dead_pages()
+                owned_count = len([
+                    p for p in self._owned_pages if not self._safe_is_closed(p)
+                ])
                 if owned_count <= 1:
                     # 确认是最后一个 owned Page，执行暂停
                     logger.debug(f"[cdp] Pausing video for {video_id} (last owned page)")
@@ -397,7 +430,10 @@ class HumanBehaviorSimulator:
             # 注意：如果是最后一个 owned Page，保留它以避免 Chrome 退出
             try:
                 if not page.is_closed():
-                    owned_count = len([p for p in self._owned_pages if not p.is_closed()])
+                    self._sweep_dead_pages()
+                    owned_count = len([
+                        p for p in self._owned_pages if not self._safe_is_closed(p)
+                    ])
                     if owned_count > 1:
                         await asyncio.wait_for(page.close(), timeout=5)
                         self._owned_pages.discard(page)
