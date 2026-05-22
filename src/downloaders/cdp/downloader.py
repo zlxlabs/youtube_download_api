@@ -104,6 +104,11 @@ class CDPDownloader(BaseDownloader):
         self.settings = settings
         self._notify_service: Optional[NotificationService] = None
 
+        # 后台 fire-and-forget 任务的强引用集合
+        # asyncio 的已知坑：仅持有 task 局部变量会被 GC 提前回收，任务中断
+        # 参考 https://docs.python.org/3/library/asyncio-task.html#asyncio.create_task
+        self._background_tasks: set[asyncio.Task] = set()
+
         # 创建子模块实例
         self._audio_downloader = AudioDownloader(self.settings, self.name)
         self._behavior_simulator = HumanBehaviorSimulator(self.settings)
@@ -136,15 +141,36 @@ class CDPDownloader(BaseDownloader):
                 "or disable human behavior (CDP_HUMAN_BEHAVIOR_ENABLED=false)."
             )
 
+    def _track_background_task(self, task: asyncio.Task) -> None:
+        """注册一个 fire-and-forget asyncio.Task。
+
+        加入 self._background_tasks 提供强引用，完成后自动 discard，
+        防止任务被 GC 提前回收。
+
+        Args:
+            task: 已通过 asyncio.create_task 创建的任务
+        """
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
     async def close(self) -> None:
         """
         关闭 CDP 下载器，释放所有资源。
 
         清理顺序：
-        1. 关闭 HumanBehaviorSimulator 持有的 owned pages
-        2. 关闭共享 Browser 实例
-        3. 重置类级别状态
+        1. 取消所有未完成的后台任务
+        2. 关闭 HumanBehaviorSimulator 持有的 owned pages
+        3. 关闭共享 Browser 实例
+        4. 重置类级别状态
         """
+        # 取消所有未完成的后台任务（fire-and-forget）
+        pending = [t for t in list(self._background_tasks) if not t.done()]
+        for t in pending:
+            t.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+            logger.debug(f"[cdp] Cancelled {len(pending)} background task(s) on close")
+
         # 关闭 behavior simulator 持有的 owned pages
         if self._behavior_simulator:
             for page in list(self._behavior_simulator._owned_pages):
@@ -786,6 +812,8 @@ class CDPDownloader(BaseDownloader):
                 page, video_url, video_id, task_id, video_duration
             )
         )
+        # 强引用 + 完成自动 discard，防止 GC 中断
+        self._track_background_task(task)
 
         def handle_task_exception(t):
             if t.cancelled():
