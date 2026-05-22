@@ -21,6 +21,8 @@ import time
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
+from cachetools import TTLCache
+
 try:
     from playwright.async_api import Browser, BrowserContext, async_playwright
     PLAYWRIGHT_AVAILABLE = True
@@ -88,8 +90,9 @@ class CDPDownloader(BaseDownloader):
     _circuit_open_until: float = 0
     _health_check_failures: int = 0
 
-    # 通知服务缓存
-    _notification_cache: Dict[str, float] = {}  # key -> last_notify_time
+    # 通知服务缓存：使用 TTLCache 防止 key 无界累积
+    # maxsize=512 上限保护，ttl=600s 兜底（业务侧仍按 cdp_notify_cooldown 判定节流）
+    _notification_cache: TTLCache = TTLCache(maxsize=512, ttl=600)
 
     def __init__(self, settings: Settings):
         """
