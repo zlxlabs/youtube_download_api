@@ -498,8 +498,13 @@ class DownloaderManager:
                 return result
 
             except CircuitBreakerOpen as e:
-                # 熔断器开启，跳过此下载器
-                logger.warning(f"✗ {downloader.name} circuit breaker open: {e.message}")
+                # 编排层熔断器开启，跳过此下载器。
+                # 注意：这是 manager 编排层熔断器（circuit_breaker.py，三下载器共用，
+                # 配置 CIRCUIT_BREAKER_*），与 CDP 自带的组件级熔断器
+                # （cdp/downloader.py，日志前缀 [cdp]，配置 CDP_CIRCUIT_*）是两套独立熔断器。
+                logger.warning(
+                    f"✗ {downloader.name} [orchestration] circuit breaker open: {e.message}"
+                )
                 errors.append(f"{downloader.name}: Circuit breaker open")
                 continue
 

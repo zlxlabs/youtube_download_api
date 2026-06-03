@@ -164,7 +164,13 @@ class Settings(BaseSettings):
         description="Number of CDP connection retries",
     )
 
-    # CDP 专用熔断器配置
+    # CDP 专用熔断器配置（组件级，第一层）
+    # 系统对 CDP 有两层熔断器（有意设计，非冗余）：
+    #   1) 本组 CDP_CIRCUIT_* -> CDP 自带组件级熔断器（src/downloaders/cdp/downloader.py）
+    #      由健康检查（浏览器/cookie 可达性）+ 下载结果共同驱动，负责企微告警与 /health 状态。
+    #   2) 下方 CIRCUIT_BREAKER_* -> manager 编排级熔断器（src/downloaders/circuit_breaker.py）
+    #      三个下载器（cdp/ytdlp/tikhub）共用，决定何时降级切换。
+    # 阈值默认 CDP 组件级(3) < 编排级(5)，故 CDP 组件级通常先跳闸。
     cdp_circuit_failure_threshold: int = Field(
         default=3,
         ge=1,
@@ -376,6 +382,7 @@ class Settings(BaseSettings):
     )
 
     # ============ Circuit Breaker Configuration ============
+    # manager 编排级熔断器（第二层，三下载器共用），详见上方 CDP_CIRCUIT_* 的两层说明。
     circuit_breaker_enabled: bool = Field(
         default=True,
         description="Enable circuit breaker for downloaders",
