@@ -2,6 +2,15 @@
 
 ## P2 -- 中优先级
 
+### 合并双熔断器（CDP 自带 + manager 编排层）
+- **What:** 将 CDP 的两套并存熔断器合并为单一来源（推荐方案 Y：CDP 退出 manager 熔断器，manager 改为只读 CDP 自带熔断器状态决定降级）
+- **Why:** 一次 CDP 下载失败会被两套熔断器各记一笔（双计数），两套配置（`cdp_circuit_*` 阈值3 / `circuit_breaker_*` 阈值5）、两套状态机，事故排查易混淆
+- **Pros:** 消除双计数与排查混乱，配置语义单一
+- **Cons:** 触及 CDP 状态机/告警/`/health` 端点/manager 编排，爆炸半径较大；在刚出过事故的模块上不宜与热修复同时做（避免同时改结构+行为）
+- **Context:** CDP 自带熔断器（`cdp/downloader.py`，组件级，含企微告警 + /health + 健康检查驱动，时间门控无泄漏）与 manager `CircuitBreaker`（`circuit_breaker.py`，编排级，三下载器共用）职责重叠但不完全冗余。详见 `~/.gstack/projects/zj1123581321-youtube_download_api/zlx-main-eng-review-cdp-circuit-breaker.md`
+- **Effort:** M (人工 2-3 小时) / S (CC ~30 分钟)
+- **Depends on:** 半开名额泄漏补丁先落地（本次已修）
+
 ### 任务取消时优雅中断下载
 - **What:** 取消任务时中断正在进行的下载，而非等待下载完成
 - **Why:** 当前取消大文件下载可能需要等 5 分钟

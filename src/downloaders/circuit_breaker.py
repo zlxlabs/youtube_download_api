@@ -108,20 +108,30 @@ class CircuitBreaker:
                 )
 
         # 2. 半开状态：检查调用次数限制
+        acquired_half_open = False
         if self.state == CircuitState.HALF_OPEN:
             if self.half_open_calls >= self.half_open_max_calls:
                 raise CircuitBreakerOpen(
                     "Circuit breaker is HALF_OPEN and max calls reached"
                 )
             self.half_open_calls += 1
+            acquired_half_open = True
 
         # 3. 执行调用
         try:
             result = func()
             self._on_success()
             return result
-        except Exception as e:
+        except Exception:
             self._on_failure()
+            raise
+        except BaseException:
+            # KeyboardInterrupt/SystemExit 等属于 BaseException，不被上面的
+            # except Exception 捕获。若不归还半开名额，half_open_calls 会只增
+            # 不减，最终卡死在 HALF_OPEN（"max calls reached"）只能重启进程。
+            # 此类中断不代表下载器故障，因此既不计成功也不计失败，仅释放名额。
+            if acquired_half_open and self.state == CircuitState.HALF_OPEN:
+                self.half_open_calls -= 1
             raise
 
     async def call_async(self, func: Callable[[], T]) -> T:
@@ -148,20 +158,31 @@ class CircuitBreaker:
                 )
 
         # 2. 半开状态：检查调用次数限制
+        acquired_half_open = False
         if self.state == CircuitState.HALF_OPEN:
             if self.half_open_calls >= self.half_open_max_calls:
                 raise CircuitBreakerOpen(
                     "Circuit breaker is HALF_OPEN and max calls reached"
                 )
             self.half_open_calls += 1
+            acquired_half_open = True
 
         # 3. 执行调用
         try:
             result = await func()
             self._on_success()
             return result
-        except Exception as e:
+        except Exception:
             self._on_failure()
+            raise
+        except BaseException:
+            # asyncio.CancelledError（任务超时取消，见 worker.py 的 wait_for）
+            # 属于 BaseException，不被上面的 except Exception 捕获。若不归还半开
+            # 名额，half_open_calls 会只增不减，最终卡死在 HALF_OPEN
+            # （"max calls reached"）只能重启进程恢复。
+            # 取消不代表下载器故障，因此既不计成功也不计失败，仅释放名额。
+            if acquired_half_open and self.state == CircuitState.HALF_OPEN:
+                self.half_open_calls -= 1
             raise
 
     def _on_success(self) -> None:
