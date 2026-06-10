@@ -14,15 +14,22 @@ from src.config import Settings
 
 
 def _make_settings(**overrides) -> Settings:
-    """Create Settings with test defaults and optional overrides."""
+    """Create Settings with test defaults and optional overrides.
+
+    _env_file=None 禁用 .env 读取，保证测试不受开发机/CI 环境差异影响。
+    基线必须是自洽配置：默认 audio_download_priority 含 cdp，
+    因此显式开启 CDP 并提供 URL，否则 validate_consistency 会告警。
+    """
     defaults = {
         "api_key": "test-key",
         "wecom_webhook_url": "https://example.com/webhook",
         "data_dir": Path(tempfile.mkdtemp()),
         "debug": True,
+        "cdp_enabled": True,
+        "cdp_urls": "http://localhost:9222",
     }
     defaults.update(overrides)
-    return Settings(**defaults)
+    return Settings(_env_file=None, **defaults)
 
 
 class TestConfigValidation:
