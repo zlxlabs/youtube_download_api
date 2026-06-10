@@ -74,9 +74,15 @@ dev = [
 ]
 
 # pytest config unified in pytest.ini
+# mypy config unified in mypy.ini (mypy.ini 优先级更高，避免双处维护)
 
-[tool.mypy]
-python_version = "3.11"
-warn_return_any = true
-warn_unused_configs = true
-ignore_missing_imports = true
+[tool.coverage.run]
+source = ["src"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]

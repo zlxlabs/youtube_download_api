@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Type check (mypy)
+        run: uv run mypy src/
+
+      - name: Run tests
+        # pytest.ini 的 addopts 已排除 requires_external / manual 标记
+        run: uv run pytest tests/ --tb=short -q
+        env:
+          API_KEY: ci-test-api-key

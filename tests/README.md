@@ -131,6 +131,17 @@ uv run pytest -m integration
 uv run pytest --cov=src --cov-report=html --cov-report=term
 ```
 
+覆盖率配置见 `pyproject.toml` 的 `[tool.coverage.*]`。
+
+## 持续集成（CI）
+
+GitHub Actions 在每次 push / PR 到 main 时自动运行（`.github/workflows/ci.yml`）：
+
+1. `mypy src/` — 类型检查（必须零错误）
+2. `pytest tests/` — 全部本地测试（自动排除 `requires_external` / `manual` 标记）
+
+提交前请在本地先跑通这两步。
+
 ## 测试类型说明
 
 ### 单元测试 (unit/)
