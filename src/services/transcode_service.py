@@ -125,7 +125,9 @@ class TranscodeService:
                 stderr=asyncio.subprocess.PIPE,
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-            return proc.returncode, stdout or b"", stderr or b""
+            # communicate() 返回后进程必已退出，returncode 不会为 None
+            returncode = proc.returncode if proc.returncode is not None else -1
+            return returncode, stdout or b"", stderr or b""
         except NotImplementedError:
             logger.warning(log_fallback)
             return await asyncio.to_thread(self._run_command_sync, cmd, timeout)

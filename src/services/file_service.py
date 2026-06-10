@@ -409,7 +409,8 @@ class FileService:
             try:
                 import ctypes
                 free_bytes = ctypes.c_ulonglong(0)
-                ctypes.windll.kernel32.GetDiskFreeSpaceExW(
+                # windll 仅在 Windows 上存在，mypy 按 linux 平台检查
+                ctypes.windll.kernel32.GetDiskFreeSpaceExW(  # type: ignore[attr-defined]
                     ctypes.c_wchar_p(str(self.data_dir)),
                     None,
                     None,

@@ -7,7 +7,7 @@
 
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Callable, Optional, TypeVar
+from typing import Awaitable, Callable, Optional, TypeVar
 
 from src.utils.logger import logger
 
@@ -134,7 +134,7 @@ class CircuitBreaker:
                 self.half_open_calls -= 1
             raise
 
-    async def call_async(self, func: Callable[[], T]) -> T:
+    async def call_async(self, func: Callable[[], Awaitable[T]]) -> T:
         """
         通过熔断器调用异步函数。
 

@@ -113,6 +113,7 @@ class HumanBehaviorSimulator:
             logger.debug("[cdp] No owned pages to clean up")
             return None
 
+        kept_page: Optional[Page]
         if keep_last and len(owned) >= 1:
             # 保留最后一个 owned page（有 Chrome 存活保证）
             pages_to_close = owned[:-1]  # 可能为空

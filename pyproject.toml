@@ -70,6 +70,7 @@ dev = [
     "pytest-cov>=4.1.0",
     "mypy>=1.7.0",
     "types-aiofiles>=23.2.0",
+    "types-cachetools>=7.0.0.20260518",
 ]
 
 # pytest config unified in pytest.ini

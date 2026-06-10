@@ -1062,7 +1062,7 @@ async def get_video_info(video_url: str, settings: Settings) -> VideoInfo:
     Raises:
         DownloadError: If info extraction fails.
     """
-    opts = {
+    opts: dict[str, Any] = {
         "quiet": True,
         "no_warnings": True,
         "extract_flat": False,

@@ -489,7 +489,8 @@ class ManualUploadService:
             WHERE file_type = 'audio' AND upload_source = 'manual'
             """
         )
-        total = (await count_cursor.fetchone())[0]
+        count_row = await count_cursor.fetchone()
+        total = count_row[0] if count_row else 0
 
         uploads = []
         for row in rows:

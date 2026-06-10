@@ -332,4 +332,5 @@ def is_retryable_error(error_code: ErrorCode) -> bool:
         True if the error is retryable.
     """
     config = RETRY_CONFIG.get(error_code, {})
-    return config.get("max_retries", 0) > 0
+    max_retries: int = config.get("max_retries", 0)
+    return max_retries > 0

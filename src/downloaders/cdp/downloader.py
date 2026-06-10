@@ -19,9 +19,12 @@ import asyncio
 import random
 import time
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, Optional, Tuple
 
 from cachetools import TTLCache
+
+if TYPE_CHECKING:
+    from playwright.async_api import Playwright
 
 try:
     from playwright.async_api import Browser, BrowserContext, async_playwright
@@ -79,7 +82,7 @@ class CDPDownloader(BaseDownloader):
     """
 
     # ========== 类级别共享状态 ==========
-    _playwright: Optional[object] = None  # Playwright client (node driver)
+    _playwright: Optional["Playwright"] = None  # Playwright client (node driver)
     _browser: Optional[Browser] = None
     _browser_lock: Optional[asyncio.Lock] = None  # 延迟初始化
     _last_health_check: float = 0

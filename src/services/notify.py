@@ -722,7 +722,9 @@ class NotificationService:
                     circuit_breaker_info = f"🔌 **Circuit Open**: {', '.join(c.upper() for c in open_circuits)}\n"
 
             # 根据错误码获取建议操作
-            suggestion = ERROR_SUGGESTIONS.get(task.error_code, "")
+            suggestion = (
+                ERROR_SUGGESTIONS.get(task.error_code, "") if task.error_code else ""
+            )
             suggestion_section = f"\n> {suggestion}\n" if suggestion else ""
 
             content = f"""# {title_emoji} {title_text}

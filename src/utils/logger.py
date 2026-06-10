@@ -50,18 +50,21 @@ def setup_logger(
         log_dir = Path(log_dir)
         log_dir.mkdir(parents=True, exist_ok=True)
 
+        # JSON 模式下不传 format（loguru 不接受 None，序列化时用默认格式）
+        format_kwargs: dict[str, Any] = {} if json_logs else {"format": log_format}
+
         # General log file
         logger.add(
             log_dir / "app_{time:YYYY-MM-DD}.log",
             rotation="00:00",  # Rotate at midnight
             retention="30 days",
             compression="gz",
-            format=log_format if not json_logs else None,
             serialize=json_logs,
             level="DEBUG" if debug else "INFO",
             backtrace=True,
             diagnose=debug,
             encoding="utf-8",
+            **format_kwargs,
         )
 
         # Error log file
@@ -70,12 +73,12 @@ def setup_logger(
             rotation="00:00",
             retention="60 days",
             compression="gz",
-            format=log_format if not json_logs else None,
             serialize=json_logs,
             level="ERROR",
             backtrace=True,
             diagnose=True,
             encoding="utf-8",
+            **format_kwargs,
         )
 
     logger.info(f"Logger initialized (debug={debug})")

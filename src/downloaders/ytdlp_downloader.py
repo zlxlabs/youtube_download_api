@@ -135,19 +135,21 @@ class YtdlpDownloader(BaseDownloader):
 
             else:
                 # 仅字幕模式
-                result = await self._downloader.extract_transcript_only(
+                transcript_result = await self._downloader.extract_transcript_only(
                     video_url=video_url,
                     output_dir=output_dir,
                 )
-                video_metadata = self._convert_video_info(result.video_info, video_id)
+                video_metadata = self._convert_video_info(
+                    transcript_result.video_info, video_id
+                )
 
                 return DownloaderResult(
                     success=True,
                     downloader=self.name,
                     video_metadata=video_metadata,
                     audio_path=None,
-                    transcript_path=result.transcript_path,
-                    has_transcript=result.has_transcript,
+                    transcript_path=transcript_result.transcript_path,
+                    has_transcript=transcript_result.has_transcript,
                 )
 
         except DownloadCancelledError:
@@ -253,14 +255,16 @@ class YtdlpDownloader(BaseDownloader):
 
             # 尝试仅字幕模式（作为降级）
             try:
-                result = await self._downloader.extract_transcript_only(
+                transcript_result = await self._downloader.extract_transcript_only(
                     video_url=video_url,
                     output_dir=output_dir,
                 )
 
                 # 字幕成功
-                video_metadata = self._convert_video_info(result.video_info, video_id)
-                transcript_path = result.transcript_path
+                video_metadata = self._convert_video_info(
+                    transcript_result.video_info, video_id
+                )
+                transcript_path = transcript_result.transcript_path
 
                 # 部分成功：音频失败，字幕成功
                 logger.info("[ytdlp] Partial success: transcript OK, audio failed")
@@ -272,7 +276,7 @@ class YtdlpDownloader(BaseDownloader):
                     video_metadata=video_metadata,
                     audio_path=None,
                     transcript_path=transcript_path,
-                    has_transcript=result.has_transcript,
+                    has_transcript=transcript_result.has_transcript,
                     audio_error=audio_error,
                     audio_error_code=audio_error_code,
                     failure_details={

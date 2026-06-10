@@ -102,7 +102,7 @@ async def manual_upload(
             )
 
     try:
-        manual_metadata = None
+        manual_metadata: Optional[dict[str, object]] = None
         if any([title, author, duration, channel_id, description]):
             manual_metadata = {}
             if title:

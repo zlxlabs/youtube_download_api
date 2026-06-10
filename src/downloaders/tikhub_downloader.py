@@ -66,7 +66,7 @@ class TikHubDownloader(BaseDownloader):
         # 使用场景：人工上传后立即下载，可复用下载链接
         # TTL：3小时（保守值，YouTube 链接通常 6-12 小时有效）
         cache_ttl_hours = getattr(settings, "tikhub_cache_ttl_hours", 3)
-        self._api_cache = TTLCache(
+        self._api_cache: TTLCache[str, dict[str, Any]] = TTLCache(
             maxsize=100,  # 最多缓存 100 个视频
             ttl=cache_ttl_hours * 3600,  # 转换为秒
         )
@@ -338,7 +338,7 @@ class TikHubDownloader(BaseDownloader):
                 downloader=self.name,
             )
 
-        video_data = data.get("data", {})
+        video_data: dict[str, Any] = data.get("data", {})
 
         # 3. 缓存响应（包含下载链接）
         self._api_cache[video_id] = video_data
@@ -414,7 +414,8 @@ class TikHubDownloader(BaseDownloader):
         if not m4a_items:
             # 如果没有 M4A，选择第一个可用的
             logger.warning("[tikhub] No M4A format available, using first available")
-            return items[0].get("url")
+            fallback_url: Optional[str] = items[0].get("url")
+            return fallback_url
 
         # 选择最接近 128kbps 的（假设 size 与 bitrate 成正比）
         # TikHub 返回的 m4a 通常是固定码率
@@ -426,7 +427,8 @@ class TikHubDownloader(BaseDownloader):
             f"(DRC={selected.get('isDrc', False)})"
         )
 
-        return selected.get("url")
+        selected_url: Optional[str] = selected.get("url")
+        return selected_url
 
     def _select_subtitle(self, video_data: dict[str, Any]) -> Optional[dict]:
         """
@@ -445,7 +447,7 @@ class TikHubDownloader(BaseDownloader):
             logger.info(f"[tikhub] Subtitles not available: {subtitles.get('errorId')}")
             return None
 
-        items = subtitles.get("items", [])
+        items: list[dict[str, Any]] = subtitles.get("items", [])
         if not items:
             return None
 
@@ -583,6 +585,7 @@ class TikHubDownloader(BaseDownloader):
 
         try:
             completed_full = False
+            status_code: Optional[int]
             with open(temp_path, "wb") as f:
                 try:
                     bytes_written, total_size, status_code = await fetch_range(

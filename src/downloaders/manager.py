@@ -7,7 +7,7 @@
 import asyncio
 import json
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from src.config import Settings
 from src.core.downloader import DownloadCancelledError
@@ -152,6 +152,7 @@ class DownloaderManager:
 
         for name in priority_list:
             try:
+                downloader: BaseDownloader
                 if name == "cdp":
                     downloader = CDPDownloader(self.settings)
                     if downloader.is_available:
@@ -728,6 +729,10 @@ class DownloaderManager:
                 )
                 raise
 
+        # 理论上不可达：循环内每个分支要么 return 要么 raise（重试耗尽时
+        # 在循环内 raise）。防御性兜底，避免未来调整重试参数后静默返回 None
+        raise RuntimeError(f"[{downloader.name}] Retry loop exited without result")
+
     def get_circuit_breaker_states(self) -> Dict[str, dict]:
         """
         获取所有熔断器的状态。
@@ -815,24 +820,30 @@ class DownloaderManager:
                 try:
                     resource = await self.db.get_video_resource(video_id)
                     if resource and resource.video_info:
-                        # 获取 title 用于日志显示（处理 VideoInfo 对象和字典两种情况）
-                        title = resource.video_info.title if hasattr(resource.video_info, 'title') else resource.video_info.get('title', 'N/A')
+                        # 统一转换为字典格式（兼容 str/dict/VideoInfo 三种存储形态）
+                        raw_info: Any = resource.video_info
+                        if isinstance(raw_info, str):
+                            metadata_dict: dict = json.loads(raw_info)
+                        elif isinstance(raw_info, dict):
+                            metadata_dict = raw_info
+                        else:
+                            metadata_dict = raw_info.to_dict()
+
+                        title = metadata_dict.get("title") or "N/A"
                         logger.info(
                             f"✓ Metadata from database cache: {video_id} "
-                            f"(title: {title[:50] if title else 'N/A'})"
+                            f"(title: {title[:50]})"
                         )
-                        # 统一返回字典格式
-                        if isinstance(resource.video_info, str):
-                            return json.loads(resource.video_info)
-                        elif hasattr(resource.video_info, 'to_dict'):
-                            return resource.video_info.to_dict()
-                        else:
-                            return resource.video_info
+                        return metadata_dict
                 except Exception as e:
                     logger.warning(f"Failed to read metadata from database: {e}")
 
             # 2. 数据库未命中，按优先级调用下载器
-            effective_priority = priority or getattr(self.settings, "metadata_priority", "ytdlp,tikhub")
+            effective_priority = (
+                priority
+                or getattr(self.settings, "metadata_priority", None)
+                or "ytdlp,tikhub"
+            )
             downloader_names = [name.strip() for name in effective_priority.split(",")]
 
             logger.info(
