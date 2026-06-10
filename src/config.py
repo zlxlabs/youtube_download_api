@@ -428,6 +428,10 @@ class Settings(BaseSettings):
     manual_upload_enabled: bool = Field(
         default=True, description="Enable manual upload feature"
     )
+    admin_ui_enabled: bool = Field(
+        default=True,
+        description="Serve the admin static UI at /admin (disable when exposed to the internet)",
+    )
     manual_upload_max_size_mb: int = Field(
         default=500, ge=1, description="Maximum upload file size (MB)"
     )

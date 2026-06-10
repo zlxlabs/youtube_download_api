@@ -308,12 +308,14 @@ app = FastAPI(
 )
 
 # Add CORS middleware
+# 鉴权依赖自定义 X-API-Key header（浏览器不会跨站自动携带），
+# 因此 origins 可放开，但禁用 credentials 并显式限定方法与 header
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "X-API-Key"],
 )
 
 # Include API routes
@@ -325,9 +327,11 @@ app.include_router(settings_router)
 # Include manual upload routes and admin UI when enabled
 if get_settings().manual_upload_enabled:
     app.include_router(manual_upload_router)
-    admin_dir = Path(__file__).resolve().parent / "static" / "admin"
-    if admin_dir.exists():
-        app.mount("/admin", StaticFiles(directory=admin_dir, html=True), name="admin")
+    # admin UI 为无鉴权静态页面，公网部署时可通过 ADMIN_UI_ENABLED=false 单独关闭
+    if get_settings().admin_ui_enabled:
+        admin_dir = Path(__file__).resolve().parent / "static" / "admin"
+        if admin_dir.exists():
+            app.mount("/admin", StaticFiles(directory=admin_dir, html=True), name="admin")
 
 
 # ==================== Health Check Endpoint ====================

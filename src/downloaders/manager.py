@@ -109,7 +109,9 @@ class DownloaderManager:
         self.stats = DownloaderStats()
 
         # 并发锁：防止同一视频的重复 API 调用
+        # 锁字典有界（见 get_metadata 中的清理逻辑），防止长期运行内存泄漏
         self._metadata_locks: Dict[str, asyncio.Lock] = {}
+        self._METADATA_LOCKS_MAX = 256
 
         logger.info(
             f"DownloaderManager initialized with {len(self.downloaders)} downloader(s): "
@@ -747,6 +749,28 @@ class DownloaderManager:
         """
         return self.stats.get_summary()
 
+    def _get_metadata_lock(self, video_id: str) -> asyncio.Lock:
+        """
+        获取或创建 video 级元数据锁，并保持锁字典有界。
+
+        超过阈值时丢弃未持有的锁，防止 dict 随 video_id 无界增长。
+        极端情况下（锁刚释放、等待者尚未唤醒时被清理）同一视频可能并发取元数据，
+        但元数据获取是幂等的，重复一次无害。
+        """
+        if video_id not in self._metadata_locks:
+            if len(self._metadata_locks) >= self._METADATA_LOCKS_MAX:
+                before = len(self._metadata_locks)
+                self._metadata_locks = {
+                    vid: lock
+                    for vid, lock in self._metadata_locks.items()
+                    if lock.locked()
+                }
+                logger.debug(
+                    f"Pruned metadata locks: {before} -> {len(self._metadata_locks)}"
+                )
+            self._metadata_locks[video_id] = asyncio.Lock()
+        return self._metadata_locks[video_id]
+
     async def get_metadata(
         self,
         video_url: str,
@@ -785,11 +809,7 @@ class DownloaderManager:
             # 强制刷新
             metadata = await manager.get_metadata(url, video_id, force_refresh=True)
         """
-        # 获取或创建锁
-        if video_id not in self._metadata_locks:
-            self._metadata_locks[video_id] = asyncio.Lock()
-
-        async with self._metadata_locks[video_id]:
+        async with self._get_metadata_lock(video_id):
             # 1. 检查数据库缓存（双重检查）
             if not force_refresh and self.db:
                 try:

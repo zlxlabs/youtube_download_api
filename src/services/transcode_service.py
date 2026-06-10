@@ -117,6 +117,7 @@ class TranscodeService:
         timeout: int,
         log_fallback: str,
     ) -> tuple[int, bytes, bytes]:
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -128,6 +129,26 @@ class TranscodeService:
         except NotImplementedError:
             logger.warning(log_fallback)
             return await asyncio.to_thread(self._run_command_sync, cmd, timeout)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            # wait_for/cancel 只取消 communicate() 协程，子进程仍在后台运行，
+            # 必须显式 kill，否则 ffmpeg/ffprobe 会泄漏并持续占用 CPU
+            if proc is not None:
+                await self._kill_process(proc)
+            raise
+
+    @staticmethod
+    async def _kill_process(proc: asyncio.subprocess.Process) -> None:
+        """强制终止子进程并回收，避免僵尸进程。"""
+        if proc.returncode is not None:
+            return
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            return
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            logger.error(f"Subprocess pid={proc.pid} did not exit after kill")
 
     async def validate_file(self, file_path: Path) -> bool:
         try:
@@ -284,12 +305,25 @@ class TranscodeService:
 
         except asyncio.TimeoutError:
             logger.error(f"Transcode timed out: {input_file}")
+            self._cleanup_partial_output(output_file)
             raise TranscodeError("Transcode operation timed out")
         except TranscodeError:
+            self._cleanup_partial_output(output_file)
             raise
         except Exception as e:
             logger.error(f"Transcode error: {e}", exc_info=True)
+            self._cleanup_partial_output(output_file)
             raise TranscodeError(f"Transcode failed: {e}") from e
+
+    @staticmethod
+    def _cleanup_partial_output(output_file: Path) -> None:
+        """转码失败时删除部分写入的输出文件，避免残留文件占用磁盘。"""
+        if output_file.exists():
+            try:
+                output_file.unlink()
+                logger.info(f"Removed partial transcode output: {output_file}")
+            except OSError as e:
+                logger.warning(f"Failed to remove partial output {output_file}: {e}")
 
     async def _get_audio_bitrate(self, file_path: Path) -> Optional[int]:
         try:

@@ -23,6 +23,7 @@ from src.api.schemas import (
 from src.db.models import TaskStatus
 from src.services.file_service import FileService, FileOperationError
 from src.services.task_service import TaskService
+from src.utils.helpers import sanitize_filename
 from src.utils.logger import logger
 
 
@@ -365,7 +366,8 @@ async def download_file(
             media_type = "audio/webm"
 
         # Use custom filename if provided, otherwise use original filename
-        download_filename = filename if filename else file_record.filename
+        # 公开端点：过滤路径分隔符与控制字符，防止 Content-Disposition 注入
+        download_filename = sanitize_filename(filename) if filename else file_record.filename
 
         return FileResponse(
             path=file_path,

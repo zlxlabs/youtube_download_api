@@ -4,6 +4,7 @@ API dependencies module.
 Provides dependency injection for authentication and services.
 """
 
+import hmac
 from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException, status
@@ -35,7 +36,8 @@ async def verify_api_key(
             headers={"WWW-Authenticate": "ApiKey"},
         )
 
-    if x_api_key != settings.api_key:
+    # 常数时间比较，避免时序攻击逐字节猜测 key
+    if not hmac.compare_digest(x_api_key, settings.api_key):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Invalid API key",

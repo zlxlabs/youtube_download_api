@@ -96,6 +96,9 @@ class DownloadWorker:
         self._interval_multiplier: float = 1.0
         self._consecutive_successes: int = 0
 
+        # 后台回调任务集合：强引用防止 GC 提前回收（任务完成后自动移除）
+        self._callback_tasks: set = set()
+
     async def start(self) -> None:
         """Start the worker loop."""
         self._running = True
@@ -132,6 +135,35 @@ class DownloadWorker:
         # 触发下载取消，使正在进行的下载尽快结束
         self.downloader_manager.cancel_all()
         logger.info("Download cancellation signal sent")
+
+        # 等待未完成的后台回调发送完毕（带上限，避免拖慢关停）
+        if self._callback_tasks:
+            logger.info(f"Waiting for {len(self._callback_tasks)} pending callback(s)...")
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*self._callback_tasks, return_exceptions=True),
+                    timeout=30,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Timed out waiting for pending callbacks during shutdown")
+
+    def _send_callback_background(self, task: Task) -> None:
+        """
+        后台发送 webhook 回调。
+
+        webhook 重试最长可阻塞约 30 秒，改为 fire-and-forget
+        避免拖慢 worker 主循环处理下一个任务。
+        """
+        bg = asyncio.create_task(self._safe_send_callback(task))
+        self._callback_tasks.add(bg)
+        bg.add_done_callback(self._callback_tasks.discard)
+
+    async def _safe_send_callback(self, task: Task) -> None:
+        """发送回调并吞掉异常（回调失败不应影响任务状态）。"""
+        try:
+            await self.callback_service.send_callback(task)
+        except Exception as e:
+            logger.error(f"Failed to send callback for task {task.id}: {e}")
 
     def _on_task_success(self) -> None:
         """
@@ -747,7 +779,7 @@ class DownloadWorker:
             )
 
             if task_updated.callback_url:
-                await self.callback_service.send_callback(task_updated)
+                self._send_callback_background(task_updated)
 
     async def _try_transcript_fallback(self, task: Task) -> bool:
         """
@@ -791,7 +823,7 @@ class DownloadWorker:
                         task_updated, downloader="cached", transcript_fallback=True
                     )
                     if task_updated.callback_url:
-                        await self.callback_service.send_callback(task_updated)
+                        self._send_callback_background(task_updated)
 
                 return True
 
@@ -872,7 +904,7 @@ class DownloadWorker:
                             transcript_fallback=True,
                         )
                         if task_updated.callback_url:
-                            await self.callback_service.send_callback(task_updated)
+                            self._send_callback_background(task_updated)
 
                     return True
 
@@ -980,14 +1012,9 @@ class DownloadWorker:
                         f"Failed to send completion notification for task {task.id}: {e}"
                     )
 
-                # 发送 webhook 回调
+                # 发送 webhook 回调（后台执行，异常在 _safe_send_callback 中处理）
                 if task_updated.callback_url:
-                    try:
-                        await self.callback_service.send_callback(task_updated)
-                    except Exception as e:
-                        logger.error(
-                            f"Failed to send callback for task {task.id}: {e}"
-                        )
+                    self._send_callback_background(task_updated)
         except Exception as e:
             logger.error(
                 f"Failed to fetch task {task.id} for notifications: {e}"

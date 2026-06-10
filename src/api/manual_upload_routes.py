@@ -6,10 +6,20 @@
 
 from typing import Annotated, Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
 from fastapi.responses import JSONResponse
 
-from src.api.deps import ApiKeyDep
+from src.api.deps import ApiKeyDep, SettingsDep
 from src.api.schemas import (
     ErrorResponse,
     FileInfoResponse,
@@ -67,8 +77,10 @@ ManualUploadServiceDep = Annotated[ManualUploadService, Depends(get_manual_uploa
     ),
 )
 async def manual_upload(
+    request: Request,
     _: ApiKeyDep,
     service: ManualUploadServiceDep,
+    settings: SettingsDep,
     file: UploadFile = File(..., description="Audio or video file to upload"),
     video_url: str = Form(..., description="YouTube video URL"),
     title: Optional[str] = Form(None, description="Video title (optional)"),
@@ -77,6 +89,18 @@ async def manual_upload(
     channel_id: Optional[str] = Form(None, description="Channel ID (optional)"),
     description: Optional[str] = Form(None, description="Video description (optional)"),
 ) -> ManualUploadResponse:
+    # 在解析/落盘 multipart body 之前先按 Content-Length 拒绝超大请求，
+    # 防止恶意或误操作的大文件把临时盘写满（service 层的 size 校验在解析之后才生效）
+    content_length = request.headers.get("content-length")
+    if content_length:
+        max_bytes = settings.manual_upload_max_size_mb * 1024 * 1024
+        # 预留 1MB 给 multipart 边界与表单字段
+        if int(content_length) > max_bytes + 1024 * 1024:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"Request body too large (max {settings.manual_upload_max_size_mb}MB)",
+            )
+
     try:
         manual_metadata = None
         if any([title, author, duration, channel_id, description]):
