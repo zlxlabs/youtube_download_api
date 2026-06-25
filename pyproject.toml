@@ -88,3 +88,6 @@ exclude_lines = [
     "raise NotImplementedError",
     "if __name__ == .__main__.:",
 ]
+
+[tool.hatch.metadata]
+allow-direct-references = true
