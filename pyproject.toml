@@ -43,6 +43,8 @@ dependencies = [
     "prometheus-client>=0.20.0",
     # Process / memory introspection for runtime metrics
     "psutil>=5.9.0",
+    # Observability: error reporting to GlitchTip
+    "zlx-ops-sdk @ git+https://github.com/zj1123581321/zlx-ops-sdk.git@main",
 ]
 
 [project.optional-dependencies]

@@ -13,6 +13,7 @@ from typing import AsyncGenerator, Optional
 
 import fastapi.responses
 import httpx
+import zlx_ops_sdk
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -77,6 +78,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Setup logging
     log_dir = settings.data_dir / "logs" if not settings.debug else None
     setup_logger(log_dir=log_dir, debug=settings.debug)
+
+    # Initialize error reporting (GlitchTip via zlx_ops_sdk).
+    # DSN defaults to env SENTRY_DSN, release defaults to repo@gitSHA, fail-open.
+    zlx_ops_sdk.init(
+        "youtube-download-api",
+        repo="zj1123581321/youtube_download_api",
+        server="n305",
+        environment="prod",
+    )
 
     logger.info(f"Starting YouTube Audio API v{__version__}")
 
