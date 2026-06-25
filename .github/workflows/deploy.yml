@@ -1,0 +1,24 @@
+# 调 Lane B 复用流水线(ci-templates @v1)。push main 自动 build→ACR→入 tailnet→SSH n305→探针→部署。
+# 钉 @v1(不钉 @main)——一个坏 commit 不会扇出炸全舰队。
+name: deploy
+on:
+  push:
+    branches: [main]            # 本仓默认分支是 main
+
+jobs:
+  ship:
+    uses: zj1123581321/ci-templates/.github/workflows/build-deploy.yml@v1
+    with:
+      image_name: youtube-download-api                  # == ACR 镜像名 == 宿主 compose 的 image(crpi-.../zlx-personal/youtube-download-api)
+      host: 100.68.21.80                                 # n305 的 Tailscale IP(runner 入 tailnet 后可达)
+      ssh_user: zlx
+      deploy_dir: /opt/media/youtube_download_api
+      healthcheck_url: http://localhost:8300/health      # 宿主发布端口是 8300(容器内 8000)
+      ci_templates_ref: v1
+    secrets:                                             # 逐个显式传,最小权限
+      ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+      ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+      SSH_DEPLOY_KEY: ${{ secrets.SSH_DEPLOY_KEY }}
+      KNOWN_HOSTS: ${{ secrets.KNOWN_HOSTS }}
+      TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
+      CI_TEMPLATES_PAT: ${{ secrets.CI_TEMPLATES_PAT }}
