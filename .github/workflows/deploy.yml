@@ -14,6 +14,10 @@ jobs:
       ssh_user: zlx
       deploy_dir: /opt/media/youtube_download_api
       healthcheck_url: http://localhost:8300/health      # 宿主发布端口是 8300(容器内 8000)
+      # 启动重(entrypoint 运行时 build pot-provider + 更新 yt-dlp + 拉敏感词),给足探针预热
+      healthcheck_warmup: 90
+      healthcheck_retries: 12
+      healthcheck_interval: 5
       ci_templates_ref: v1
     secrets:                                             # 逐个显式传,最小权限
       ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
