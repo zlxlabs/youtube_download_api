@@ -44,7 +44,7 @@ dependencies = [
     # Process / memory introspection for runtime metrics
     "psutil>=5.9.0",
     # Observability: error reporting to GlitchTip
-    "zlx-ops-sdk @ git+https://github.com/zj1123581321/zlx-ops-sdk.git@main",
+    "zlx-ops-sdk>=0.1,<0.2",
 ]
 
 [project.optional-dependencies]
@@ -88,6 +88,3 @@ exclude_lines = [
     "raise NotImplementedError",
     "if __name__ == .__main__.:",
 ]
-
-[tool.hatch.metadata]
-allow-direct-references = true
