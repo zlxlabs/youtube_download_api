@@ -39,6 +39,7 @@ env/
 .env.production
 .env.local
 *.local
+ops.env
 
 # Data directory
 data/
