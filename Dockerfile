@@ -117,6 +117,11 @@ ENV POT_PROVIDER_TYPE=rust
 # YTDLP_AUTO_UPDATE: update yt-dlp on startup (default: true)
 # Set to "false" to disable auto-update
 # This helps handle YouTube's frequent player.js changes
+# release 版本标记:D3 build 注入 --build-arg GIT_SHA → SDK 缺省读取 → GlitchTip release=repo@<sha>
+# 放最终 runtime 阶段、CMD 前(源码 COPY 之后),缓存损失最小
+ARG GIT_SHA=unknown
+ENV GIT_SHA=$GIT_SHA
+
 CMD ["sh", "-c", "\
     if [ \"${POT_PROVIDER_TYPE}\" = \"nodejs\" ]; then \
         POT_PKG='bgutil-ytdlp-pot-provider'; \
