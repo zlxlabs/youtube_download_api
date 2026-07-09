@@ -1,0 +1,22 @@
+# Dropped into each repo as .github/workflows/ci.yml by scripts/onboard-repo.sh.
+# The only per-repo file — everything else lives in gate-hub.
+name: CI
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# The reusable gate requests `pull-requests: write` (for the Codex review comment).
+# The caller MUST grant it here — otherwise the run fails at startup with a
+# generic "workflow file issue" (reusable-workflow permission escalation).
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  gate:
+    uses: zlxlabs/gate-hub/.github/workflows/gate.yml@main
+    with:
+      tier: personal        # personal | internal | saas
+      runner: self          # self (self-hosted) | hosted (GitHub free minutes — cold repos / pilot)
+      has_ui: false
+      design_doc: ""        # e.g. docs/DESIGN.md
