@@ -207,3 +207,5 @@ MIT License
 - 📌 [API 参考文档](docs/api-reference.md)
 - ⚙️ [配置总览](docs/configuration/overview.md)
 - 🚀 [生产环境部署](docs/deployment.md)
+
+<!-- fork-gate-probe: 测试 fork PR 防护路由,验证后即删 -->
