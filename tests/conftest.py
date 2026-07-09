@@ -2,6 +2,13 @@
 Pytest fixtures and configuration.
 """
 
+import os
+
+# gate CI 用通用 `uv run pytest` 起跑,不带本仓 ci.yml 里的 env(API_KEY=ci-test-api-key)。
+# Settings 声明 api_key 必填,缺省时 test_config_is_public 在 gate CI 上必挂;
+# 这里给默认值,显式设置的环境值优先。
+os.environ.setdefault("API_KEY", "ci-test-api-key")
+
 import asyncio
 import tempfile
 from pathlib import Path
