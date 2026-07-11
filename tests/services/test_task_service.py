@@ -40,10 +40,14 @@ def mock_downloader_manager() -> MagicMock:
     """
     带 get_metadata 的 DownloaderManager mock。
 
-    默认返回一个普通（非直播）视频的元数据，测试中按需覆盖 return_value / side_effect。
+    默认返回一个普通（已知非直播）视频的元数据，live_broadcast_content 显式设为
+    "none"（而非缺省 None/未知），确保不关心直播状态刷新逻辑的测试只触发一次
+    get_metadata 调用；测试中按需覆盖 return_value / side_effect。
     """
     manager = MagicMock()
-    manager.get_metadata = AsyncMock(return_value={"title": "Normal video"})
+    manager.get_metadata = AsyncMock(
+        return_value={"title": "Normal video", "live_broadcast_content": "none"}
+    )
     return manager
 
 
@@ -273,6 +277,104 @@ class TestPrecheckCachedLiveStatusRefresh:
         self, task_service: TaskService, mock_downloader_manager: MagicMock
     ) -> None:
         """非 live/upcoming 状态：不应触发第二次刷新调用，只调一次 get_metadata。"""
+        mock_downloader_manager.get_metadata.return_value = {
+            "title": "Normal video",
+            "live_broadcast_content": "none",
+        }
+        request = CreateTaskRequest(video_url=TEST_VIDEO_URL)
+
+        response = await task_service.create_task(request)
+
+        assert response.task_id is not None
+        mock_downloader_manager.get_metadata.assert_awaited_once_with(
+            video_url=TEST_VIDEO_URL, video_id=TEST_VIDEO_ID, raise_content_errors=True
+        )
+
+
+class TestPrecheckUnknownLiveStatusRefresh:
+    """
+    Codex 第10轮问题1(P2)：缓存的 live_broadcast_content 为 None（未知）时不应直接放行。
+
+    None 可能来自历史数据，或 tikhub 这类判定不了直播状态的下载链路落库——不代表
+    "确认非直播"。DownloaderManager.download_with_fallback 对 None 本来就会强制刷新
+    一次再判断（见 manager.py 438-450 行），precheck 应对齐同一语义：把 None 和
+    live/upcoming 一样纳入触发二次确认的条件，而不是当作"非直播"直接放行。
+    """
+
+    @pytest.mark.asyncio
+    async def test_cached_none_refreshed_to_known_none_creates_task(
+        self, task_service: TaskService, mock_downloader_manager: MagicMock
+    ) -> None:
+        """缓存 live_broadcast_content=None，强制刷新后确认是已知的非直播状态：应建任务，只多一次调用。"""
+        calls: list[dict] = []
+
+        async def _get_metadata(**kwargs):
+            calls.append(kwargs)
+            if kwargs.get("force_refresh"):
+                return {"title": "Confirmed not live", "live_broadcast_content": "none"}
+            return {"title": "Unknown status", "live_broadcast_content": None}
+
+        mock_downloader_manager.get_metadata.side_effect = _get_metadata
+        request = CreateTaskRequest(video_url=TEST_VIDEO_URL)
+
+        response = await task_service.create_task(request)
+
+        assert response.task_id is not None
+        assert response.status == TaskStatus.PENDING
+        assert len(calls) == 2
+        assert calls[0].get("force_refresh", False) is False
+        assert calls[1]["force_refresh"] is True
+
+    @pytest.mark.asyncio
+    async def test_cached_none_refreshed_to_live_rejected(
+        self, task_service: TaskService, mock_downloader_manager: MagicMock
+    ) -> None:
+        """缓存 live_broadcast_content=None，强制刷新后发现确实在直播：应 422 拒绝。"""
+
+        async def _get_metadata(**kwargs):
+            if kwargs.get("force_refresh"):
+                return {"title": "Actually live", "live_broadcast_content": "live"}
+            return {"title": "Unknown status", "live_broadcast_content": None}
+
+        mock_downloader_manager.get_metadata.side_effect = _get_metadata
+        request = CreateTaskRequest(video_url=TEST_VIDEO_URL)
+
+        with pytest.raises(VideoNotDownloadableError) as exc_info:
+            await task_service.create_task(request)
+
+        assert exc_info.value.error_code == ErrorCode.VIDEO_LIVE_STREAM
+
+    @pytest.mark.asyncio
+    async def test_cached_none_refresh_still_unknown_fails_open_creates_task(
+        self, task_service: TaskService, mock_downloader_manager: MagicMock
+    ) -> None:
+        """缓存 live_broadcast_content=None，强制刷新后仍是 None（判定不了）：应 fail-open 建任务。"""
+        calls: list[dict] = []
+
+        async def _get_metadata(**kwargs):
+            calls.append(kwargs)
+            return {"title": "Still unknown", "live_broadcast_content": None}
+
+        mock_downloader_manager.get_metadata.side_effect = _get_metadata
+        request = CreateTaskRequest(video_url=TEST_VIDEO_URL)
+
+        response = await task_service.create_task(request)
+
+        assert response.task_id is not None
+        assert response.status == TaskStatus.PENDING
+        # 未知状态触发了一次二次确认，但确认后依旧未知，仍应放行
+        assert len(calls) == 2
+        assert calls[1]["force_refresh"] is True
+
+    @pytest.mark.asyncio
+    async def test_cached_known_none_does_not_trigger_second_call(
+        self, task_service: TaskService, mock_downloader_manager: MagicMock
+    ) -> None:
+        """
+        缓存 live_broadcast_content="none"（已知非直播，非 None）：不应触发二次调用。
+        与 TestPrecheckCachedLiveStatusRefresh.test_non_live_status_does_not_trigger_second_call
+        覆盖同一场景，这里显式放在本类中作为成本守护的直接对照组。
+        """
         mock_downloader_manager.get_metadata.return_value = {
             "title": "Normal video",
             "live_broadcast_content": "none",

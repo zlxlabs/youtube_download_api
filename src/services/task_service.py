@@ -327,7 +327,16 @@ class TaskService:
         重新提交同一视频会永远读到过期的 live/upcoming 状态被拒。因此第一次
         读到缓存的 live/upcoming 时不直接拒绝，而是再强制刷新一次拿新鲜数据
         （_fetch_precheck_metadata），只有新鲜数据仍是 live/upcoming 才真正拒绝；
-        刷新失败/超时同样 fail-open。非 live/upcoming 状态不会触发第二次调用。
+        刷新失败/超时同样 fail-open。已知的非 live/upcoming 状态（如 "none"）
+        不会触发第二次调用（成本守护）。
+
+        未知状态（Codex 第10轮问题1）：live_broadcast_content 也可能是 None——
+        历史数据落库时字段缺失，或 tikhub 这类下载链路本身判定不了直播状态，
+        None 不代表"确认非直播"。DownloaderManager.download_with_fallback 对
+        None 本来就会强制刷新一次再判断（manager.py 438-450 行），precheck 必须
+        对齐同一语义：把 None 和 live/upcoming 一样纳入触发二次确认的条件，
+        否则缓存了未知状态的直播视频会被 precheck 直接放行。刷新后仍是 None
+        （链上所有下载器都判定不了）同样 fail-open，交给 worker 侧兜底。
 
         Fail-open 设计：只有明确判定为不可下载时才拒绝；探测超时、下载器全部
         失败、或任何意外异常都视为“探测本身不可用”，直接放行，绝不能因为前置
@@ -363,13 +372,16 @@ class TaskService:
                 return metadata
 
             live_status = metadata.get("live_broadcast_content")
-            if live_status not in ("upcoming", "live"):
+            # 已知的非 live/upcoming 状态（如 "none"）直接放行，不触发第二次调用。
+            # live/upcoming（疑似直播）或 None（未知，历史数据/判定不了的下载链路）
+            # 都需要强制刷新一次拿新鲜数据再确认。
+            if live_status is not None and live_status not in ("upcoming", "live"):
                 return metadata
 
             logger.info(
-                f"Precheck cache shows live/upcoming for video {video_id} "
-                f"(status={live_status}), forcing refresh to confirm current status "
-                f"before rejecting"
+                f"Precheck cache shows {'live/upcoming' if live_status else 'unknown (None)'} "
+                f"live status for video {video_id} (status={live_status!r}), forcing refresh "
+                f"to confirm current status before proceeding"
             )
             return await self.downloader_manager.get_metadata(
                 video_url=request.video_url,
