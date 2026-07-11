@@ -1627,6 +1627,48 @@ class TestDownloadStatsAggregation:
         assert stats["failure_split"]["content_level_ratio"] == pytest.approx(1 / 3)
         assert stats["failure_split"]["system_level_ratio"] == pytest.approx(2 / 3)
 
+    async def test_get_download_stats_null_error_code_counted_as_unknown(
+        self, test_db: Database
+    ):
+        """
+        error_code 为 NULL 的失败任务不应被过滤掉，应归入 failures_by_error_code
+        的 "unknown" 桶，并计入 failure_split.system_level——否则
+        content_level + system_level 会小于 by_status["failed"]，比率失真。
+        """
+        now = datetime.now(timezone.utc)
+        # 内容级失败
+        await self._seed_task(
+            test_db, task_id="ds_50", video_id="ds_v50",
+            status=TaskStatus.FAILED, error_code=ErrorCode.VIDEO_PRIVATE, created_at=now,
+        )
+        # 系统级失败（有 error_code）
+        await self._seed_task(
+            test_db, task_id="ds_51", video_id="ds_v51",
+            status=TaskStatus.FAILED, error_code=ErrorCode.CDP_NO_COOKIES, created_at=now,
+        )
+        # error_code 为 NULL 的失败任务（例如任务级超时兜底路径未来得及写 error_code）
+        await self._seed_task(
+            test_db, task_id="ds_52", video_id="ds_v52",
+            status=TaskStatus.FAILED, error_code=None, created_at=now,
+        )
+        await self._seed_task(
+            test_db, task_id="ds_53", video_id="ds_v53",
+            status=TaskStatus.FAILED, error_code=None, created_at=now,
+        )
+
+        stats = await test_db.get_download_stats(days=30)
+
+        assert stats["by_status"]["failed"] == 4
+        assert stats["failures_by_error_code"]["unknown"] == 2
+        assert stats["failures_by_error_code"]["VIDEO_PRIVATE"] == 1
+        assert stats["failures_by_error_code"]["CDP_NO_COOKIES"] == 1
+
+        # 不变式：content_level + system_level 必须等于 by_status 里 failed 的总数
+        split = stats["failure_split"]
+        assert split["content_level"] == 1
+        assert split["system_level"] == 3  # CDP_NO_COOKIES(1) + unknown(2)
+        assert split["content_level"] + split["system_level"] == stats["by_status"]["failed"]
+
     async def test_get_download_stats_by_downloader_unknown_bucket(
         self, test_db: Database
     ):

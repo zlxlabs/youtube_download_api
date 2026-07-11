@@ -775,9 +775,9 @@ curl -H "X-API-Key: your-api-key" \
 | `days` | integer | 统计时间窗口（天数） |
 | `total` | integer | 窗口内任务总数 |
 | `by_status` | object | 任务状态 -> 计数 |
-| `failures_by_error_code` | object | 失败任务 error_code -> 计数 |
+| `failures_by_error_code` | object | 失败任务 error_code -> 计数（`error_code` 为 `NULL` 的失败任务归入 `"unknown"` 桶，不会被丢弃） |
 | `failure_split.content_level` | integer | 内容级失败数（`error_code` 以 `VIDEO_` 开头，视频本身问题，重试/换下载器解决不了） |
-| `failure_split.system_level` | integer | 系统级失败数（其余 error_code，理论上可通过技术手段改善） |
+| `failure_split.system_level` | integer | 系统级失败数（其余 error_code，含 `"unknown"`，理论上可通过技术手段改善） |
 | `failure_split.content_level_ratio` | float | 内容级失败占比（0-1） |
 | `failure_split.system_level_ratio` | float | 系统级失败占比（0-1） |
 | `by_downloader.audio_downloader` | object | 音频下载器名称 -> 任务数 |
@@ -786,6 +786,7 @@ curl -H "X-API-Key: your-api-key" \
 
 **说明**：
 - `by_downloader` 中下载器为 `NULL`（未实际下载，例如命中文件级缓存复用）统一归为字符串 `"unknown"`，同时也覆盖历史遗留数据。
+- `failures_by_error_code` 中 `error_code` 为 `NULL` 的失败任务（例如任务级超时兜底路径等未及写入 error_code 就落库的失败）同样统一归为字符串 `"unknown"`，并计入 `failure_split.system_level`，保证 `failure_split.content_level + failure_split.system_level` 始终等于 `by_status` 中 `failed` 的计数，不会因为过滤掉 NULL 而丢数。
 - `weekly_trend` 的 `week` 格式形如 `"2026-W28"`，使用 SQLite `strftime('%Y', ...) || '-W' || strftime('%W', ...)` 拼接（公历年 + 周一起始的年内周序 00-53），**不是**严格 ISO 8601 周号（`%G-%V`）。这是为兼容旧版本 SQLite（3.46 以下不支持 `%G`/`%V`）做的折衷，年末/年初边界的周标签可能与真正的 ISO 周号有 1 周误差。
 
 **错误响应**：

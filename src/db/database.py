@@ -1471,12 +1471,16 @@ class Database:
         by_status: dict[str, int] = {row["status"]: row["count"] for row in status_rows}
         total = sum(by_status.values())
 
-        # 2. 失败任务按 error_code 分布
+        # 2. 失败任务按 error_code 分布。
+        # error_code 为 NULL（如任务级超时兜底路径等未及写入 error_code 就落库的
+        # 失败任务）不能被过滤掉，否则 failures_by_error_code 总和会小于
+        # by_status["failed"]，下面的 failure_split 比率也会失真。用 COALESCE
+        # 统一归入 "unknown" 桶，与 by_downloader 对 NULL 的处理方式保持一致。
         error_cursor = await self.execute(
             """
-            SELECT error_code, COUNT(*) as count
+            SELECT COALESCE(error_code, 'unknown') as error_code, COUNT(*) as count
             FROM tasks
-            WHERE created_at >= ? AND status = 'failed' AND error_code IS NOT NULL
+            WHERE created_at >= ? AND status = 'failed'
             GROUP BY error_code
             """,
             (cutoff,),
@@ -1487,7 +1491,9 @@ class Database:
         }
 
         # 3. 失败归因拆分：内容级（VIDEO_ 前缀，视频本身问题，无法通过重试/换下载器解决）
-        #    vs 系统级（下载器/网络/风控等，理论上可通过技术手段改善）
+        #    vs 系统级（下载器/网络/风控等，理论上可通过技术手段改善）。
+        #    "unknown"（原 error_code 为 NULL）不以 VIDEO_ 开头，归入系统级——
+        #    这保证了不变式 content_level + system_level == by_status["failed"]。
         content_level = sum(
             count
             for code, count in failures_by_error_code.items()
