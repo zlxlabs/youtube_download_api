@@ -1,0 +1,605 @@
+"""
+测试 IP 熔断状态持久化功能。
+
+背景：IPBanCircuitBreaker（src/core/ip_ban_breaker.py）状态完全在内存中。
+本仓库接入了 D3 自动部署，每次 push 到 main 都会重启容器 —— 如果重启时
+正处于熔断中，服务醒来会误判为 NORMAL 全速请求 YouTube，加重封禁。
+
+覆盖范围：
+1. Database.save_ip_ban_state / load_ip_ban_state 往返一致性
+2. Database.append_ip_ban_history 追加历史事件
+3. IPBanCircuitBreaker.on_state_change 回调钩子（含 fail-open）
+4. IPBanCircuitBreaker.restore_state 恢复状态
+5. calculate_ban_recovery_time 纯函数（恢复判定与 breaker 语义一致）
+6. DownloadWorker 启动时的持久化恢复流程
+7. Settings 新增的 ip_ban_min_wait_before_retry / ip_ban_max_retry_interval
+"""
+
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+import pytest_asyncio
+
+from src.config import Settings
+from src.core.ip_ban_breaker import IPBanCircuitBreaker, calculate_ban_recovery_time
+from src.core.ip_ban_models import IPBanLevel, IPBanStateChangeContext
+from src.core.worker import DownloadWorker
+from src.db.database import Database
+
+
+# ==================== Database 持久化测试 ====================
+
+
+class TestDatabaseIPBanPersistence:
+    """测试 Database.save_ip_ban_state / load_ip_ban_state / append_ip_ban_history。"""
+
+    @pytest.mark.asyncio
+    async def test_load_returns_normal_state_by_default(self, test_db: Database) -> None:
+        """新建数据库默认应该是 NORMAL 状态（种子行已由建表逻辑写入）。"""
+        state = await test_db.load_ip_ban_state()
+
+        assert state is not None
+        assert state["current_level"] == IPBanLevel.NORMAL
+        assert state["banned_at"] is None
+
+    @pytest.mark.asyncio
+    async def test_load_returns_none_when_row_missing(self, test_db: Database) -> None:
+        """显式删除单行表记录后，读回应返回 None。"""
+        await test_db.execute("DELETE FROM ip_ban_status WHERE id = 1")
+
+        state = await test_db.load_ip_ban_state()
+
+        assert state is None
+
+    @pytest.mark.asyncio
+    async def test_save_and_load_round_trip_audio_banned(self, test_db: Database) -> None:
+        """保存音频熔断状态后应该能原样读回（各字段一致）。"""
+        banned_at = datetime.now().replace(microsecond=0)
+        last_attempt_at = banned_at + timedelta(minutes=10)
+
+        await test_db.save_ip_ban_state(
+            current_level=IPBanLevel.AUDIO_BANNED,
+            banned_at=banned_at,
+            last_attempt_at=last_attempt_at,
+            failed_attempts=3,
+        )
+
+        state = await test_db.load_ip_ban_state()
+
+        assert state is not None
+        assert state["current_level"] == IPBanLevel.AUDIO_BANNED
+        assert state["banned_at"] == banned_at
+        assert state["last_attempt_at"] == last_attempt_at
+        assert state["failed_attempts"] == 3
+        # 读回的时间戳必须是 naive（与 breaker 内部 datetime.now() 保持一致），
+        # 否则 breaker 做时间运算时会因 naive/aware 混用而抛异常。
+        assert state["banned_at"].tzinfo is None
+        assert state["last_attempt_at"].tzinfo is None
+
+    @pytest.mark.asyncio
+    async def test_save_and_load_round_trip_fully_banned(self, test_db: Database) -> None:
+        """保存全局熔断状态后应该能原样读回。"""
+        banned_at = datetime.now().replace(microsecond=0)
+
+        await test_db.save_ip_ban_state(
+            current_level=IPBanLevel.FULLY_BANNED,
+            banned_at=banned_at,
+            last_attempt_at=None,
+            failed_attempts=0,
+        )
+
+        state = await test_db.load_ip_ban_state()
+
+        assert state is not None
+        assert state["current_level"] == IPBanLevel.FULLY_BANNED
+        assert state["banned_at"] == banned_at
+        assert state["last_attempt_at"] is None
+        assert state["failed_attempts"] == 0
+
+    @pytest.mark.asyncio
+    async def test_save_overwrites_previous_state(self, test_db: Database) -> None:
+        """多次 save 应该是 upsert 语义，最新一次覆盖旧值。"""
+        first = datetime.now().replace(microsecond=0)
+        await test_db.save_ip_ban_state(
+            current_level=IPBanLevel.AUDIO_BANNED,
+            banned_at=first,
+            last_attempt_at=None,
+            failed_attempts=1,
+        )
+
+        second = first + timedelta(hours=1)
+        await test_db.save_ip_ban_state(
+            current_level=IPBanLevel.FULLY_BANNED,
+            banned_at=second,
+            last_attempt_at=second,
+            failed_attempts=2,
+        )
+
+        state = await test_db.load_ip_ban_state()
+        assert state is not None
+        assert state["current_level"] == IPBanLevel.FULLY_BANNED
+        assert state["banned_at"] == second
+        assert state["failed_attempts"] == 2
+
+    @pytest.mark.asyncio
+    async def test_save_reset_to_normal_clears_timestamps(self, test_db: Database) -> None:
+        """恢复正常状态后应该能保存 banned_at=None。"""
+        await test_db.save_ip_ban_state(
+            current_level=IPBanLevel.AUDIO_BANNED,
+            banned_at=datetime.now(),
+            last_attempt_at=datetime.now(),
+            failed_attempts=1,
+        )
+
+        await test_db.save_ip_ban_state(
+            current_level=IPBanLevel.NORMAL,
+            banned_at=None,
+            last_attempt_at=None,
+            failed_attempts=0,
+        )
+
+        state = await test_db.load_ip_ban_state()
+        assert state is not None
+        assert state["current_level"] == IPBanLevel.NORMAL
+        assert state["banned_at"] is None
+        assert state["last_attempt_at"] is None
+
+    @pytest.mark.asyncio
+    async def test_append_ip_ban_history_triggered(self, test_db: Database) -> None:
+        """触发事件应写入一条历史记录，字段正确。"""
+        banned_at = datetime.now(timezone.utc)
+
+        await test_db.append_ip_ban_history(
+            event_type="triggered",
+            ban_level=IPBanLevel.AUDIO_BANNED.value,
+            trigger_error="cdp: HTTP 403 Forbidden",
+            banned_at=banned_at,
+        )
+
+        cursor = await test_db.execute(
+            "SELECT * FROM ip_ban_history ORDER BY id DESC LIMIT 1"
+        )
+        row = await cursor.fetchone()
+
+        assert row is not None
+        assert row["event_type"] == "triggered"
+        assert row["ban_level"] == "audio_banned"
+        assert row["trigger_error"] == "cdp: HTTP 403 Forbidden"
+        assert row["recovered_at"] is None
+
+    @pytest.mark.asyncio
+    async def test_append_ip_ban_history_recovered(self, test_db: Database) -> None:
+        """恢复事件应写入 recovered_at 与 duration_seconds。"""
+        banned_at = datetime.now(timezone.utc) - timedelta(hours=1)
+        recovered_at = datetime.now(timezone.utc)
+
+        await test_db.append_ip_ban_history(
+            event_type="recovered",
+            ban_level=IPBanLevel.NORMAL.value,
+            banned_at=banned_at,
+            recovered_at=recovered_at,
+            duration_seconds=3600,
+        )
+
+        cursor = await test_db.execute(
+            "SELECT * FROM ip_ban_history ORDER BY id DESC LIMIT 1"
+        )
+        row = await cursor.fetchone()
+
+        assert row is not None
+        assert row["event_type"] == "recovered"
+        assert row["ban_level"] == "normal"
+        assert row["recovered_at"] is not None
+        assert row["duration_seconds"] == 3600
+
+    @pytest.mark.asyncio
+    async def test_append_ip_ban_history_multiple_events_preserve_order(
+        self, test_db: Database
+    ) -> None:
+        """多个事件按插入顺序追加，互不覆盖。"""
+        await test_db.append_ip_ban_history(
+            event_type="triggered", ban_level="audio_banned"
+        )
+        await test_db.append_ip_ban_history(
+            event_type="upgraded", ban_level="fully_banned"
+        )
+        await test_db.append_ip_ban_history(
+            event_type="downgraded", ban_level="audio_banned"
+        )
+        await test_db.append_ip_ban_history(
+            event_type="recovered", ban_level="normal"
+        )
+
+        cursor = await test_db.execute(
+            "SELECT event_type FROM ip_ban_history ORDER BY id ASC"
+        )
+        rows = await cursor.fetchall()
+        event_types = [row["event_type"] for row in rows]
+
+        assert event_types == ["triggered", "upgraded", "downgraded", "recovered"]
+
+
+# ==================== IPBanCircuitBreaker 回调钩子测试 ====================
+
+
+class TestIPBanBreakerOnStateChangeCallback:
+    """测试 IPBanCircuitBreaker 的 on_state_change 回调钩子。"""
+
+    @pytest.mark.asyncio
+    async def test_trigger_audio_ban_invokes_callback_with_correct_levels(self) -> None:
+        """触发音频熔断应调用回调，携带正确的新旧级别。"""
+        callback = AsyncMock()
+        breaker = IPBanCircuitBreaker(on_state_change=callback)
+
+        await breaker.trigger_audio_ban(reason="HTTP 403")
+
+        callback.assert_awaited_once()
+        context: IPBanStateChangeContext = callback.await_args.args[0]
+        assert context.event_type == "triggered"
+        assert context.old_level == IPBanLevel.NORMAL
+        assert context.new_level == IPBanLevel.AUDIO_BANNED
+        assert context.reason == "HTTP 403"
+
+    @pytest.mark.asyncio
+    async def test_upgrade_to_full_ban_invokes_callback_with_upgraded_event(self) -> None:
+        """从音频熔断升级到全局熔断应产生 upgraded 事件（而非 triggered）。"""
+        callback = AsyncMock()
+        breaker = IPBanCircuitBreaker(on_state_change=callback)
+
+        await breaker.trigger_audio_ban()
+        callback.reset_mock()
+
+        await breaker.upgrade_to_full_ban()
+
+        callback.assert_awaited_once()
+        context: IPBanStateChangeContext = callback.await_args.args[0]
+        assert context.event_type == "upgraded"
+        assert context.old_level == IPBanLevel.AUDIO_BANNED
+        assert context.new_level == IPBanLevel.FULLY_BANNED
+
+    @pytest.mark.asyncio
+    async def test_downgrade_to_audio_ban_invokes_callback_with_downgraded_event(
+        self,
+    ) -> None:
+        """从全局熔断降级到音频熔断应产生 downgraded 事件。"""
+        callback = AsyncMock()
+        breaker = IPBanCircuitBreaker(on_state_change=callback)
+
+        await breaker.trigger_full_ban()
+        callback.reset_mock()
+
+        await breaker.downgrade_to_audio_ban()
+
+        callback.assert_awaited_once()
+        context: IPBanStateChangeContext = callback.await_args.args[0]
+        assert context.event_type == "downgraded"
+        assert context.old_level == IPBanLevel.FULLY_BANNED
+        assert context.new_level == IPBanLevel.AUDIO_BANNED
+
+    @pytest.mark.asyncio
+    async def test_reset_to_normal_invokes_callback_with_recovered_event(self) -> None:
+        """恢复正常状态应产生 recovered 事件，且旧状态快照中仍带原始 banned_at。"""
+        callback = AsyncMock()
+        breaker = IPBanCircuitBreaker(on_state_change=callback)
+
+        await breaker.trigger_audio_ban()
+        callback.reset_mock()
+
+        await breaker.reset_to_normal()
+
+        callback.assert_awaited_once()
+        context: IPBanStateChangeContext = callback.await_args.args[0]
+        assert context.event_type == "recovered"
+        assert context.old_level == IPBanLevel.AUDIO_BANNED
+        assert context.new_level == IPBanLevel.NORMAL
+        # old_state 应保留恢复前（清空前）的 banned_at，供历史记录计算持续时长
+        assert context.old_state.banned_at is not None
+        assert context.new_state.banned_at is None
+
+    @pytest.mark.asyncio
+    async def test_reset_to_normal_when_already_normal_does_not_invoke_callback(
+        self,
+    ) -> None:
+        """本来就是 NORMAL 时调用 reset_to_normal 不应产生多余回调。"""
+        callback = AsyncMock()
+        breaker = IPBanCircuitBreaker(on_state_change=callback)
+
+        await breaker.reset_to_normal()
+
+        callback.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_callback_exception_does_not_affect_transition_result(self) -> None:
+        """回调抛异常时，熔断器状态转换本身必须正常完成（fail-open）。"""
+        callback = AsyncMock(side_effect=RuntimeError("db write failed"))
+        breaker = IPBanCircuitBreaker(on_state_change=callback)
+
+        # 不应该向上抛出异常
+        await breaker.trigger_audio_ban(reason="HTTP 403")
+
+        assert breaker.get_current_level() == IPBanLevel.AUDIO_BANNED
+        callback.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_no_callback_configured_does_not_raise(self) -> None:
+        """未配置回调时（默认 None），状态转换应正常工作，不报错。"""
+        breaker = IPBanCircuitBreaker()
+
+        await breaker.trigger_full_ban(reason="transcript 403")
+
+        assert breaker.get_current_level() == IPBanLevel.FULLY_BANNED
+
+
+# ==================== IPBanCircuitBreaker.restore_state 测试 ====================
+
+
+class TestIPBanBreakerRestoreState:
+    """测试 IPBanCircuitBreaker.restore_state。"""
+
+    @pytest.mark.asyncio
+    async def test_restore_state_sets_fields_without_resetting_timestamps(self) -> None:
+        """restore_state 应直接写入传入的历史时间戳,不重置为当前时间。"""
+        breaker = IPBanCircuitBreaker()
+        banned_at = datetime.now() - timedelta(minutes=30)
+        last_attempt_at = datetime.now() - timedelta(minutes=5)
+
+        await breaker.restore_state(
+            level=IPBanLevel.AUDIO_BANNED,
+            banned_at=banned_at,
+            last_attempt_at=last_attempt_at,
+            failed_attempts=2,
+        )
+
+        assert breaker.get_current_level() == IPBanLevel.AUDIO_BANNED
+        assert breaker.banned_at == banned_at
+        assert breaker.last_attempt_at == last_attempt_at
+        assert breaker.failed_attempts == 2
+
+    @pytest.mark.asyncio
+    async def test_restore_state_affects_should_allow_attempt(self) -> None:
+        """恢复后的状态应该真实影响拦截行为（should_allow_attempt）。"""
+        breaker = IPBanCircuitBreaker(
+            min_wait_before_retry=3600, max_retry_interval=1800
+        )
+
+        # 恢复一个 5 分钟前触发、远未到最小等待时间的熔断状态
+        await breaker.restore_state(
+            level=IPBanLevel.AUDIO_BANNED,
+            banned_at=datetime.now() - timedelta(minutes=5),
+            last_attempt_at=None,
+            failed_attempts=0,
+        )
+
+        allowed, reason = breaker.should_allow_attempt("audio")
+        assert not allowed
+
+    @pytest.mark.asyncio
+    async def test_restore_state_invokes_callback_with_restored_event(self) -> None:
+        """restore_state 应通过同一回调机制产生 restored 事件。"""
+        callback = AsyncMock()
+        breaker = IPBanCircuitBreaker(on_state_change=callback)
+
+        await breaker.restore_state(
+            level=IPBanLevel.FULLY_BANNED,
+            banned_at=datetime.now() - timedelta(minutes=10),
+            last_attempt_at=None,
+            failed_attempts=1,
+        )
+
+        callback.assert_awaited_once()
+        context: IPBanStateChangeContext = callback.await_args.args[0]
+        assert context.event_type == "restored"
+        assert context.old_level == IPBanLevel.NORMAL
+        assert context.new_level == IPBanLevel.FULLY_BANNED
+
+
+# ==================== calculate_ban_recovery_time 纯函数测试 ====================
+
+
+class TestCalculateBanRecoveryTime:
+    """测试恢复时间计算的纯函数（供启动恢复流程复用，避免与实例方法重复实现）。"""
+
+    def test_recovery_time_uses_min_wait_when_no_last_attempt(self) -> None:
+        banned_at = datetime(2026, 1, 1, 0, 0, 0)
+
+        recovery_time = calculate_ban_recovery_time(
+            banned_at, None, min_wait_before_retry=3600, max_retry_interval=1800
+        )
+
+        assert recovery_time == banned_at + timedelta(seconds=3600)
+
+    def test_recovery_time_uses_later_of_min_wait_and_retry_interval(self) -> None:
+        banned_at = datetime(2026, 1, 1, 0, 0, 0)
+        last_attempt_at = banned_at + timedelta(minutes=55)
+
+        recovery_time = calculate_ban_recovery_time(
+            banned_at,
+            last_attempt_at,
+            min_wait_before_retry=3600,
+            max_retry_interval=1800,
+        )
+
+        # last_attempt + max_retry = 00:55 + 30min = 01:25，晚于 banned_at + 60min = 01:00
+        assert recovery_time == last_attempt_at + timedelta(seconds=1800)
+
+    def test_matches_breaker_instance_method(self) -> None:
+        """纯函数结果应与 breaker 实例方法 get_estimated_recovery_time 完全一致。"""
+        breaker = IPBanCircuitBreaker(min_wait_before_retry=3600, max_retry_interval=1800)
+        breaker.current_level = IPBanLevel.AUDIO_BANNED
+        breaker.banned_at = datetime.now()
+        breaker.last_attempt_at = datetime.now() - timedelta(minutes=1)
+
+        expected = breaker.get_estimated_recovery_time()
+        actual = calculate_ban_recovery_time(
+            breaker.banned_at, breaker.last_attempt_at, 3600, 1800
+        )
+
+        assert expected == actual
+
+
+# ==================== DownloadWorker 启动恢复流程测试 ====================
+
+
+def _make_worker(db: Database, settings: Settings) -> DownloadWorker:
+    """构造一个仅用于测试启动恢复逻辑的 DownloadWorker（其余依赖全部 mock）。"""
+    return DownloadWorker(
+        db=db,
+        settings=settings,
+        task_service=MagicMock(),
+        file_service=MagicMock(),
+        callback_service=MagicMock(),
+        notify_service=AsyncMock(),
+        downloader_manager=MagicMock(),
+    )
+
+
+class TestWorkerIPBanStartupRestore:
+    """测试 DownloadWorker 启动时从数据库恢复 IP 熔断状态。"""
+
+    @pytest.mark.asyncio
+    async def test_restore_when_no_persisted_ban(
+        self, test_db: Database, test_settings: Settings
+    ) -> None:
+        """数据库里没有有效熔断记录（NORMAL）时，保持 NORMAL。"""
+        worker = _make_worker(test_db, test_settings)
+
+        await worker._restore_ip_ban_state()
+
+        assert worker.ip_ban_breaker.get_current_level() == IPBanLevel.NORMAL
+
+    @pytest.mark.asyncio
+    async def test_restore_when_row_missing(
+        self, test_db: Database, test_settings: Settings
+    ) -> None:
+        """数据库连记录都没有（load 返回 None）时，保持 NORMAL。"""
+        await test_db.execute("DELETE FROM ip_ban_status WHERE id = 1")
+        worker = _make_worker(test_db, test_settings)
+
+        await worker._restore_ip_ban_state()
+
+        assert worker.ip_ban_breaker.get_current_level() == IPBanLevel.NORMAL
+
+    @pytest.mark.asyncio
+    async def test_restore_active_unexpired_ban(
+        self, test_db: Database, test_settings: Settings
+    ) -> None:
+        """熔断中且未过期时，应恢复 breaker 状态并生效拦截。"""
+        test_settings.ip_ban_min_wait_before_retry = 3600
+        test_settings.ip_ban_max_retry_interval = 1800
+
+        await test_db.save_ip_ban_state(
+            current_level=IPBanLevel.AUDIO_BANNED,
+            banned_at=datetime.now() - timedelta(minutes=5),
+            last_attempt_at=None,
+            failed_attempts=1,
+        )
+
+        worker = _make_worker(test_db, test_settings)
+        await worker._restore_ip_ban_state()
+
+        assert worker.ip_ban_breaker.get_current_level() == IPBanLevel.AUDIO_BANNED
+        allowed, _ = worker.ip_ban_breaker.should_allow_attempt("audio")
+        assert not allowed
+
+    @pytest.mark.asyncio
+    async def test_restore_expired_ban_stays_normal(
+        self, test_db: Database, test_settings: Settings
+    ) -> None:
+        """熔断已过期（早已超过最小等待时间与重试间隔）时，忽略持久化状态。"""
+        test_settings.ip_ban_min_wait_before_retry = 60
+        test_settings.ip_ban_max_retry_interval = 60
+
+        await test_db.save_ip_ban_state(
+            current_level=IPBanLevel.AUDIO_BANNED,
+            banned_at=datetime.now() - timedelta(hours=5),
+            last_attempt_at=datetime.now() - timedelta(hours=5),
+            failed_attempts=1,
+        )
+
+        worker = _make_worker(test_db, test_settings)
+        await worker._restore_ip_ban_state()
+
+        assert worker.ip_ban_breaker.get_current_level() == IPBanLevel.NORMAL
+
+    @pytest.mark.asyncio
+    async def test_state_change_after_restore_persists_to_db(
+        self, test_db: Database, test_settings: Settings
+    ) -> None:
+        """restore 之后如果 breaker 再次发生状态变更，应该继续正常写库（回调未被破坏）。"""
+        worker = _make_worker(test_db, test_settings)
+
+        await worker.ip_ban_breaker.trigger_audio_ban(reason="test")
+
+        state = await test_db.load_ip_ban_state()
+        assert state is not None
+        assert state["current_level"] == IPBanLevel.AUDIO_BANNED
+
+        cursor = await test_db.execute(
+            "SELECT event_type FROM ip_ban_history ORDER BY id DESC LIMIT 1"
+        )
+        row = await cursor.fetchone()
+        assert row is not None
+        assert row["event_type"] == "triggered"
+
+
+# ==================== Settings 配置项测试 ====================
+
+
+class TestIPBanSettings:
+    """测试 Settings 新增的 IP 熔断等待参数配置。"""
+
+    def test_defaults(self, tmp_path: Path) -> None:
+        settings = Settings(
+            _env_file=None,
+            api_key="test-key",
+            data_dir=tmp_path,
+        )
+
+        assert settings.ip_ban_min_wait_before_retry == 3600
+        assert settings.ip_ban_max_retry_interval == 1800
+
+    def test_env_override(self, tmp_path: Path, monkeypatch: Any) -> None:
+        monkeypatch.setenv("IP_BAN_MIN_WAIT_BEFORE_RETRY", "7200")
+        monkeypatch.setenv("IP_BAN_MAX_RETRY_INTERVAL", "900")
+
+        settings = Settings(
+            _env_file=None,
+            api_key="test-key",
+            data_dir=tmp_path,
+        )
+
+        assert settings.ip_ban_min_wait_before_retry == 7200
+        assert settings.ip_ban_max_retry_interval == 900
+
+    def test_worker_uses_settings_values_for_breaker(
+        self, tmp_path: Path
+    ) -> None:
+        """worker 构造熔断器时应使用 settings 里的等待参数，而非硬编码。"""
+        settings = Settings(
+            _env_file=None,
+            api_key="test-key",
+            data_dir=tmp_path,
+            ip_ban_min_wait_before_retry=111,
+            ip_ban_max_retry_interval=222,
+        )
+
+        db = MagicMock()
+        worker = DownloadWorker(
+            db=db,
+            settings=settings,
+            task_service=MagicMock(),
+            file_service=MagicMock(),
+            callback_service=MagicMock(),
+            notify_service=AsyncMock(),
+            downloader_manager=MagicMock(),
+        )
+
+        assert worker.ip_ban_breaker.MIN_WAIT_BEFORE_RETRY == 111
+        assert worker.ip_ban_breaker.MAX_RETRY_INTERVAL == 222
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

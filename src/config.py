@@ -418,6 +418,25 @@ class Settings(BaseSettings):
         description="Maximum calls allowed in half-open state",
     )
 
+    # ============ IP Ban Circuit Breaker Configuration ============
+    # 被动探测型 IP 熔断器（src/core/ip_ban_breaker.py，NORMAL -> AUDIO_BANNED ->
+    # FULLY_BANNED 三级），是与上方两套下载器熔断器（CDP 组件级、manager 编排级）
+    # 独立的第三层：前两者决定"切换到哪个下载器"，这一层决定"是否应该现在就
+    # 别再请求 YouTube"。等待参数原先硬编码在 worker.py 构造熔断器处，这里
+    # 收敛为可配置项，与项目其余熔断器保持一致的"全部可配置"风格。
+    ip_ban_min_wait_before_retry: int = Field(
+        default=3600,
+        ge=60,
+        le=86400,
+        description="IP ban circuit breaker: minimum wait time in seconds before allowing a recovery probe (default: 60 minutes)",
+    )
+    ip_ban_max_retry_interval: int = Field(
+        default=1800,
+        ge=60,
+        le=86400,
+        description="IP ban circuit breaker: minimum interval in seconds between consecutive recovery probes (default: 30 minutes)",
+    )
+
     # ============ WeCom Content Moderation ============
     wecom_moderation_enabled: bool = Field(
         default=False, description="Enable content moderation for WeCom notifications"

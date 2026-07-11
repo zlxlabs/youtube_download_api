@@ -18,8 +18,8 @@ from src.config import Settings
 from src.core.downloader import (
     DownloadCancelledError,
 )
-from src.core.ip_ban_breaker import IPBanCircuitBreaker
-from src.core.ip_ban_models import ExecutionDecision, IPBanLevel
+from src.core.ip_ban_breaker import IPBanCircuitBreaker, calculate_ban_recovery_time
+from src.core.ip_ban_models import ExecutionDecision, IPBanLevel, IPBanStateChangeContext
 from src.db.database import Database
 from src.downloaders.exceptions import AllDownloadersFailed, DownloaderAttempt, DownloaderError
 from src.downloaders.manager import DownloaderManager
@@ -92,9 +92,17 @@ class DownloadWorker:
         self._current_task: Optional[Task] = None
 
         # IP 熔断器（被动探测型）
+        # 等待参数来自 settings（IP_BAN_MIN_WAIT_BEFORE_RETRY / IP_BAN_MAX_RETRY_INTERVAL），
+        # 与项目其余熔断器保持一致的"全部可配置"风格。
+        # on_state_change 回调把每次状态变更持久化到数据库（ip_ban_status/
+        # ip_ban_history），使熔断状态在服务重启（如 D3 自动部署触发的容器
+        # 重启）后可以恢复，避免误判为 NORMAL 全速请求 YouTube 加重封禁。
+        # 熔断器本身不直接依赖 Database，保持纯内存、可独立单测；回调失败
+        # fail-open，只记录日志，不影响熔断器本身的运行。
         self.ip_ban_breaker = IPBanCircuitBreaker(
-            min_wait_before_retry=3600,  # 60 分钟
-            max_retry_interval=1800,  # 30 分钟
+            min_wait_before_retry=settings.ip_ban_min_wait_before_retry,
+            max_retry_interval=settings.ip_ban_max_retry_interval,
+            on_state_change=self._handle_ip_ban_state_change,
         )
 
         # 自适应间隔控制
@@ -109,6 +117,11 @@ class DownloadWorker:
     async def start(self) -> None:
         """Start the worker loop."""
         self._running = True
+
+        # 启动时先尝试从数据库恢复上次的 IP 熔断状态，避免容器重启（如 D3
+        # 自动部署触发的重启）后误判为 NORMAL 全速请求 YouTube 加重封禁。
+        await self._restore_ip_ban_state()
+
         logger.info("Download worker started")
 
         while self._running:
@@ -153,6 +166,133 @@ class DownloadWorker:
                 )
             except asyncio.TimeoutError:
                 logger.warning("Timed out waiting for pending callbacks during shutdown")
+
+    # 需要写入 ip_ban_history 的事件类型（触发/升级/降级/恢复正常/启动恢复）。
+    # extended（延长熔断）/failed_attempt（记录失败探测）只更新 ip_ban_status，
+    # 不追加历史，避免高频次要事件淹没历史表。
+    _IP_BAN_HISTORY_EVENT_TYPES = frozenset(
+        {"triggered", "upgraded", "downgraded", "recovered", "restored"}
+    )
+
+    async def _handle_ip_ban_state_change(
+        self, context: IPBanStateChangeContext
+    ) -> None:
+        """
+        IP 熔断器状态变更回调：持久化到数据库。
+
+        注入给 IPBanCircuitBreaker 的 on_state_change（见 __init__），在熔断器
+        每次状态变更（触发/升级/降级/恢复/延长/启动恢复/记录失败尝试）后被调用。
+
+        Note:
+            IPBanCircuitBreaker._emit_state_change 已经用 try/except 包裹了
+            回调调用本身（fail-open，异常只记录日志不上抛）。这里对数据库写入
+            再加一层 try/except，是为了在持久化失败时打印更贴合本层语义的日志
+            （明确是"持久化失败"而不是笼统的"回调失败"），双重保险确保数据库
+            异常绝不会影响熔断器状态转换本身。
+
+        Args:
+            context: 状态变更上下文（新旧级别、状态快照、事件类型、原因）
+        """
+        try:
+            await self.db.save_ip_ban_state(
+                current_level=context.new_level,
+                banned_at=context.new_state.banned_at,
+                last_attempt_at=context.new_state.last_attempt_at,
+                failed_attempts=context.new_state.failed_attempts,
+            )
+
+            if context.event_type not in self._IP_BAN_HISTORY_EVENT_TYPES:
+                return
+
+            if context.event_type == "recovered":
+                # 恢复事件：banned_at 取变更前（清空前）的原始触发时间，
+                # 并记录本次熔断的持续时长，供历史审计使用。
+                await self.db.append_ip_ban_history(
+                    event_type=context.event_type,
+                    ban_level=context.new_level.value,
+                    trigger_error=context.reason,
+                    banned_at=context.old_state.banned_at,
+                    recovered_at=datetime.now(timezone.utc),
+                    duration_seconds=context.old_state.time_since_ban,
+                    recovery_method="auto_probe",
+                )
+            else:
+                await self.db.append_ip_ban_history(
+                    event_type=context.event_type,
+                    ban_level=context.new_level.value,
+                    trigger_error=context.reason,
+                    banned_at=context.new_state.banned_at,
+                    recovery_method="restored" if context.event_type == "restored" else None,
+                )
+        except Exception as e:
+            logger.error(
+                f"Failed to persist IP ban state change (event={context.event_type}): {e}"
+            )
+
+    async def _restore_ip_ban_state(self) -> None:
+        """
+        启动时从数据库恢复上次的 IP 熔断状态。
+
+        背景：IPBanCircuitBreaker 状态完全在内存，D3 自动部署每次 push 到
+        main 都会重启容器 —— 如果重启时正处于熔断中，服务醒来会误判为
+        NORMAL 全速请求 YouTube，加重封禁。这里在 worker 启动的第一时间尝试
+        从数据库恢复，是本次持久化功能修复该问题的关键路径。
+
+        恢复判定：仅当持久化状态处于熔断中（非 NORMAL）且未过期（用与
+        IPBanCircuitBreaker.get_estimated_recovery_time 完全相同的公式
+        calculate_ban_recovery_time 计算）才恢复；已过期或本来就是 NORMAL
+        则忽略，让熔断器保持默认 NORMAL 状态。
+
+        数据库读取失败（如首次启动尚未建表的极端情况）fail-open：记录错误
+        日志后放弃恢复，不阻塞 worker 启动。
+        """
+        try:
+            saved = await self.db.load_ip_ban_state()
+        except Exception as e:
+            logger.error(f"Failed to load persisted IP ban state, skip restore: {e}")
+            return
+
+        if saved is None or saved["current_level"] == IPBanLevel.NORMAL:
+            logger.info("No active IP ban state to restore on startup")
+            return
+
+        banned_at = saved["banned_at"]
+        if banned_at is None:
+            # 数据不一致：非 NORMAL 却缺少触发时间，无法判定是否过期，保守起见不恢复
+            logger.warning(
+                f"Persisted IP ban state ({saved['current_level'].value}) has no "
+                f"banned_at timestamp, skip restore"
+            )
+            return
+
+        recovery_time = calculate_ban_recovery_time(
+            banned_at,
+            saved["last_attempt_at"],
+            self.settings.ip_ban_min_wait_before_retry,
+            self.settings.ip_ban_max_retry_interval,
+        )
+
+        if datetime.now() >= recovery_time:
+            logger.info(
+                f"Persisted IP ban state ({saved['current_level'].value}) has "
+                f"already expired (recovery_time={recovery_time}), resuming as NORMAL"
+            )
+            return
+
+        await self.ip_ban_breaker.restore_state(
+            level=saved["current_level"],
+            banned_at=banned_at,
+            last_attempt_at=saved["last_attempt_at"],
+            failed_attempts=saved["failed_attempts"],
+        )
+
+        remaining = int((recovery_time - datetime.now()).total_seconds())
+        logger.warning(
+            f"Restored IP ban state on startup: {saved['current_level'].value} "
+            f"(banned_at={banned_at}, remaining={remaining}s before next recovery probe) -- "
+            f"this prevents the service from resuming full-speed requests to YouTube "
+            f"right after a container restart while still IP-banned."
+        )
 
     def _send_callback_background(self, task: Task) -> None:
         """
