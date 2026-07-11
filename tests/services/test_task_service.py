@@ -168,6 +168,125 @@ class TestPrecheckRejectsUndownloadable:
         )
 
 
+class TestPrecheckCachedLiveStatusRefresh:
+    """
+    Codex 第6轮问题1(P1)：缓存的 live/upcoming 状态不应让已结束的直播永远被 422 拒绝。
+
+    DownloaderManager.get_metadata() 把元数据（含 live_broadcast_content）永久落库
+    缓存。precheck 第一次读到的缓存若显示 live/upcoming，不能直接拒绝——直播可能早已
+    结束、缓存只是没刷新。正确行为是再强制刷新一次拿新鲜数据，只有新鲜数据仍是
+    live/upcoming 才 422；刷新失败/超时则 fail-open。
+    """
+
+    @pytest.mark.asyncio
+    async def test_cached_upcoming_refreshed_to_ended_creates_task(
+        self, task_service: TaskService, mock_downloader_manager: MagicMock
+    ) -> None:
+        """缓存显示 upcoming，强制刷新后直播已结束（无 live_broadcast_content）：应正常建任务。"""
+        calls: list[dict] = []
+
+        async def _get_metadata(**kwargs):
+            calls.append(kwargs)
+            if kwargs.get("force_refresh"):
+                return {"title": "Now a VOD", "live_broadcast_content": None}
+            return {"title": "Upcoming premiere", "live_broadcast_content": "upcoming"}
+
+        mock_downloader_manager.get_metadata.side_effect = _get_metadata
+        request = CreateTaskRequest(video_url=TEST_VIDEO_URL)
+
+        response = await task_service.create_task(request)
+
+        assert response.task_id is not None
+        assert response.status == TaskStatus.PENDING
+        # 第一次走缓存（未传 force_refresh），第二次强制刷新确认。
+        assert len(calls) == 2
+        assert calls[0].get("force_refresh", False) is False
+        assert calls[1]["force_refresh"] is True
+        assert calls[1]["raise_content_errors"] is True
+
+    @pytest.mark.asyncio
+    async def test_cached_upcoming_refreshed_still_upcoming_rejected(
+        self, task_service: TaskService, mock_downloader_manager: MagicMock
+    ) -> None:
+        """缓存显示 upcoming，强制刷新后依旧是 upcoming：应 422 拒绝。"""
+
+        async def _get_metadata(**kwargs):
+            return {"title": "Still upcoming", "live_broadcast_content": "upcoming"}
+
+        mock_downloader_manager.get_metadata.side_effect = _get_metadata
+        request = CreateTaskRequest(video_url=TEST_VIDEO_URL)
+
+        with pytest.raises(VideoNotDownloadableError) as exc_info:
+            await task_service.create_task(request)
+
+        assert exc_info.value.error_code == ErrorCode.VIDEO_LIVE_STREAM
+
+    @pytest.mark.asyncio
+    async def test_cached_live_refresh_raises_fails_open(
+        self, task_service: TaskService, mock_downloader_manager: MagicMock
+    ) -> None:
+        """缓存显示 live，强制刷新时抛出异常（网络错误等）：应 fail-open，正常建任务。"""
+
+        async def _get_metadata(**kwargs):
+            if kwargs.get("force_refresh"):
+                raise RuntimeError("network boom")
+            return {"title": "Live now (cached)", "live_broadcast_content": "live"}
+
+        mock_downloader_manager.get_metadata.side_effect = _get_metadata
+        request = CreateTaskRequest(video_url=TEST_VIDEO_URL)
+
+        response = await task_service.create_task(request)
+
+        assert response.task_id is not None
+        assert response.status == TaskStatus.PENDING
+
+    @pytest.mark.asyncio
+    async def test_cached_live_refresh_times_out_fails_open(
+        self,
+        test_db: Database,
+        test_settings: Settings,
+        file_service: FileService,
+        mock_downloader_manager: MagicMock,
+    ) -> None:
+        """缓存显示 live，强制刷新超时（挂起超过 precheck_timeout）：应 fail-open，正常建任务。"""
+
+        async def _get_metadata(**kwargs):
+            if kwargs.get("force_refresh"):
+                await asyncio.sleep(10)
+            return {"title": "Live now (cached)", "live_broadcast_content": "live"}
+
+        mock_downloader_manager.get_metadata.side_effect = _get_metadata
+        test_settings.precheck_timeout = 0.05
+
+        service = TaskService(
+            test_db, test_settings, file_service, downloader_manager=mock_downloader_manager
+        )
+        request = CreateTaskRequest(video_url=TEST_VIDEO_URL)
+
+        response = await service.create_task(request)
+
+        assert response.task_id is not None
+        assert response.status == TaskStatus.PENDING
+
+    @pytest.mark.asyncio
+    async def test_non_live_status_does_not_trigger_second_call(
+        self, task_service: TaskService, mock_downloader_manager: MagicMock
+    ) -> None:
+        """非 live/upcoming 状态：不应触发第二次刷新调用，只调一次 get_metadata。"""
+        mock_downloader_manager.get_metadata.return_value = {
+            "title": "Normal video",
+            "live_broadcast_content": "none",
+        }
+        request = CreateTaskRequest(video_url=TEST_VIDEO_URL)
+
+        response = await task_service.create_task(request)
+
+        assert response.task_id is not None
+        mock_downloader_manager.get_metadata.assert_awaited_once_with(
+            video_url=TEST_VIDEO_URL, video_id=TEST_VIDEO_ID, raise_content_errors=True
+        )
+
+
 class TestPrecheckFailOpen:
     """
     Fail-open：前置检查本身的任何故障都不能降低服务可用性，一律放行照常建任务。
@@ -726,3 +845,4 @@ class TestTranscriptFallbackHasNativeTranscriptSemantics:
         assert response.task_id is None
         assert response.result is not None
         assert response.result.audio_fallback is True
+

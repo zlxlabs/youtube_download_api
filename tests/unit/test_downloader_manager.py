@@ -14,12 +14,13 @@ DownloaderManager.get_metadata()，缓存未命中时会调用 _save_metadata_to
 """
 
 from typing import Optional
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from src.config import Settings
 from src.db.database import Database
-from src.db.models import VideoResource
+from src.db.models import VideoInfo, VideoResource
 from src.downloaders.manager import DownloaderManager
 
 
@@ -93,6 +94,52 @@ class TestSaveMetadataToDbExistingRecord:
         # 更新分支应该正常刷新元数据字段本身
         assert resource.video_info is not None
         assert resource.video_info.title == "Sample Video"
+
+
+class TestGetMetadataForceRefreshOverwritesStaleLiveStatus:
+    """
+    Codex 第6轮问题1(P1) 关联验证：get_metadata(force_refresh=True) 拿到新鲜数据后，
+    必须覆盖 DB 里过期的 live_broadcast_content 缓存。
+
+    precheck（task_service.py）在缓存显示 live/upcoming 时会调用一次
+    force_refresh=True 的 get_metadata 重新确认状态；如果新鲜数据没有真正落库，
+    下一次请求会再次读到过期的 live/upcoming 缓存，永远 422。
+    """
+
+    @pytest.mark.asyncio
+    async def test_force_refresh_overwrites_stale_live_status(
+        self, manager: DownloaderManager, test_db: Database
+    ) -> None:
+        video_id = "stalelive001"
+        # 预置一份陈旧缓存：曾经是 upcoming（直播尚未开始时探测并落库的）
+        stale_info = VideoInfo(title="Stale upcoming", live_broadcast_content="upcoming")
+        await test_db.create_video_resource(
+            VideoResource(video_id=video_id, video_info=stale_info)
+        )
+
+        # 强制刷新命中的下载器返回新鲜数据：直播已结束，不再是 upcoming/live
+        fresh_downloader = MagicMock()
+        fresh_downloader.name = "ytdlp"
+        fresh_downloader.fetch_metadata = AsyncMock(
+            return_value={"title": "Now a VOD", "live_broadcast_content": None}
+        )
+        manager.downloaders = [fresh_downloader]
+
+        result = await manager.get_metadata(
+            "https://www.youtube.com/watch?v=stalelive001",
+            video_id,
+            force_refresh=True,
+        )
+
+        assert result is not None
+        assert result.get("live_broadcast_content") is None
+
+        # 关键断言：DB 缓存必须被新鲜数据覆盖，不能停留在旧的 upcoming
+        resource = await test_db.get_video_resource(video_id)
+        assert resource is not None
+        assert resource.video_info is not None
+        assert resource.video_info.live_broadcast_content is None
+        assert resource.video_info.title == "Now a VOD"
 
 
 if __name__ == "__main__":

@@ -269,9 +269,17 @@ class TaskService:
         已被删除/私享/地区限制，从而在任务创建前就能给下游明确的失败反馈，
         而不必等到异步下载流程跑到元数据阶段才暴露。
 
+        缓存陈旧问题：get_metadata() 命中的 DB 缓存永久有效，若曾经探测到
+        live/upcoming 并落库，直播结束变成可下载录像之后，缓存不会自动刷新——
+        重新提交同一视频会永远读到过期的 live/upcoming 状态被拒。因此第一次
+        读到缓存的 live/upcoming 时不直接拒绝，而是再强制刷新一次拿新鲜数据
+        （_fetch_precheck_metadata），只有新鲜数据仍是 live/upcoming 才真正拒绝；
+        刷新失败/超时同样 fail-open。非 live/upcoming 状态不会触发第二次调用。
+
         Fail-open 设计：只有明确判定为不可下载时才拒绝；探测超时、下载器全部
         失败、或任何意外异常都视为“探测本身不可用”，直接放行，绝不能因为前置
-        检查故障而降低服务可用性。
+        检查故障而降低服务可用性。整个探测过程（含可能的刷新）共用一个
+        precheck_timeout 总预算，不会因为多了一次调用而翻倍。
 
         Args:
             video_id: YouTube 视频 ID。
@@ -283,16 +291,43 @@ class TaskService:
         if self.downloader_manager is None or not self.settings.precheck_enabled:
             return
 
+        async def _fetch_precheck_metadata() -> Optional[dict]:
+            """
+            探测视频状态：默认走 DB 缓存；若缓存显示 live/upcoming，强制刷新一次
+            拿新鲜数据再确认，避免"曾经直播过的视频永远 422"。与外层共用同一个
+            wait_for 超时预算，不单独设超时。
+            """
+            assert self.downloader_manager is not None  # 上面已判空，narrow 类型
+            metadata = await self.downloader_manager.get_metadata(
+                video_url=request.video_url,
+                video_id=video_id,
+                # 内容级终态错误（VIDEO_UNAVAILABLE/VIDEO_PRIVATE/...）必须让
+                # get_metadata 向上抛出，否则默认行为会把异常吞掉、返回 None，
+                # 下面的 except DownloaderError 分支永远走不到，422 拦截失效。
+                raise_content_errors=True,
+            )
+            if not metadata:
+                return metadata
+
+            live_status = metadata.get("live_broadcast_content")
+            if live_status not in ("upcoming", "live"):
+                return metadata
+
+            logger.info(
+                f"Precheck cache shows live/upcoming for video {video_id} "
+                f"(status={live_status}), forcing refresh to confirm current status "
+                f"before rejecting"
+            )
+            return await self.downloader_manager.get_metadata(
+                video_url=request.video_url,
+                video_id=video_id,
+                force_refresh=True,
+                raise_content_errors=True,
+            )
+
         try:
             metadata = await asyncio.wait_for(
-                self.downloader_manager.get_metadata(
-                    video_url=request.video_url,
-                    video_id=video_id,
-                    # 内容级终态错误（VIDEO_UNAVAILABLE/VIDEO_PRIVATE/...）必须让
-                    # get_metadata 向上抛出，否则默认行为会把异常吞掉、返回 None，
-                    # 下面的 except DownloaderError 分支永远走不到，422 拦截失效。
-                    raise_content_errors=True,
-                ),
+                _fetch_precheck_metadata(),
                 timeout=self.settings.precheck_timeout,
             )
         except asyncio.TimeoutError:
