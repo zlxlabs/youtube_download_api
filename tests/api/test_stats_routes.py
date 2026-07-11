@@ -154,3 +154,22 @@ class TestDownloadStatsResponseShape:
             "completed": 3,
             "failed": 1,
         }
+
+
+# ==================== OpenAPI 声明 ====================
+
+
+class TestStatsOpenApiSchema:
+    def test_openapi_declares_503_for_database_error(self, client: TestClient) -> None:
+        """
+        GET /api/v1/stats/downloads 的实现在 aiosqlite.Error 时返回 503
+        （见 stats_routes.py），OpenAPI responses 声明必须包含 503，否则
+        据此生成的客户端代码/文档会漏掉这种真实会发生的响应状态码
+        （外部 review 第 4 轮问题 2）。
+        """
+        schema = client.app.openapi()  # type: ignore[union-attr]
+        responses = schema["paths"]["/api/v1/stats/downloads"]["get"]["responses"]
+
+        assert "503" in responses
+        ref = responses["503"]["content"]["application/json"]["schema"]["$ref"]
+        assert ref.rsplit("/", 1)[-1] == "ErrorResponse"

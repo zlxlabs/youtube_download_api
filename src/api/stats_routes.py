@@ -30,6 +30,7 @@ DatabaseDep = Annotated[Database, Depends(get_database)]
         401: {"model": ErrorResponse, "description": "Unauthorized"},
         403: {"model": ErrorResponse, "description": "Forbidden"},
         422: {"model": ErrorResponse, "description": "Invalid days parameter"},
+        503: {"model": ErrorResponse, "description": "Database error, please try again later"},
         500: {"model": ErrorResponse, "description": "Internal server error"},
     },
     summary="下载失败归因统计",
