@@ -14,7 +14,7 @@ import asyncio
 import random
 import time
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from playwright.async_api import BrowserContext, Page
@@ -142,7 +142,7 @@ class HumanBehaviorSimulator:
         video_url: str,
         video_id: str,
         task_id: str,
-    ) -> Tuple[Page, Path, Dict[str, str], Optional[float]]:
+    ) -> Tuple[Page, Path, Dict[str, str], Optional[float], List[Dict[str, Any]]]:
         """
         快速获取 cookies + headers + 视频时长（2-3秒完成）。
 
@@ -160,11 +160,14 @@ class HumanBehaviorSimulator:
             task_id: 任务 ID（用于临时文件命名）
 
         Returns:
-            (page, cookie_file, headers, video_duration)
+            (page, cookie_file, headers, video_duration, cookies)
             - page: 保持打开状态，供后台任务使用
             - cookie_file: cookies 文件路径
             - headers: 真实请求 headers
             - video_duration: 视频时长（秒），None 表示获取失败或直播
+            - cookies: Network.getAllCookies 原始 cookie 列表（name/domain/path/
+              secure 等字段），供下游 curl_cffi 403 阶段级重试使用；
+              获取失败或超时时为空列表
         """
         logger.info(f"[cdp] Quick fetching data for {video_id} (task: {task_id})")
 
@@ -275,7 +278,7 @@ class HumanBehaviorSimulator:
                 f"[cdp] Quick fetch completed for {task_id}: "
                 f"{len(cookies)} cookies, {len(headers)} headers, duration={video_duration}s"
             )
-            return page, cookie_file, headers, video_duration
+            return page, cookie_file, headers, video_duration, cookies
 
         except Exception as e:
             # 出错时立即关闭 Page

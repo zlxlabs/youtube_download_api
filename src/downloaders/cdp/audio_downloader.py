@@ -13,7 +13,7 @@ import json
 import random
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
 
 try:
@@ -275,6 +275,72 @@ class AudioDownloader:
             if k.lower() not in remove_keys:
                 cleaned[k] = v
         return cleaned
+
+    @staticmethod
+    def _match_cookies_for_url(
+        cookies: Optional[List[Dict[str, Any]]], url: str
+    ) -> List[Dict[str, Any]]:
+        """
+        筛选出适用于目标 URL 的 cookie（RFC6265 简化版域匹配）。
+
+        匹配规则：
+        - host 与 cookie.domain 完全相等，或 host 以 "." + cookie.domain（去除
+          前导点）结尾（即 domain 以 "." 开头表示包含子域）
+        - secure cookie 仅用于 https 请求
+        - path 简化为默认全匹配（不做路径前缀校验）
+
+        用于 403 阶段级 cookie 重试：从浏览器 CDP 捕获的完整 cookie 列表中，
+        挑出真正适用于当前下载 URL（通常是 googlevideo.com CDN 直链）的部分。
+
+        Args:
+            cookies: Network.getAllCookies 返回的 cookie 列表
+            url: 目标请求 URL
+
+        Returns:
+            List[Dict[str, Any]]: 命中的 cookie 列表（保持原始 dict 结构）
+        """
+        if not cookies:
+            return []
+
+        parsed = urlparse(url)
+        host = parsed.hostname or ""
+        if not host:
+            return []
+        is_https = parsed.scheme == "https"
+
+        matched = []
+        for cookie in cookies:
+            domain = (cookie.get("domain") or "").lstrip(".")
+            if not domain:
+                continue
+            if host != domain and not host.endswith("." + domain):
+                continue
+            if cookie.get("secure") and not is_https:
+                continue
+            if not cookie.get("name"):
+                continue
+            matched.append(cookie)
+        return matched
+
+    @staticmethod
+    def _build_cookie_header(cookies: Optional[List[Dict[str, Any]]], url: str) -> str:
+        """
+        根据 cookie 列表构造适用于目标 URL 的 Cookie 请求头字符串（纯函数）。
+
+        用于 curl_cffi 403 阶段级重试：命中的 cookie 拼接为标准
+        "name1=value1; name2=value2" 格式，无命中时返回空字符串。
+
+        Args:
+            cookies: Network.getAllCookies 返回的 cookie 列表
+            url: 目标请求 URL
+
+        Returns:
+            str: Cookie 头值；无匹配 cookie 时返回空字符串
+        """
+        matched = AudioDownloader._match_cookies_for_url(cookies, url)
+        if not matched:
+            return ""
+        return "; ".join(f"{c['name']}={c.get('value', '')}" for c in matched)
 
     # curl_cffi 支持的 Chrome impersonate 版本映射
     _IMPERSONATE_VERSIONS: Dict[int, str] = {
@@ -1060,14 +1126,22 @@ class AudioDownloader:
         task_id: str,
         output_dir: Path,
         headers: Dict[str, str],
+        cookies: Optional[List[Dict[str, Any]]] = None,
     ) -> Path:
         """
         下载音频（三层降级，使用真实 Headers）。
 
         降级策略（从最优到兜底）：
         1. curl_cffi 分片下载（启用时，大文件使用）- 最快
+           - 403 时：若可用 cookie 命中目标 URL 域名且原 headers 未带 Cookie，
+             做一次阶段级"带 cookie 重试"；仍失败才降级
         2. 失败 → curl_cffi 单线程（TLS 指纹 + Headers）- 最优
+           - 403 时：同样条件下做一次阶段级"带 cookie 重试"；仍失败才走 CDN 切换
         3. 失败 → yt-dlp 直接下载（使用 cookies）- 兜底
+
+        Cookie 重试是生产 403 取证后新增的保守策略：首次请求始终不带 cookie
+        （账号风控最保守），只在 403 后每个阶段最多重试一次，不与分片内部的
+        3 次重试矩阵叠加。
 
         Args:
             audio_info: 音频信息
@@ -1075,6 +1149,8 @@ class AudioDownloader:
             task_id: 任务 ID
             output_dir: 输出目录
             headers: 真实请求 headers
+            cookies: CDP 捕获的完整 cookie 列表（Network.getAllCookies 原始
+                结构），用于 403 阶段级重试；None 或空列表时零行为变化
 
         Returns:
             Path: 音频文件路径
@@ -1099,11 +1175,15 @@ class AudioDownloader:
             and audio_info.filesize
             and audio_info.filesize >= self.settings.cdp_multipart_min_size
         ):
+            # 提前绑定为局部变量：外层 if 已保证 filesize 非空，
+            # 但该窄化无法穿透下面的 lambda 闭包（mypy 对属性访问的窄化
+            # 不会传递进嵌套函数作用域），显式绑定局部变量规避误报
+            multipart_expected_size: int = audio_info.filesize
             try:
                 success = await self._download_with_curl_cffi_multipart(
                     url=audio_info.url,
                     target_path=target_path,
-                    expected_size=audio_info.filesize,
+                    expected_size=multipart_expected_size,
                     headers=headers,
                 )
                 if success:
@@ -1115,11 +1195,36 @@ class AudioDownloader:
                     return final_path
             except DownloaderError as e:
                 if e.error_code == ErrorCode.CDP_DOWNLOAD_403:
-                    # 分片下载 403：不直接放弃，降级到单线程尝试
+                    # 分片下载 403：不直接放弃，先尝试一次阶段级 cookie 重试
                     # 403 可能是分片 Range 请求方式导致，不一定是 IP 级封锁
                     errors.append(f"curl_cffi_multipart: {e.message}")
                     logger.warning(
                         f"[{self.downloader_name}] Multipart got 403, "
+                        "checking cookie retry before falling back to single-thread"
+                    )
+
+                    retry_success = await self._maybe_retry_with_cookie(
+                        stage="multipart",
+                        download_call=lambda h: self._download_with_curl_cffi_multipart(
+                            url=audio_info.url,
+                            target_path=target_path,
+                            expected_size=multipart_expected_size,
+                            headers=h,
+                        ),
+                        original_headers=headers,
+                        cookies=cookies,
+                        target_url=audio_info.url,
+                        errors=errors,
+                    )
+                    if retry_success:
+                        logger.info(
+                            f"[{self.downloader_name}] Downloaded via curl_cffi "
+                            f"(multipart, cookie retry): {target_path}"
+                        )
+                        final_path = await self._convert_to_m4a_if_needed(target_path, output_dir)
+                        return final_path
+                    logger.warning(
+                        f"[{self.downloader_name}] Multipart cookie retry not applicable or failed, "
                         "falling back to single-thread (403 may be Range-specific)"
                     )
                 else:
@@ -1153,7 +1258,32 @@ class AudioDownloader:
                 if e.error_code == ErrorCode.CDP_DOWNLOAD_403:
                     errors.append(f"curl_cffi: {e.message}")
                     logger.warning(
-                        f"[{self.downloader_name}] Single-thread also got 403, "
+                        f"[{self.downloader_name}] Single-thread got 403, "
+                        "checking cookie retry before trying alternative CDN nodes"
+                    )
+
+                    retry_success = await self._maybe_retry_with_cookie(
+                        stage="single-thread",
+                        download_call=lambda h: self._download_with_curl_cffi(
+                            url=audio_info.url,
+                            target_path=target_path,
+                            expected_size=audio_info.filesize,
+                            headers=h,
+                        ),
+                        original_headers=headers,
+                        cookies=cookies,
+                        target_url=audio_info.url,
+                        errors=errors,
+                    )
+                    if retry_success:
+                        logger.info(
+                            f"[{self.downloader_name}] Downloaded via curl_cffi "
+                            f"(single-thread, cookie retry): {target_path}"
+                        )
+                        final_path = await self._convert_to_m4a_if_needed(target_path, output_dir)
+                        return final_path
+                    logger.warning(
+                        f"[{self.downloader_name}] Single-thread cookie retry not applicable or failed, "
                         "trying alternative CDN nodes"
                     )
                 else:
@@ -1224,6 +1354,76 @@ class AudioDownloader:
             error_code=ErrorCode.CDP_DOWNLOAD_FAILED,
             downloader=self.downloader_name,
         )
+
+    async def _maybe_retry_with_cookie(
+        self,
+        stage: str,
+        download_call: Callable[[Dict[str, str]], Awaitable[bool]],
+        original_headers: Dict[str, str],
+        cookies: Optional[List[Dict[str, Any]]],
+        target_url: str,
+        errors: List[str],
+    ) -> bool:
+        """
+        403 后的阶段级单次 cookie 重试（生产取证结论落地）。
+
+        仅在以下条件全部满足时才会真正发起一次重试请求：
+        - cookies 非空
+        - 原始 headers 未携带 Cookie（避免与 has_cookie=True 场景重复触发，
+          此时说明浏览器捕获到的真实请求本来就带 cookie，无需新逻辑介入）
+        - 目标 URL 能匹配到至少一个 cookie（域名命中）
+
+        每次调用最多发起一次下载尝试（阶段级重试，不叠加分片内部的
+        3 次重试矩阵）；调用方在各自的 403 分支中各调用一次，
+        天然保证"每个阶段最多一次"。
+
+        Args:
+            stage: 阶段标识（用于日志与错误归类，如 "multipart"/"single-thread"）
+            download_call: 绑定了 url/target_path/expected_size 的下载协程工厂，
+                接受合并后的 headers 并返回下载是否成功
+            original_headers: 首次请求使用的 headers（用于 has_cookie 判断，
+                以及作为合并 Cookie 头的基底，保留其余原始头部不变）
+            cookies: CDP 捕获的 cookie 列表
+            target_url: 下载目标 URL（用于域匹配）
+            errors: 错误收集列表，重试失败时原地追加
+
+        Returns:
+            bool: 重试是否下载成功
+        """
+        if not cookies:
+            return False
+        if any(k.lower() == "cookie" for k in original_headers):
+            # 原始 headers 已带 Cookie（has_cookie=True 场景），不触发新逻辑
+            return False
+
+        matched = self._match_cookies_for_url(cookies, target_url)
+        if not matched:
+            return False
+
+        cookie_header = "; ".join(f"{c['name']}={c.get('value', '')}" for c in matched)
+        retry_headers = dict(original_headers)
+        retry_headers["Cookie"] = cookie_header
+
+        logger.info(
+            f"[{self.downloader_name}] [403 CookieRetry] retrying {stage} with "
+            f"{len(matched)} matched cookies"
+        )
+
+        try:
+            success = await download_call(retry_headers)
+            if not success:
+                errors.append(f"{stage}_cookie_retry: download returned False")
+            return success
+        except DownloaderError as e:
+            errors.append(f"{stage}_cookie_retry: {e.message}")
+            logger.warning(
+                f"[{self.downloader_name}] Cookie retry for {stage} failed: {e.message}"
+            )
+            return False
+        except Exception as e:
+            errors.append(f"{stage}_cookie_retry: {str(e)}")
+            logger.warning(f"[{self.downloader_name}] Cookie retry for {stage} failed: {e}")
+            return False
 
     def _sanitize_filename(self, text: str) -> str:
         """
