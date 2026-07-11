@@ -130,12 +130,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Initialize services with error handling
     try:
         file_service = FileService(db, settings)
-        task_service = TaskService(db, settings, file_service)
-        callback_service = CallbackService(db, file_service)
-        notify_service = NotificationService(settings, db)
 
         # 初始化下载器管理器（用于元数据获取和下载）
+        # 需要在 TaskService 之前构造，供其前置检查（precheck）复用同一条
+        # 带缓存的元数据获取路径，避免重复实现。
         downloader_manager = DownloaderManager(settings, db)
+
+        task_service = TaskService(
+            db, settings, file_service, downloader_manager=downloader_manager
+        )
+        callback_service = CallbackService(db, file_service)
+        notify_service = NotificationService(settings, db)
 
         if settings.manual_upload_enabled:
             transcode_service = TranscodeService()
