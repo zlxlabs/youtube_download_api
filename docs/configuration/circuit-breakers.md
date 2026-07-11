@@ -122,8 +122,33 @@ IP 熔断器采用**被动探测**策略：
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `MIN_WAIT_BEFORE_RETRY` | `3600` | 最小等待时间（秒），触发熔断后必须等待这么久才允许重试 |
-| `MAX_RETRY_INTERVAL` | `1800` | 重试间隔（秒），失败后至少等待这么久才允许下次尝试 |
+| `IP_BAN_MIN_WAIT_BEFORE_RETRY` | `3600` | 最小等待时间（秒），触发熔断后必须等待这么久才允许重试 |
+| `IP_BAN_MAX_RETRY_INTERVAL` | `1800` | 重试间隔（秒），失败后至少等待这么久才允许下次尝试 |
+
+### 状态持久化与重启恢复
+
+IP 熔断器每次状态变更（触发/升级/降级/恢复正常/启动时恢复）都会实时持久化到数据库：`ip_ban_status` 表保存当前状态快照（单行 upsert），`ip_ban_history` 表追加一条事件记录（`triggered`/`upgraded`/`downgraded`/`recovered`/`restored`）。持久化写入失败是 fail-open 的：只记日志，不影响熔断器本身的运行——熔断器本身不直接依赖数据库，保持纯内存、可独立单测。
+
+这解决的问题是：熔断器状态原本完全在内存中，服务重启（例如 D3 自动部署每次 push 到 main 触发的容器重启）会丢失熔断状态，重启后服务会误判为 `NORMAL` 全速请求 YouTube，加重封禁风险。
+
+```
+场景：服务在 AUDIO_BANNED 期间重启
+
+时刻 10:00 - 音频任务 403，触发 AUDIO_BANNED
+           → 状态写入 ip_ban_status，历史写入 ip_ban_history
+
+时刻 10:20 - D3 自动部署触发容器重启
+           → 内存中的熔断器状态丢失
+
+时刻 10:20 - Worker 启动，调用 _restore_ip_ban_state()
+           → 读取 ip_ban_status，判定仍未过期（尚未到 11:00）
+           → 熔断状态原样恢复到内存中的 IPBanCircuitBreaker 实例
+
+时刻 10:20-11:00 - 继续保持 AUDIO_BANNED，仅允许字幕任务
+                   → 避免误判为 NORMAL 全速请求 YouTube
+```
+
+是否恢复的判定使用与 `get_estimated_recovery_time` 完全一致的公式（`calculate_ban_recovery_time`）：取 `banned_at + IP_BAN_MIN_WAIT_BEFORE_RETRY` 与 `last_attempt_at + IP_BAN_MAX_RETRY_INTERVAL` 中较大的一个作为最早恢复时间；已过期则忽略，保持 `NORMAL`。
 
 ### 实际效果
 
@@ -165,8 +190,8 @@ CIRCUIT_BREAKER_TIMEOUT=1800
 CIRCUIT_BREAKER_HALF_OPEN_CALLS=3
 
 # ====== IP 熔断器 ======
-MIN_WAIT_BEFORE_RETRY=3600
-MAX_RETRY_INTERVAL=1800
+IP_BAN_MIN_WAIT_BEFORE_RETRY=3600
+IP_BAN_MAX_RETRY_INTERVAL=1800
 
 # ====== 间隔策略 ======
 TRANSCRIPT_INTERVAL_MIN=20

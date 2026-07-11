@@ -10,8 +10,10 @@ Docker 部署的 YouTube 音频下载服务，提供 RESTful API 接口，支持
 - **灵活下载模式** - 支持仅音频/仅字幕/完整模式
 - **智能资源复用** - 文件级缓存，同视频资源跨任务共享
 - **多下载器降级** - CDP + yt-dlp + TikHub API 三重保障，自动降级切换
+- **前置可用性拦截** - 创建任务前预检直播/预约首播/不可用视频，提前 422 拒绝，不建注定失败的任务
+- **失败归因统计** - 记录下载器归属与降级链尝试，`/api/v1/stats/downloads` 端点一键查看失败构成
 - **熔断器保护** - 智能熔断机制，避免持续性故障影响服务
-- **IP 熔断机制** - 被动探测型分级 IP 熔断，智能应对 YouTube 风控
+- **IP 熔断机制** - 被动探测型分级 IP 熔断，智能应对 YouTube 风控，状态持久化，重启后自动恢复
 - **风控绕过** - TLS 指纹模拟 + PO Token 机制
 - **任务队列** - 异步处理，支持并发控制和错误重试
 - **双模式通知** - Webhook 回调 + 轮询查询
@@ -131,6 +133,7 @@ docker-compose -f docker/docker-compose.prod.yml logs -f youtube-api
 | POST | `/api/v1/manual-upload` | 人工上传音频 | 需要 |
 | GET | `/api/v1/video-resources` | 列出视频资源 | 需要 |
 | GET | `/api/v1/videos/{video_id}/info` | 查询视频元数据 | 需要 |
+| GET | `/api/v1/stats/downloads` | 下载失败归因统计 | 需要 |
 | GET | `/health` | 健康检查 | 公开 |
 
 **完整 API 文档**：[API 参考文档](docs/api-reference.md)

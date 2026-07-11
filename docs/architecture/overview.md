@@ -129,7 +129,7 @@
 - 异步任务处理
 
 **主要组件**：
-- `DownloaderManager` - 下载器管理和降级
+- `DownloaderManager` - 下载器管理和降级。**全局单例**：由 `main.py` 的 `lifespan` 统一创建一次，注入给 Worker、TaskService（用于任务创建前的前置检查）、NotificationService 等，避免出现多份互相独立的熔断器/统计状态
 - `Worker` - 异步任务队列
 - `IPBanBreaker` - IP 熔断器保护
 
@@ -172,32 +172,38 @@
 1. 客户端创建任务
    POST /api/v1/tasks
    ↓
-2. TaskService 创建任务记录
+2. TaskService 检查文件级缓存（该 video_id 下是否已有请求的音频/字幕文件）
+   ├─ 命中且已覆盖请求 → 直接返回（cache_hit=true）
+   └─ 未命中/覆盖不足 → 继续
    ↓
-3. 检查资源缓存（video_resources）
-   ├─ 命中 → 直接返回（cache_hit=true）
-   └─ 未命中 → 继续
+3. 检查同 video_id 是否有活跃（pending/downloading）任务，避免重复创建
+   ├─ 有且已覆盖本次请求的音频/字幕需求 → 复用返回该任务
+   └─ 无，或覆盖不足 → 继续
    ↓
-4. Worker 将任务加入队列
+4. 前置检查（precheck）：探测视频是否已知不可下载（直播/预约首播/私享/地区限制等）
+   ├─ 明确判定不可下载 → 同步返回 422，不创建任务
+   └─ 探测超时/下载器全部失败/其它异常 → fail-open，继续
    ↓
-5. Worker 执行任务
+5. TaskService 创建任务记录，加入队列
    ↓
-6. DownloaderManager 选择下载器
-   ├─ CDP（如果启用）
+6. Worker 从队列取出任务执行
+   ↓
+7. DownloaderManager 按场景化优先级选择下载器
+   ├─ CDP（真实浏览器指纹，音频场景最高优先级）
    ├─ yt-dlp
    └─ TikHub
    ↓
-7. 下载器下载资源
+8. 下载器下载资源
    ├─ 音频文件 → /data/files/audio/
    └─ 字幕文件 → /data/files/transcript/
    ↓
-8. FileService 保存文件记录
+9. FileService 保存文件记录
    ↓
-9. VideoResources 更新缓存
+10. VideoResources 更新缓存
    ↓
-10. CallbackService 发送 Webhook（如配置）
+11. CallbackService 发送 Webhook（如配置）
    ↓
-11. NotifyService 发送企微通知（如配置）
+12. NotifyService 发送企微通知（如配置）
 ```
 
 ---
