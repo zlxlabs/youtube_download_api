@@ -281,6 +281,38 @@ class DownloaderManager:
             ),
         )
 
+    def _merge_probe_metadata(self, base: dict, probe: dict) -> dict:
+        """
+        合并 get_metadata 降级链中"直播状态补全探测"的结果。
+
+        背景：部分下载器（如 TikHub）的 API 没有直播状态字段，fetch_metadata
+        对 live_broadcast_content 恒定返回 None（"未知"）。当链上第一个成功
+        结果的 live 状态未知时，get_metadata 会继续向后探测，本方法负责把
+        探测结果合并回主体。
+
+        合并规则：
+        - 以 base（链上第一个成功结果）为主体，保留其所有已有的非空字段
+        - live_broadcast_content 用 probe（后续探测结果）的值覆盖——这是发起
+          补全探测的唯一目的
+        - probe 中 base 缺失（None/空）的其他字段可以顺带补充，但不覆盖 base
+          已有的非空字段
+
+        Args:
+            base: 链上第一个成功返回非空元数据的下载器结果
+            probe: 后续补全探测的下载器结果
+
+        Returns:
+            合并后的元数据字典（不修改入参，返回新字典）
+        """
+        merged = dict(base)
+        for key, value in probe.items():
+            if key == "live_broadcast_content":
+                merged[key] = value
+                continue
+            if not merged.get(key) and value:
+                merged[key] = value
+        return merged
+
     def _get_prioritized_downloaders(
         self,
         include_audio: bool,
@@ -823,6 +855,13 @@ class DownloaderManager:
         2. 数据库未命中，按优先级调用下载器
         3. 成功后写入数据库
 
+        直播状态补全探测：链上第一个成功返回非空元数据的下载器，若其
+        live_broadcast_content 为 None（下载器本身不支持判定直播状态，如
+        TikHub），且链上还有后续下载器，会继续调用后续下载器补全该字段并
+        与主体合并（见 _merge_probe_metadata）；一旦拿到非 None 的判定结果
+        立即停止（成本守护，不多打无谓请求），全链仍判定不了则维持 None。
+        落库的是合并后的最终结果。
+
         并发控制：
         - 使用视频级别的锁，防止同一视频重复 API 调用
         - 双重检查模式（获取锁后再次检查缓存）
@@ -898,6 +937,15 @@ class DownloaderManager:
 
             errors: List[str] = []
 
+            # 链上第一个成功返回非空元数据的下载器结果，作为最终返回的主体。
+            # 部分下载器（如 TikHub）没有直播状态字段，fetch_metadata 恒定把
+            # live_broadcast_content 标记为 None（"未知"，而非"确认非直播"）。
+            # 若第一个成功结果的 live 状态未知，且链上还有后续下载器，继续向后
+            # 探测以补全 live 状态（precheck 的 422 判定依赖这个字段），拿到能
+            # 判定的结果后与主体合并；全链都判定不了则维持 None 返回，语义与
+            # 探测前一致（fail-open）。
+            accumulated: Optional[dict] = None
+
             for name in downloader_names:
                 # 查找下载器
                 downloader = next((d for d in self.downloaders if d.name == name), None)
@@ -908,23 +956,48 @@ class DownloaderManager:
                 # 使用重试逻辑调用下载器
                 # 注意：_fetch_metadata_with_retry 在 raise_content_errors=True 且
                 # 命中内容级终态错误时会直接向上 raise（不吞异常），此处不捕获，
-                # 让异常自然传播出 get_metadata（连带释放上面的视频级锁）。
+                # 让异常自然传播出 get_metadata（连带释放上面的视频级锁）。这在
+                # 补全探测阶段同样适用：后续下载器抛出的内容级错误本身就是有效的
+                # 终态信号，不因为已经拿到过一次成功结果就被吞掉。
                 metadata = await self._fetch_metadata_with_retry(
                     downloader, video_url, video_id, errors,
                     raise_content_errors=raise_content_errors,
                 )
 
-                if metadata:
-                    # 写入数据库（永久保存）
-                    if self.db:
-                        try:
-                            # 确保 metadata 是字典
-                            metadata_dict = metadata if isinstance(metadata, dict) else metadata.__dict__
-                            await self._save_metadata_to_db(video_id, metadata_dict)
-                        except Exception as e:
-                            logger.warning(f"Failed to save metadata to database: {e}")
+                if not metadata:
+                    # 该下载器未拿到数据，继续尝试链上下一个（原有降级语义不变）
+                    continue
 
-                    return metadata
+                if accumulated is None:
+                    accumulated = metadata
+                else:
+                    logger.info(
+                        f"[{downloader.name}] Probing for live status completion: "
+                        f"live_broadcast_content={metadata.get('live_broadcast_content')!r}"
+                    )
+                    accumulated = self._merge_probe_metadata(accumulated, metadata)
+
+                if accumulated.get("live_broadcast_content") is not None:
+                    # live 状态已判定（"live"/"upcoming"/"none"）：成本守护，
+                    # 立即停止，不再多打一次请求
+                    break
+
+                # live 状态仍未知，若链上还有后续下载器，for 循环自然继续探测；
+                # 若已是最后一个，循环正常结束，accumulated 维持 live=None
+
+            if accumulated:
+                # 写入数据库（永久保存），落库的是合并后的最终结果
+                if self.db:
+                    try:
+                        # 确保 metadata 是字典
+                        metadata_dict = (
+                            accumulated if isinstance(accumulated, dict) else accumulated.__dict__
+                        )
+                        await self._save_metadata_to_db(video_id, metadata_dict)
+                    except Exception as e:
+                        logger.warning(f"Failed to save metadata to database: {e}")
+
+                return accumulated
 
             # 所有下载器都失败
             logger.error(f"All downloaders failed to fetch metadata for {video_id}")
