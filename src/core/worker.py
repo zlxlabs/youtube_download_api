@@ -1503,8 +1503,18 @@ class DownloadWorker:
                     "IP recovered: Audio downloads are now available"
                 )
 
-            elif result.partial_success and transcript_success:
-                # 字幕成功但音频仍失败
+            elif result.partial_success and (
+                transcript_success or result.has_transcript is False
+            ):
+                # 字幕请求成功但音频仍失败。和下面 FULLY_BANNED 分支的判定同理
+                # （P2 同类缺陷收尾，2026-07-11）：字幕"成功"不能只看
+                # transcript_path 是否非空——视频本身没有原生字幕时，ytdlp 的
+                # _download_with_partial_success 走"音频失败 -> 字幕降级成功"
+                # 路径，会成功返回 partial_success=True / transcript_path=None /
+                # has_transcript=False（不抛异常；音频字幕双失败路径必然抛
+                # DownloaderError，根本到不了这里）。字幕请求本身成功即证明
+                # 字幕侧没被封禁，只应维持/延长音频熔断，绝不能被误判为
+                # "音频字幕双失败"而错误升级到全局熔断。
                 logger.info("Transcript OK but audio still banned, continuing audio ban")
                 await self.ip_ban_breaker.extend_audio_ban()
 

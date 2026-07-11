@@ -439,6 +439,136 @@ class TestFullyBannedNoNativeCaptionIsNotMisreadAsStillBanned:
         worker.notify_service.send_ip_recovery_notification.assert_called_once()
 
 
+class TestAudioBannedNoNativeCaptionIsNotMisreadAsUpgrade:
+    """
+    P2 同类缺陷收尾（AUDIO_BANNED 侧）：`elif result.partial_success and
+    transcript_success:` 沿用旧的 transcript_success（transcript_path is not
+    None）判定。AUDIO_BANNED 期间的混合探测任务命中"视频本身没有原生字幕"
+    时，ytdlp 的 _download_with_partial_success 会走"音频失败 -> 字幕降级
+    成功"路径，成功返回 partial_success=True / transcript_path=None /
+    has_transcript=False——字幕请求本身成功了（证明字幕侧没被封禁），却被
+    误判为"音频字幕双失败"，错误升级到 FULLY_BANNED。
+    """
+
+    @pytest.mark.asyncio
+    async def test_audio_banned_mixed_probe_audio_fail_no_caption_extends_not_upgrades(
+        self, ban_settings: Settings
+    ) -> None:
+        """
+        AUDIO_BANNED + 混合探测任务 + 音频下载失败 + 视频没有原生字幕
+        （partial_success=True, transcript_path=None, has_transcript=False）
+        -> 字幕请求本身成功，按既有语义走"字幕 OK 但音频仍失败"分支：
+        维持 AUDIO_BANNED 并延长（event_type="extended"），绝不能升级到
+        FULLY_BANNED。
+        """
+        db = AsyncMock()
+        worker = _make_worker(db, ban_settings)
+
+        await worker.ip_ban_breaker.trigger_audio_ban(reason="seed")
+        worker.ip_ban_breaker.banned_at -= timedelta(
+            seconds=ban_settings.ip_ban_min_wait_before_retry + 10
+        )
+        db.save_ip_ban_state.reset_mock()
+        db.append_ip_ban_history.reset_mock()
+
+        task = _make_task(
+            "probe-mixed-no-caption", include_audio=True, include_transcript=True
+        )
+        worker.task_service.get_next_task = AsyncMock(return_value=task)
+        worker.db.get_task = AsyncMock(return_value=task)
+        # 模拟 ytdlp _download_with_partial_success 的部分成功返回：音频失败、
+        # 字幕降级请求成功但视频没有原生字幕（不抛异常）。
+        worker.downloader_manager.download_with_fallback = AsyncMock(
+            return_value=DownloaderResult(
+                success=True,
+                partial_success=True,
+                downloader="ytdlp",
+                video_metadata=VideoMetadata(
+                    video_id=task.video_id, title="NoCaptionPartial"
+                ),
+                audio_path=None,
+                transcript_path=None,
+                has_transcript=False,
+                audio_error="IP_BANNED_403: audio still blocked",
+                audio_error_code="RATE_LIMITED",
+            )
+        )
+
+        worker._running = True
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            await worker._process_next_task()
+
+        assert worker.ip_ban_breaker.get_current_level() == IPBanLevel.AUDIO_BANNED, (
+            "无字幕视频的部分成功探测必须被识别为'字幕请求成功、音频仍失败'，"
+            "维持 AUDIO_BANNED；如果变成 FULLY_BANNED，说明又被误判为双失败升级"
+        )
+        db.save_ip_ban_state.assert_called_once()
+        assert (
+            db.save_ip_ban_state.call_args.kwargs["current_level"]
+            == IPBanLevel.AUDIO_BANNED
+        )
+        # 既有持久化设计：extend_audio_ban 产生的 "extended" 事件只更新状态表
+        # （save_ip_ban_state），刻意不写历史表（_IP_BAN_HISTORY_EVENT_TYPES
+        # 只含 triggered/upgraded/downgraded/recovered/restored，避免探测期间
+        # 高频延长刷屏历史记录）。因此这里"历史表零调用"正是区分信号：如果被
+        # 误判为双失败升级，会写入一条 event_type="upgraded" 的历史。
+        db.append_ip_ban_history.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_audio_banned_mixed_probe_audio_success_no_caption_recovers_to_normal(
+        self, ban_settings: Settings
+    ) -> None:
+        """
+        AUDIO_BANNED + 混合探测任务 + 音频下载成功 + 视频没有原生字幕
+        -> audio_success 分支优先命中，按既有语义解除熔断回 NORMAL；
+        无字幕不影响音频恢复判定（回归锁定，防止本次修复改变分支顺序语义）。
+        """
+        db = AsyncMock()
+        worker = _make_worker(db, ban_settings)
+
+        await worker.ip_ban_breaker.trigger_audio_ban(reason="seed")
+        worker.ip_ban_breaker.banned_at -= timedelta(
+            seconds=ban_settings.ip_ban_min_wait_before_retry + 10
+        )
+        db.save_ip_ban_state.reset_mock()
+        db.append_ip_ban_history.reset_mock()
+
+        task = _make_task(
+            "probe-mixed-audio-ok-no-caption",
+            include_audio=True,
+            include_transcript=True,
+        )
+        worker.task_service.get_next_task = AsyncMock(return_value=task)
+        worker.db.get_task = AsyncMock(return_value=task)
+        worker.downloader_manager.download_with_fallback = AsyncMock(
+            return_value=DownloaderResult(
+                success=True,
+                downloader="ytdlp",
+                video_metadata=VideoMetadata(
+                    video_id=task.video_id, title="NoCaptionAudioOK"
+                ),
+                audio_path=Path("/tmp/fake-audio-nocaption.m4a"),
+                transcript_path=None,
+                has_transcript=False,
+            )
+        )
+
+        worker._running = True
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            await worker._process_next_task()
+
+        assert worker.ip_ban_breaker.get_current_level() == IPBanLevel.NORMAL, (
+            "音频探测成功必须解除音频熔断回 NORMAL，无字幕视频不影响这一判定"
+        )
+        db.save_ip_ban_state.assert_called_once()
+        assert (
+            db.save_ip_ban_state.call_args.kwargs["current_level"] == IPBanLevel.NORMAL
+        )
+        db.append_ip_ban_history.assert_called_once()
+        assert db.append_ip_ban_history.call_args.kwargs["event_type"] == "recovered"
+        worker.notify_service.send_ip_recovery_notification.assert_called_once()
+
+
 class TestFullyBannedTranscriptRealFailureKeepsBanActive:
     """回归测试：FULLY_BANNED 期间字幕探测真正失败（403 异常）的既有语义不受影响。"""
 
