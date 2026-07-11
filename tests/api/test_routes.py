@@ -25,7 +25,8 @@ from src.api.schemas import (
     TaskListResponse,
     TaskResponse,
 )
-from src.db.models import FileRecord, FileType, TaskPriority, TaskStatus
+from src.db.models import ErrorCode, FileRecord, FileType, TaskPriority, TaskStatus
+from src.services.task_service import VideoNotDownloadableError
 
 
 # -- Constants --
@@ -345,6 +346,48 @@ class TestCreateTask:
         )
         assert response.status_code == status.HTTP_400_BAD_REQUEST
         assert "bad input" in response.json()["detail"]
+
+    def test_create_task_video_not_downloadable_returns_422(
+        self, client: TestClient, mock_task_service: AsyncMock
+    ) -> None:
+        """
+        视频被前置检查判定为不可下载（如直播中）时，应返回 422，
+        body 中包含 error_code / message / video_id 三个字段。
+        """
+        mock_task_service.create_task.side_effect = VideoNotDownloadableError(
+            video_id=TEST_VIDEO_ID,
+            error_code=ErrorCode.VIDEO_LIVE_STREAM,
+            message="Video is a live broadcast (status: live), not available for download",
+        )
+        response = client.post(
+            "/api/v1/tasks",
+            json={"video_url": TEST_VIDEO_URL},
+            headers=_auth_headers(),
+        )
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        body = response.json()["detail"]
+        assert body["error_code"] == ErrorCode.VIDEO_LIVE_STREAM.value
+        assert body["video_id"] == TEST_VIDEO_ID
+        assert "live" in body["message"].lower()
+
+    def test_create_task_video_unavailable_returns_422(
+        self, client: TestClient, mock_task_service: AsyncMock
+    ) -> None:
+        """视频不可用（已删除等）同样应返回 422，error_code 对应透传。"""
+        mock_task_service.create_task.side_effect = VideoNotDownloadableError(
+            video_id=TEST_VIDEO_ID,
+            error_code=ErrorCode.VIDEO_UNAVAILABLE,
+            message="Video not found",
+        )
+        response = client.post(
+            "/api/v1/tasks",
+            json={"video_url": TEST_VIDEO_URL},
+            headers=_auth_headers(),
+        )
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        body = response.json()["detail"]
+        assert body["error_code"] == ErrorCode.VIDEO_UNAVAILABLE.value
+        assert body["video_id"] == TEST_VIDEO_ID
 
     def test_create_task_unexpected_error_returns_500(
         self, client: TestClient, mock_task_service: AsyncMock
