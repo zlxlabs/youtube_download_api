@@ -393,14 +393,18 @@ class TestCreateTask:
         self, client: TestClient
     ) -> None:
         """
-        422 响应的 OpenAPI 声明必须与实际响应体一致。
+        422 响应的 OpenAPI 声明必须覆盖两种实际会发生的响应体形态。
 
-        实现里通过 ``raise HTTPException(422, detail={...})`` 抛出，实际响应体是
-        ``{"detail": {error_code, message, video_id}}``（FastAPI HTTPException 的
-        detail 包裹惯例，上面两个用例已验证），而不是平铺的
-        ``{error_code, message, video_id}``。因此 OpenAPI responses 声明必须引用
-        一个带 detail 字段的包裹模型（VideoNotDownloadableErrorResponse），
-        否则据此生成的客户端代码会按错误的契约反序列化。
+        POST /tasks 的 422 有两个互不相关的触发源：
+        1. precheck 判定视频不可下载：``raise HTTPException(422, detail={...})``，
+           实际响应体是 ``{"detail": {error_code, message, video_id}}``
+           （FastAPI HTTPException 的 detail 包裹惯例，上面两个用例已验证）。
+        2. 请求体本身未通过 FastAPI/pydantic 校验：响应体是
+           ``{"detail": [{loc, msg, type}, ...]}``（标准 RequestValidationError
+           结构，见上面 test_create_task_missing_url_returns_422 等用例）。
+
+        因此 OpenAPI responses 声明必须是两者的并集（anyOf），而不是只声明
+        其中一种——否则据此生成的客户端代码在遇到另一种响应体时会反序列化失败。
         """
         schema = client.app.openapi()  # type: ignore[union-attr]
         responses = schema["paths"]["/api/v1/tasks"]["post"]["responses"]
@@ -412,12 +416,23 @@ class TestCreateTask:
         wrapper_schema = schema["components"]["schemas"][model_name]
         assert "detail" in wrapper_schema["properties"]
 
-        detail_ref = wrapper_schema["properties"]["detail"]["$ref"]
-        detail_model_name = detail_ref.rsplit("/", 1)[-1]
-        assert detail_model_name == "VideoNotDownloadableResponse"
+        detail_schema = wrapper_schema["properties"]["detail"]
+        any_of = detail_schema["anyOf"]
+        assert len(any_of) == 2
 
-        detail_schema = schema["components"]["schemas"][detail_model_name]
-        assert set(detail_schema["properties"]) == {"error_code", "message", "video_id"}
+        # 变体一：业务拒绝详情对象（VideoNotDownloadableResponse）
+        object_variant = next(v for v in any_of if "$ref" in v)
+        object_model_name = object_variant["$ref"].rsplit("/", 1)[-1]
+        assert object_model_name == "VideoNotDownloadableResponse"
+        object_schema = schema["components"]["schemas"][object_model_name]
+        assert set(object_schema["properties"]) == {"error_code", "message", "video_id"}
+
+        # 变体二：FastAPI 请求体校验错误详情数组（ValidationErrorDetail 列表）
+        array_variant = next(v for v in any_of if v.get("type") == "array")
+        array_item_model_name = array_variant["items"]["$ref"].rsplit("/", 1)[-1]
+        assert array_item_model_name == "ValidationErrorDetail"
+        array_item_schema = schema["components"]["schemas"][array_item_model_name]
+        assert set(array_item_schema["properties"]) == {"loc", "msg", "type"}
 
     def test_create_task_unexpected_error_returns_500(
         self, client: TestClient, mock_task_service: AsyncMock

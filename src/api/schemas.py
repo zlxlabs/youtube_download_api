@@ -5,7 +5,7 @@ Provides type-safe validation for all API endpoints.
 """
 
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator
 
@@ -286,28 +286,42 @@ class VideoNotDownloadableResponse(BaseModel):
     video_id: str = Field(..., description="YouTube video ID that was rejected")
 
 
-class VideoNotDownloadableErrorResponse(BaseModel):
-    """
-    422 响应体的实际包裹结构。
-
-    实现里 POST /tasks 通过 ``raise HTTPException(422, detail={...})`` 抛出，
-    FastAPI 会把 detail 包一层，实际响应体是 ``{"detail": {error_code, message,
-    video_id}}``——不是 VideoNotDownloadableResponse 那种平铺结构。此模型仅用于
-    OpenAPI responses 声明，使生成的文档/客户端代码与真实响应体一致；不改变
-    任何实际返回内容。
-    """
-
-    detail: VideoNotDownloadableResponse = Field(
-        ..., description="Structured error detail (FastAPI HTTPException wrapping convention)"
-    )
-
-
 class ValidationErrorDetail(BaseModel):
-    """Validation error detail."""
+    """
+    FastAPI/pydantic 请求体（或查询参数）校验失败时，detail 数组里每一项的结构。
+
+    这是 FastAPI 的标准 RequestValidationError 契约，非本项目自定义。
+    """
 
     loc: list[Any]
     msg: str
     type: str
+
+
+class VideoNotDownloadableErrorResponse(BaseModel):
+    """
+    POST /tasks 422 响应体的实际契约（业务拒绝 与 FastAPI 校验错误的并集）。
+
+    同一个 422 状态码在这个端点上有两个互不相关的触发源，body 形态完全不同：
+    1. 前置检查（precheck）判定视频不可下载：实现里
+       ``raise HTTPException(422, detail={...})``，FastAPI 会把 detail 包一层，
+       实际响应体是 ``{"detail": {error_code, message, video_id}}``——即
+       VideoNotDownloadableResponse。
+    2. 请求体本身未通过 pydantic 校验（如 video_url 缺失、include_audio 与
+       include_transcript 同时为 False）：FastAPI 自动抛出
+       RequestValidationError，响应体是 ``{"detail": [{loc, msg, type}, ...]}``
+       ——即 ValidationErrorDetail 列表。这条路径不经过上面的业务异常分支，
+       运行时行为本身不受本模型影响。
+
+    detail 字段用 Union（渲染为 OpenAPI anyOf）同时声明两种形态，避免生成的
+    客户端代码只按其中一种反序列化、遇到另一种直接报错。仅用于 OpenAPI
+    responses 声明，不改变任何实际返回内容。
+    """
+
+    detail: Union[VideoNotDownloadableResponse, list[ValidationErrorDetail]] = Field(
+        ...,
+        description="业务拒绝详情对象（precheck 拦截），或 FastAPI 请求体校验失败的错误详情数组",
+    )
 
 
 class ValidationErrorResponse(BaseModel):

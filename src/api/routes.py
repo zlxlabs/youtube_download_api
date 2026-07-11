@@ -81,14 +81,16 @@ FileServiceDep = Annotated[FileService, Depends(get_file_service)]
         401: {"model": ErrorResponse, "description": "Unauthorized"},
         403: {"model": ErrorResponse, "description": "Forbidden"},
         422: {
-            # 实际响应体是 FastAPI HTTPException 的 detail 包裹结构
-            # （{"detail": {error_code, message, video_id}}），因此声明用
-            # VideoNotDownloadableErrorResponse（包一层 detail），而不是
-            # 平铺的 VideoNotDownloadableResponse——否则生成的 OpenAPI 文档/
-            # 客户端代码会按错误的契约反序列化。
+            # 422 在这个端点有两个互不相关的触发源，body 形态不同：
+            # 1. precheck 判定视频不可下载：{"detail": {error_code, message, video_id}}
+            # 2. 请求体本身未通过 FastAPI/pydantic 校验：{"detail": [{loc, msg, type}, ...]}
+            # VideoNotDownloadableErrorResponse.detail 已声明为两者的 Union
+            # （渲染成 OpenAPI anyOf），使生成的文档/客户端代码覆盖两种实际
+            # 可能收到的响应体，而不是只按其中一种反序列化。
             "model": VideoNotDownloadableErrorResponse,
             "description": "Video is not downloadable (live stream, upcoming premiere, "
-            "unavailable, private, or region blocked)",
+            "unavailable, private, or region blocked), or the request body failed "
+            "validation",
         },
     },
     summary="Create download task",

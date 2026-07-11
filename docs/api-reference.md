@@ -227,6 +227,8 @@ curl -X POST http://localhost:8000/api/v1/tasks \
 
 拦截信息位于 `detail` 字段内（FastAPI 标准错误包装），包含 `error_code` / `message` / `video_id` 三个字段。可能返回的 `error_code`：`VIDEO_UNAVAILABLE` / `VIDEO_PRIVATE` / `VIDEO_REGION_BLOCKED` / `VIDEO_LIVE_STREAM`（直播中或预约首播）。
 
+注意：同一个 422 状态码还会在请求体本身未通过校验时返回（如 `video_url` 缺失、`include_audio` 与 `include_transcript` 同时为 `false`）。这种情况下 `detail` 是数组而非对象，形如 `{"detail": [{"loc": [...], "msg": "...", "type": "..."}]}`（FastAPI 标准校验错误结构）。调用方需要区分这两种 `detail` 形态。
+
 **前置检查配置**：默认启用，可通过 `PRECHECK_ENABLED` / `PRECHECK_TIMEOUT` 调整，详见 [配置总览 - 任务前置检查配置](./configuration/overview.md#任务前置检查配置)。
 
 ### 任务优先级说明
