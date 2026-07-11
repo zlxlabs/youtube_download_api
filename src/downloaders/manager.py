@@ -17,26 +17,15 @@ from src.downloaders.base import BaseDownloader
 from src.downloaders.cdp import CDPDownloader
 from src.downloaders.circuit_breaker import CircuitBreaker, CircuitBreakerOpen
 from src.downloaders.exceptions import AllDownloadersFailed, DownloaderAttempt, DownloaderError
-from src.downloaders.models import DownloaderResult, VideoMetadata
+from src.downloaders.models import CONTENT_LEVEL_ERROR_CODES, DownloaderResult, VideoMetadata
 from src.downloaders.tikhub_downloader import TikHubDownloader
 from src.downloaders.youtube_data_api_downloader import YoutubeDataApiDownloader
 from src.downloaders.ytdlp_downloader import YtdlpDownloader
 from src.utils.logger import logger
 
-
-# 元数据获取阶段的"内容级终态错误"：由视频自身状态导致、与具体下载器实现无关的错误。
-# get_metadata(raise_content_errors=True) 一旦在降级链中遇到这些错误码，会立即向上
-# 抛出对应的 DownloaderError，不再尝试链上后续下载器——换下载器不会改变视频的客观状态。
-# 与 models.py 的 ErrorCode 枚举保持一致（VIDEO_ 前缀里凡是"状态已明确"的终态错误）。
-CONTENT_LEVEL_ERROR_CODES = frozenset(
-    {
-        ErrorCode.VIDEO_UNAVAILABLE,
-        ErrorCode.VIDEO_PRIVATE,
-        ErrorCode.VIDEO_REGION_BLOCKED,
-        ErrorCode.VIDEO_LIVE_STREAM,
-        ErrorCode.VIDEO_AGE_RESTRICTED,
-    }
-)
+# CONTENT_LEVEL_ERROR_CODES 的定义已迁移到 src.downloaders.models（避免 manager.py
+# 与各下载器实现模块之间的循环导入，见该模块内注释）。这里通过 import 保留同名模块
+# 属性，`from src.downloaders.manager import CONTENT_LEVEL_ERROR_CODES` 的旧引用不受影响。
 
 
 class DownloaderStats:

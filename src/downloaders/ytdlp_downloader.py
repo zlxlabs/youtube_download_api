@@ -16,7 +16,12 @@ from src.core.downloader import (
 from src.db.models import ErrorCode, VideoInfo
 from src.downloaders.base import BaseDownloader
 from src.downloaders.exceptions import DownloaderError
-from src.downloaders.models import DownloaderResult, DownloaderType, VideoMetadata
+from src.downloaders.models import (
+    CONTENT_LEVEL_ERROR_CODES,
+    DownloaderResult,
+    DownloaderType,
+    VideoMetadata,
+)
 from src.utils.logger import logger
 
 
@@ -406,12 +411,23 @@ class YtdlpDownloader(BaseDownloader):
         """
         仅获取视频元数据（不下载任何文件）。
 
+        内容级终态错误（视频不存在/私有/地区限制/年龄限制/直播）会向上抛出
+        DownloaderError，而不是像其余错误那样吞掉返回 None——这是
+        DownloaderManager.get_metadata(raise_content_errors=True) 和
+        live_broadcast_content 直播探测能感知到真实错误的唯一信号源
+        （否则 precheck 的 422 拦截在默认 metadata_priority 配置下永远拿不到
+        终态信号，参见 core.downloader.get_video_info 的分类逻辑）。
+
         Args:
             video_url: YouTube 视频 URL
             video_id: YouTube 视频 ID
 
         Returns:
-            视频元数据字典，失败返回 None
+            视频元数据字典，非内容级错误（网络/限流/PO Token 等）时返回 None
+
+        Raises:
+            DownloaderError: 遇到内容级终态错误时抛出，error_code 为
+                CONTENT_LEVEL_ERROR_CODES 中的一个。
         """
         try:
             from src.core.downloader import get_video_info
@@ -422,7 +438,24 @@ class YtdlpDownloader(BaseDownloader):
                 "title": video_info.title,
                 "author": video_info.author,
                 "duration": video_info.duration,
+                "live_broadcast_content": video_info.live_broadcast_content,
             }
+        except YtdlpDownloadError as e:
+            if e.error_code in CONTENT_LEVEL_ERROR_CODES:
+                logger.warning(
+                    f"[ytdlp] Content-level error while fetching metadata: "
+                    f"{e.error_code.value} - {e.message}"
+                )
+                raise DownloaderError(
+                    message=e.message,
+                    error_code=e.error_code,
+                    downloader=self.name,
+                    http_status_code=e.http_status_code,
+                ) from e
+            # 非内容级错误（网络错误、限流、PO Token 失败等）：维持原有行为，
+            # 吞掉异常返回 None，交由 DownloaderManager 的降级/重试逻辑处理。
+            logger.warning(f"[ytdlp] Failed to get video metadata: {e}")
+            return None
         except Exception as e:
             logger.warning(f"[ytdlp] Failed to get video metadata: {e}")
             return None

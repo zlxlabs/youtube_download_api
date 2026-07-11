@@ -284,6 +284,13 @@ class YoutubeDataApiDownloader(BaseDownloader):
                 http_status_code=status_code,
             ) from e
 
+        except DownloaderError:
+            # 已经是分类完整的 DownloaderError（如上面 response.items 为空时抛出的
+            # VIDEO_UNAVAILABLE）：直接透传。修复前这里没有这个分支，导致该异常会
+            # 被继续下面的 `except Exception` 捕获，字符串里不含网络关键词就被
+            # 误改写成 DOWNLOAD_FAILED，丢失了明确的"视频不存在"语义。
+            raise
+
         except Exception as e:
             logger.error(f"[youtube_data_api] Unexpected error: {e}")
 

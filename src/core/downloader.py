@@ -974,9 +974,13 @@ class YouTubeDownloader:
 
         return None
 
-    def _map_ytdlp_error(self, error: Exception) -> tuple[ErrorCode, str, Optional[int]]:
+    @staticmethod
+    def _map_ytdlp_error(error: Exception) -> tuple[ErrorCode, str, Optional[int]]:
         """
         Map yt-dlp exception to error code, message, and HTTP status code.
+
+        标记为 staticmethod（不依赖 self）是为了让模块级函数 get_video_info() 也能
+        复用同一份分类逻辑，避免维护两份漂移的错误映射表。
 
         Args:
             error: yt-dlp exception.
@@ -1048,6 +1052,43 @@ class YouTubeDownloader:
         )
 
 
+def _map_live_status_to_broadcast_content(live_status: Optional[str]) -> Optional[str]:
+    """
+    将 yt-dlp extract_info() 返回的 live_status 字段映射为与 YouTube Data API v3
+    的 liveBroadcastContent 语义一致的取值（"live" / "upcoming" / "none"）。
+
+    yt-dlp 的 live_status 取值域（参见 yt_dlp/extractor/youtube/_video.py）：
+    - "is_live"：正在直播
+    - "is_upcoming"：预约首播，尚未开始
+    - "was_live"：直播已结束，现在是可下载的录像
+    - "post_live"：直播刚结束，正在转码为点播（同样属于"非直播中"）
+    - "not_live"：普通点播视频
+    - None：字段缺失（极少数提取路径可能不携带该字段）
+
+    映射策略：
+    - is_live -> "live"，is_upcoming -> "upcoming"：DownloaderManager/precheck
+      会据此拒绝下载。
+    - was_live / post_live / not_live -> "none"：状态已明确，不是直播，无需再
+      触发一次强制刷新。
+    - None（未知）-> None：不擅自判定为"none"，交给 DownloaderManager 现有的
+      "缺 live_broadcast_content 则强制刷新一次"兜底逻辑处理，避免把"不知道"
+      误当成"确认不是直播"。
+
+    Args:
+        live_status: yt-dlp info 字典中的 live_status 字段值。
+
+    Returns:
+        "live" / "upcoming" / "none" / None。
+    """
+    if live_status == "is_live":
+        return "live"
+    if live_status == "is_upcoming":
+        return "upcoming"
+    if live_status in ("not_live", "was_live", "post_live"):
+        return "none"
+    return None
+
+
 async def get_video_info(video_url: str, settings: Settings) -> VideoInfo:
     """
     Get video information without downloading.
@@ -1060,7 +1101,11 @@ async def get_video_info(video_url: str, settings: Settings) -> VideoInfo:
         VideoInfo object.
 
     Raises:
-        DownloadError: If info extraction fails.
+        DownloadError: If info extraction fails. 内容级终态错误（视频不存在/私有/
+            地区限制/年龄限制/直播）会带上对应的 ErrorCode（复用
+            YouTubeDownloader._map_ytdlp_error 分类器），而不是统一的
+            DOWNLOAD_FAILED——这是 fetch_metadata() 判断"是否为可终态判定的内容
+            错误"的依据。
     """
     opts: dict[str, Any] = {
         "quiet": True,
@@ -1091,7 +1136,19 @@ async def get_video_info(video_url: str, settings: Settings) -> VideoInfo:
             upload_date=info.get("upload_date"),
             view_count=info.get("view_count"),
             thumbnail=info.get("thumbnail"),
+            live_broadcast_content=_map_live_status_to_broadcast_content(
+                info.get("live_status")
+            ),
         )
+
+    except yt_dlp.utils.DownloadError as e:
+        # 复用 YouTubeDownloader._map_ytdlp_error（staticmethod）做错误分类，
+        # 与 download()/extract_transcript_only() 两条真实下载路径保持一致——
+        # 之前这里统一吞成 DOWNLOAD_FAILED，导致内容级错误（私有/不可用/直播等）
+        # 在仅获取元数据的路径上完全无法区分。
+        error_code, message, http_status_code = YouTubeDownloader._map_ytdlp_error(e)
+        logger.error(f"Failed to get video info: {error_code.value} - {message}")
+        raise DownloadError(error_code, message, http_status_code) from e
 
     except Exception as e:
         logger.error(f"Failed to get video info: {e}")
