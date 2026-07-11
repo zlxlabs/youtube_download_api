@@ -146,6 +146,27 @@ class TestPrecheckRejectsUndownloadable:
 
         assert exc_info.value.error_code == ErrorCode.VIDEO_REGION_BLOCKED
 
+    @pytest.mark.asyncio
+    async def test_precheck_requests_content_errors_to_be_raised(
+        self, task_service: TaskService, mock_downloader_manager: MagicMock
+    ) -> None:
+        """
+        precheck 必须显式请求 get_metadata 在内容级终态错误上抛出（raise_content_errors=True）。
+
+        背景：DownloaderManager.get_metadata 默认会吞掉所有下载器的 DownloaderError 并
+        返回 None，precheck 的 except DownloaderError 分支在生产环境因此永远走不到。
+        这里 mock 的是 get_metadata 本身，无法体现"是否真的会抛"——但可以锁死调用参数，
+        防止未来有人误删这个 kwarg 导致 422 拦截在生产环境再次静默失效
+        （真实吞错/抛错行为由 tests/unit/test_metadata_content_errors.py 覆盖）。
+        """
+        request = CreateTaskRequest(video_url=TEST_VIDEO_URL)
+
+        await task_service.create_task(request)
+
+        mock_downloader_manager.get_metadata.assert_awaited_once_with(
+            video_url=TEST_VIDEO_URL, video_id=TEST_VIDEO_ID, raise_content_errors=True
+        )
+
 
 class TestPrecheckFailOpen:
     """

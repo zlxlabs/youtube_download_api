@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 from src.config import Settings
 from src.core.downloader import DownloadCancelledError
 from src.db.database import Database
+from src.db.models import ErrorCode
 from src.downloaders.base import BaseDownloader
 from src.downloaders.cdp import CDPDownloader
 from src.downloaders.circuit_breaker import CircuitBreaker, CircuitBreakerOpen
@@ -21,6 +22,21 @@ from src.downloaders.tikhub_downloader import TikHubDownloader
 from src.downloaders.youtube_data_api_downloader import YoutubeDataApiDownloader
 from src.downloaders.ytdlp_downloader import YtdlpDownloader
 from src.utils.logger import logger
+
+
+# 元数据获取阶段的"内容级终态错误"：由视频自身状态导致、与具体下载器实现无关的错误。
+# get_metadata(raise_content_errors=True) 一旦在降级链中遇到这些错误码，会立即向上
+# 抛出对应的 DownloaderError，不再尝试链上后续下载器——换下载器不会改变视频的客观状态。
+# 与 models.py 的 ErrorCode 枚举保持一致（VIDEO_ 前缀里凡是"状态已明确"的终态错误）。
+CONTENT_LEVEL_ERROR_CODES = frozenset(
+    {
+        ErrorCode.VIDEO_UNAVAILABLE,
+        ErrorCode.VIDEO_PRIVATE,
+        ErrorCode.VIDEO_REGION_BLOCKED,
+        ErrorCode.VIDEO_LIVE_STREAM,
+        ErrorCode.VIDEO_AGE_RESTRICTED,
+    }
+)
 
 
 class DownloaderStats:
@@ -808,6 +824,7 @@ class DownloaderManager:
         video_id: str,
         priority: Optional[str] = None,
         force_refresh: bool = False,
+        raise_content_errors: bool = False,
     ) -> Optional[dict]:
         """
         获取视频元数据（仅元数据，不下载资源）。
@@ -826,9 +843,19 @@ class DownloaderManager:
             video_id: YouTube 视频 ID
             priority: 自定义优先级（如 "ytdlp,tikhub"），默认使用 metadata_priority
             force_refresh: 强制刷新（跳过数据库缓存）
+            raise_content_errors: 为 True 时，若降级链中某个下载器抛出内容级终态错误
+                （见模块级 CONTENT_LEVEL_ERROR_CODES：VIDEO_UNAVAILABLE/VIDEO_PRIVATE/
+                VIDEO_REGION_BLOCKED/VIDEO_LIVE_STREAM/VIDEO_AGE_RESTRICTED），立即将
+                该 DownloaderError 向上抛出，不再尝试链上其余下载器。默认为 False，
+                行为与此前完全一致（吞掉所有下载器异常，全部失败时返回 None），
+                因此除显式传参的调用点外，其余调用点零影响。
 
         Returns:
-            视频元数据字典，失败返回 None
+            视频元数据字典，失败返回 None（force_refresh 命中数据库缓存的路径不受
+            raise_content_errors 影响——缓存不是错误来源）
+
+        Raises:
+            DownloaderError: 仅当 raise_content_errors=True 且遇到内容级终态错误时抛出。
 
         Example:
             # 使用默认优先级
@@ -839,6 +866,9 @@ class DownloaderManager:
 
             # 强制刷新
             metadata = await manager.get_metadata(url, video_id, force_refresh=True)
+
+            # 前置检查场景：内容级错误需要立即感知，不能被吞掉
+            metadata = await manager.get_metadata(url, video_id, raise_content_errors=True)
         """
         async with self._get_metadata_lock(video_id):
             # 1. 检查数据库缓存（双重检查）
@@ -887,8 +917,12 @@ class DownloaderManager:
                     continue
 
                 # 使用重试逻辑调用下载器
+                # 注意：_fetch_metadata_with_retry 在 raise_content_errors=True 且
+                # 命中内容级终态错误时会直接向上 raise（不吞异常），此处不捕获，
+                # 让异常自然传播出 get_metadata（连带释放上面的视频级锁）。
                 metadata = await self._fetch_metadata_with_retry(
-                    downloader, video_url, video_id, errors
+                    downloader, video_url, video_id, errors,
+                    raise_content_errors=raise_content_errors,
                 )
 
                 if metadata:
@@ -916,6 +950,7 @@ class DownloaderManager:
         video_url: str,
         video_id: str,
         errors: List[str],
+        raise_content_errors: bool = False,
     ) -> Optional[dict]:
         """
         使用指定下载器获取元数据，带有重试和指数退避。
@@ -924,15 +959,22 @@ class DownloaderManager:
         - 临时性网络错误（SSL、超时）：最多重试 2 次
         - API 限流、配额超限：不重试（直接降级）
         - 指数退避：1s, 2s
+        - 内容级终态错误（见 CONTENT_LEVEL_ERROR_CODES）：不重试，且当
+          raise_content_errors=True 时立即向上抛出（视频状态客观存在，
+          重试或换下载器都不会改变结果）
 
         Args:
             downloader: 下载器实例
             video_url: 视频 URL
             video_id: 视频 ID
             errors: 错误列表（用于记录失败信息）
+            raise_content_errors: 遇到内容级终态错误时是否向上抛出（而非吞掉返回 None）
 
         Returns:
             视频元数据字典，失败返回 None
+
+        Raises:
+            DownloaderError: 仅当 raise_content_errors=True 且遇到内容级终态错误时抛出。
         """
         # 默认最大重试次数
         max_retries = 2
@@ -955,6 +997,17 @@ class DownloaderManager:
                     return metadata
 
             except DownloaderError as e:
+                # 内容级终态错误：视频状态客观存在，与下载器实现无关，拿到即可判定，
+                # 不必等重试或整条降级链跑完。放在 should_retry 判断之前，
+                # 确保即使某个下载器把它标记为"可重试"也不会白白重试。
+                if raise_content_errors and e.error_code in CONTENT_LEVEL_ERROR_CODES:
+                    logger.warning(
+                        f"[{downloader.name}] Content-level terminal error: "
+                        f"{e.error_code.value} - {e.message}, raising immediately "
+                        f"(raise_content_errors=True)"
+                    )
+                    raise
+
                 # 判断是否应该重试
                 should_retry = downloader.should_retry(e)
                 is_last_attempt = attempt == max_retries

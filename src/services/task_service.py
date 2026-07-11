@@ -279,7 +279,12 @@ class TaskService:
         try:
             metadata = await asyncio.wait_for(
                 self.downloader_manager.get_metadata(
-                    video_url=request.video_url, video_id=video_id
+                    video_url=request.video_url,
+                    video_id=video_id,
+                    # 内容级终态错误（VIDEO_UNAVAILABLE/VIDEO_PRIVATE/...）必须让
+                    # get_metadata 向上抛出，否则默认行为会把异常吞掉、返回 None，
+                    # 下面的 except DownloaderError 分支永远走不到，422 拦截失效。
+                    raise_content_errors=True,
                 ),
                 timeout=self.settings.precheck_timeout,
             )
