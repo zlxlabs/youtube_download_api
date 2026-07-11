@@ -1596,6 +1596,65 @@ class Database:
     # 加重封禁。这里的方法只负责读写，何时调用由 worker.py 的回调/启动恢复
     # 流程决定，Database 本身不感知熔断器的业务语义。
 
+    # -------------------- naive 本地时间 <-> aware UTC 转换 --------------------
+    # 收敛点：IPBanCircuitBreaker 内部全程使用 naive 本地时间（不带时区的
+    # datetime.now()）做时间运算，这是熔断器既有约定，本次修复不改动 breaker
+    # 内部实现。但本文件顶部注册的全局 sqlite3 datetime 适配器
+    # _adapt_datetime_iso 会把任何"没有时区信息的 naive datetime"一律当作
+    # UTC 直接写入——如果把 breaker 的 naive 本地时间原样传给 execute()，
+    # 生产环境 TZ=Asia/Shanghai 下，18:00 本地触发的熔断会被误存成 18:00Z
+    # （实际应为 10:00Z），ip_ban_status/ip_ban_history 的绝对时间全部偏
+    # 8 小时；一旦部署时区变化，历史数据的偏移量还会跟着漂移、无法订正。
+    # 下面这对私有辅助函数把"breaker 的 naive-local 约定"与"全局适配器的
+    # naive-视为-UTC 约定"之间的转换收敛到一处，save_ip_ban_state /
+    # append_ip_ban_history（写入路径）与 load_ip_ban_state（读取路径）
+    # 分别调用，其余落库逻辑不需要感知这个历史背景。
+
+    @staticmethod
+    def _local_naive_to_utc(dt: Optional[datetime]) -> Optional[datetime]:
+        """
+        把 breaker 产出的 naive 本地 datetime 转换成 aware UTC datetime。
+
+        Python 的 datetime.astimezone() 对 naive 输入有特殊处理：会先把它
+        当作"系统本地时区"表达的时间来解释，再转换到目标时区（见官方
+        文档），因此 dt.astimezone(timezone.utc) 一步就能正确完成
+        "naive 本地 -> aware UTC" 的转换；对已经带时区的 aware 输入，同一行
+        代码也能正确转换到 UTC（不会重复按本地时区解释一次），因此不需要
+        区分 naive/aware 两种分支。
+
+        Args:
+            dt: breaker 产出的 naive 本地 datetime（或已是 aware 的
+                datetime），None 原样返回
+
+        Returns:
+            aware UTC datetime，None 原样返回
+        """
+        if dt is None:
+            return None
+        return dt.astimezone(timezone.utc)
+
+    @staticmethod
+    def _utc_to_local_naive(dt: Optional[datetime]) -> Optional[datetime]:
+        """
+        把数据库读出的 aware UTC datetime 转换成 breaker 期望的 naive 本地
+        时间，与 _local_naive_to_utc 互为逆操作。
+
+        dt.astimezone()（不传参数）把 aware datetime 转换到当前进程的
+        系统本地时区，随后 replace(tzinfo=None) 去掉时区信息还原成 naive，
+        使其能与 breaker 内部的 datetime.now() 直接做减法等运算，而不会
+        因为 naive/aware 混用抛异常。
+
+        Args:
+            dt: 数据库读出的 aware UTC datetime（全局 TIMESTAMP 转换器
+                _convert_timestamp 保证返回 aware UTC），None 原样返回
+
+        Returns:
+            naive 本地 datetime，None 原样返回
+        """
+        if dt is None:
+            return None
+        return dt.astimezone().replace(tzinfo=None)
+
     async def save_ip_ban_state(
         self,
         current_level: IPBanLevel,
@@ -1611,9 +1670,12 @@ class Database:
 
         Note:
             banned_at / last_attempt_at 应传入 IPBanCircuitBreaker 内部使用的
-            naive datetime（datetime.now()）。存储时按现有全局适配器规则处理
-            （naive 视为 UTC 写入），读取时 load_ip_ban_state 会去掉时区信息
-            还原为 naive，与 breaker 内部的时间运算保持兼容。
+            naive datetime（datetime.now()，代表系统本地时间）。本方法在写入
+            前会先用 _local_naive_to_utc 转换成真正的 aware UTC datetime 再落库
+            （外部 review 第13轮问题3：不能让 naive 值被全局适配器误当 UTC
+            直接写入，否则非 UTC 时区部署下存储的绝对时间会整体偏移），
+            读取时 load_ip_ban_state 用 _utc_to_local_naive 转换回 naive，
+            与 breaker 内部的时间运算保持兼容。
 
         Args:
             current_level: 当前熔断级别
@@ -1639,8 +1701,8 @@ class Database:
                 """,
                 (
                     current_level.value,
-                    banned_at,
-                    last_attempt_at,
+                    self._local_naive_to_utc(banned_at),
+                    self._local_naive_to_utc(last_attempt_at),
                     failed_attempts,
                     now,
                 ),
@@ -1658,8 +1720,9 @@ class Database:
         Returns:
             字典，包含：
             - current_level (IPBanLevel): 当前熔断级别
-            - banned_at (Optional[datetime]): 熔断触发时间（naive）
-            - last_attempt_at (Optional[datetime]): 最近一次尝试时间（naive）
+            - banned_at (Optional[datetime]): 熔断触发时间（naive 本地时间，
+              见 _utc_to_local_naive）
+            - last_attempt_at (Optional[datetime]): 最近一次尝试时间（同上）
             - failed_attempts (int): 熔断期间失败尝试次数
 
             单行表记录不存在时返回 None（正常情况下建表逻辑会预置一条
@@ -1674,16 +1737,10 @@ class Database:
         if row is None:
             return None
 
-        def _to_naive(value: Optional[datetime]) -> Optional[datetime]:
-            """去掉时区信息，还原为 IPBanCircuitBreaker 内部使用的 naive datetime。"""
-            if value is None:
-                return None
-            return value.replace(tzinfo=None)
-
         return {
             "current_level": IPBanLevel(row["current_level"]),
-            "banned_at": _to_naive(row["banned_at"]),
-            "last_attempt_at": _to_naive(row["last_attempt_at"]),
+            "banned_at": self._utc_to_local_naive(row["banned_at"]),
+            "last_attempt_at": self._utc_to_local_naive(row["last_attempt_at"]),
             "failed_attempts": row["failed_attempts"] or 0,
         }
 
@@ -1713,14 +1770,20 @@ class Database:
             trigger_task_id: 触发事件的任务 ID，可选
             trigger_downloader: 触发事件的下载器名称，可选
             trigger_error: 触发原因/错误描述，可选
-            banned_at: 本次事件对应的熔断开始时间；未提供时使用当前时间
-            recovered_at: 恢复时间（通常仅 recovered 事件填写）
+            banned_at: 本次事件对应的熔断开始时间（IPBanCircuitBreaker 产出的
+                naive 本地时间）；未提供时使用当前时间（已是 aware UTC）
+            recovered_at: 恢复时间（通常仅 recovered 事件填写；调用方可能传入
+                naive 本地时间，也可能已经是 aware UTC——见 _local_naive_to_utc
+                对两种输入的统一处理）
             duration_seconds: 本次熔断持续时长（秒），可选
             probe_count: 探测次数，默认 0
             recovery_method: 恢复方式（如 'auto_probe' | 'restored'），可选
         """
         now = datetime.now(timezone.utc)
 
+        # banned_at/recovered_at 可能来自 IPBanCircuitBreaker 的 naive 本地
+        # datetime（既有约定），落库前统一转换成 aware UTC（外部 review
+        # 第13轮问题3），避免被全局适配器误当 UTC 直接写入。
         async with self.transaction():
             await self.execute(
                 """
@@ -1737,8 +1800,8 @@ class Database:
                     trigger_task_id,
                     trigger_downloader,
                     trigger_error,
-                    banned_at or now,
-                    recovered_at,
+                    self._local_naive_to_utc(banned_at) or now,
+                    self._local_naive_to_utc(recovered_at),
                     duration_seconds,
                     probe_count,
                     recovery_method,

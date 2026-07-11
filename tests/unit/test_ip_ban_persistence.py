@@ -15,6 +15,7 @@
 7. Settings 新增的 ip_ban_min_wait_before_retry / ip_ban_max_retry_interval
 """
 
+import time
 from collections.abc import Generator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -242,6 +243,118 @@ class TestDatabaseIPBanPersistence:
         event_types = [row["event_type"] for row in rows]
 
         assert event_types == ["triggered", "upgraded", "downgraded", "recovered"]
+
+
+# ==================== 时区正确性测试（外部 review 第13轮问题3，P2） ====================
+
+
+class TestIPBanPersistenceTimezoneCorrectness:
+    """
+    IPBanCircuitBreaker 全程使用 naive 本地时间做时间运算（既有约定，本次
+    修复不改动 breaker 内部实现）。save_ip_ban_state / append_ip_ban_history
+    落库前必须把 naive 本地时间正确转换成 aware UTC，而不是被全局 sqlite
+    适配器"naive 视为 UTC"的默认规则误当 UTC 直接写入——否则生产环境
+    TZ=Asia/Shanghai 下，18:00 本地触发的熔断会被存成 18:00Z（实际应为
+    10:00Z），status/history 的绝对时间全部偏 8 小时；一旦部署时区变化，
+    历史数据的偏移量还会继续漂移。
+
+    这里通过 monkeypatch TZ 环境变量 + time.tzset() 模拟非 UTC 部署时区。
+    注意：光测"save 再 load 一致"不够——旧的 bug 实现（naive 直接透传给
+    全局适配器）在同一进程内 save/load 全程使用同一个系统时区，误转换会
+    自我抵消，往返结果照样一致，掩盖了绝对时间存错的问题。所以下面同时
+    用 CAST(... AS TEXT) 绕过 PARSE_DECLTYPES 自动转换，直接断言数据库里
+    的原始存储字符串是真正的 UTC，才能真正锁死这个 bug。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _shanghai_timezone(self, monkeypatch: Any) -> Generator[None, None, None]:
+        """把进程时区强制设为 Asia/Shanghai（UTC+8），模拟生产 TZ 配置。"""
+        monkeypatch.setenv("TZ", "Asia/Shanghai")
+        time.tzset()
+        yield
+        # monkeypatch 会在测试结束时自动撤销 TZ 环境变量，这里同步调用
+        # time.tzset() 让进程时区设置也一起还原，避免污染后续测试。
+        time.tzset()
+
+    @pytest.mark.asyncio
+    async def test_save_ip_ban_status_stores_true_utc_not_local_mislabeled(
+        self, test_db: Database
+    ) -> None:
+        """save_ip_ban_state 存储的 banned_at 原始值应是真正的 UTC，而非本地时间。"""
+        # 2026-01-01 18:00:00 本地时间（Asia/Shanghai, UTC+8）-> 应存为 10:00:00Z
+        banned_at_local = datetime(2026, 1, 1, 18, 0, 0)
+
+        await test_db.save_ip_ban_state(
+            current_level=IPBanLevel.AUDIO_BANNED,
+            banned_at=banned_at_local,
+            last_attempt_at=None,
+            failed_attempts=1,
+        )
+
+        cursor = await test_db.execute(
+            "SELECT CAST(banned_at AS TEXT) AS raw FROM ip_ban_status WHERE id = 1"
+        )
+        row = await cursor.fetchone()
+        assert row is not None
+        raw_value = row["raw"]
+        assert raw_value is not None
+        assert raw_value.startswith("2026-01-01T10:00:00"), (
+            f"18:00 本地时间（UTC+8）应存为 10:00:00Z，实际存储值：{raw_value}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_append_ip_ban_history_stores_true_utc_not_local_mislabeled(
+        self, test_db: Database
+    ) -> None:
+        """append_ip_ban_history 存储的 banned_at 原始值应是真正的 UTC。"""
+        # 23:30 本地时间（Asia/Shanghai, UTC+8）-> 应存为 15:30:00Z
+        banned_at_local = datetime(2026, 6, 15, 23, 30, 0)
+
+        await test_db.append_ip_ban_history(
+            event_type="triggered",
+            ban_level=IPBanLevel.FULLY_BANNED.value,
+            banned_at=banned_at_local,
+        )
+
+        cursor = await test_db.execute(
+            "SELECT CAST(banned_at AS TEXT) AS raw FROM ip_ban_history "
+            "ORDER BY id DESC LIMIT 1"
+        )
+        row = await cursor.fetchone()
+        assert row is not None
+        raw_value = row["raw"]
+        assert raw_value is not None
+        assert raw_value.startswith("2026-06-15T15:30:00"), (
+            f"23:30 本地时间（UTC+8）应存为 15:30:00Z，实际存储值：{raw_value}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_save_and_load_round_trip_naive_local_under_non_utc_tz(
+        self, test_db: Database
+    ) -> None:
+        """
+        往返一致性：非 UTC 时区下，save 一个 naive 本地时间，load 回来应该
+        还原成同一个 naive 本地时间（与 breaker 内部时间运算兼容），即使
+        底层存储的已经是正确转换后的 UTC。
+        """
+        banned_at_local = datetime(2026, 3, 10, 9, 15, 30)
+        last_attempt_local = banned_at_local + timedelta(minutes=20)
+
+        await test_db.save_ip_ban_state(
+            current_level=IPBanLevel.AUDIO_BANNED,
+            banned_at=banned_at_local,
+            last_attempt_at=last_attempt_local,
+            failed_attempts=2,
+        )
+
+        state = await test_db.load_ip_ban_state()
+
+        assert state is not None
+        assert state["banned_at"] == banned_at_local
+        assert state["last_attempt_at"] == last_attempt_local
+        # 读回的时间戳必须是 naive（与 breaker 内部 datetime.now() 保持一致）
+        assert state["banned_at"].tzinfo is None
+        assert state["last_attempt_at"].tzinfo is None
 
 
 # ==================== IPBanCircuitBreaker 回调钩子测试 ====================
