@@ -238,10 +238,22 @@ class DownloadWorker:
         NORMAL 全速请求 YouTube，加重封禁。这里在 worker 启动的第一时间尝试
         从数据库恢复，是本次持久化功能修复该问题的关键路径。
 
-        恢复判定：仅当持久化状态处于熔断中（非 NORMAL）且未过期（用与
-        IPBanCircuitBreaker.get_estimated_recovery_time 完全相同的公式
-        calculate_ban_recovery_time 计算）才恢复；已过期或本来就是 NORMAL
-        则忽略，让熔断器保持默认 NORMAL 状态。
+        恢复判定：只要持久化状态处于熔断中（非 NORMAL）就无条件恢复，不做
+        "是否已过 recovery_time" 的过期判断。
+
+        这个熔断器（见 ip_ban_breaker.py）是被动探测型的：recovery_time
+        只表示"从这一刻起 should_allow_attempt() 会放行一个探测任务"，
+        并不代表 IP 已经恢复——真正的降级/恢复要等探测任务执行成功才会
+        发生（见 _analyze_result_and_update_ban）。如果启动时因为
+        recovery_time 已过就把持久化的熔断状态当成"过期"直接忽略，会导致
+        服务重启后（FULLY_BANNED 场景下这个窗口可达小时级，而 D3 又是每次
+        push 就重启）所有排队任务全速放行、完全跳过探测分析，持久化保护
+        形同虚设。
+
+        恢复之后，被动探测机制天然自洽：如果 recovery_time 已经过了，
+        第一个匹配的任务就会被 should_allow_attempt() 当作探测放行，
+        探测成功即自愈（reset_to_normal / downgrade_to_audio_ban），
+        不需要在这里额外处理"已过期"的情况。
 
         数据库读取失败（如首次启动尚未建表的极端情况）fail-open：记录错误
         日志后放弃恢复，不阻塞 worker 启动。
@@ -258,13 +270,22 @@ class DownloadWorker:
 
         banned_at = saved["banned_at"]
         if banned_at is None:
-            # 数据不一致：非 NORMAL 却缺少触发时间，无法判定是否过期，保守起见不恢复
+            # 数据不一致：非 NORMAL 却缺少触发时间，无法计算探测窗口，保守起见不恢复
             logger.warning(
                 f"Persisted IP ban state ({saved['current_level'].value}) has no "
                 f"banned_at timestamp, skip restore"
             )
             return
 
+        # 无条件恢复：不判定是否过期（理由见上方 docstring）。
+        await self.ip_ban_breaker.restore_state(
+            level=saved["current_level"],
+            banned_at=banned_at,
+            last_attempt_at=saved["last_attempt_at"],
+            failed_attempts=saved["failed_attempts"],
+        )
+
+        # 探测窗口是否已到只影响日志措辞，不影响恢复决策本身。
         recovery_time = calculate_ban_recovery_time(
             banned_at,
             saved["last_attempt_at"],
@@ -273,26 +294,20 @@ class DownloadWorker:
         )
 
         if datetime.now() >= recovery_time:
-            logger.info(
-                f"Persisted IP ban state ({saved['current_level'].value}) has "
-                f"already expired (recovery_time={recovery_time}), resuming as NORMAL"
+            logger.warning(
+                f"Restored IP ban state on startup: {saved['current_level'].value} "
+                f"(banned_at={banned_at}) -- probe already eligible, the next matching "
+                f"task will be treated as a recovery probe instead of full-speed traffic."
             )
-            return
-
-        await self.ip_ban_breaker.restore_state(
-            level=saved["current_level"],
-            banned_at=banned_at,
-            last_attempt_at=saved["last_attempt_at"],
-            failed_attempts=saved["failed_attempts"],
-        )
-
-        remaining = int((recovery_time - datetime.now()).total_seconds())
-        logger.warning(
-            f"Restored IP ban state on startup: {saved['current_level'].value} "
-            f"(banned_at={banned_at}, remaining={remaining}s before next recovery probe) -- "
-            f"this prevents the service from resuming full-speed requests to YouTube "
-            f"right after a container restart while still IP-banned."
-        )
+        else:
+            remaining = int((recovery_time - datetime.now()).total_seconds())
+            logger.warning(
+                f"Restored IP ban state on startup: {saved['current_level'].value} "
+                f"(banned_at={banned_at}, next probe eligible at {recovery_time} "
+                f"in {remaining}s) -- this prevents the service from resuming "
+                f"full-speed requests to YouTube right after a container restart "
+                f"while still IP-banned."
+            )
 
     def _send_callback_background(self, task: Task) -> None:
         """

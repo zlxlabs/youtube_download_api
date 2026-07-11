@@ -28,6 +28,7 @@ from src.core.ip_ban_breaker import IPBanCircuitBreaker, calculate_ban_recovery_
 from src.core.ip_ban_models import IPBanLevel, IPBanStateChangeContext
 from src.core.worker import DownloadWorker
 from src.db.database import Database
+from src.db.models import Task, TaskPriority, TaskStatus
 
 
 # ==================== Database 持久化测试 ====================
@@ -505,10 +506,20 @@ class TestWorkerIPBanStartupRestore:
         assert not allowed
 
     @pytest.mark.asyncio
-    async def test_restore_expired_ban_stays_normal(
+    async def test_restore_probe_window_elapsed_still_restores_ban(
         self, test_db: Database, test_settings: Settings
     ) -> None:
-        """熔断已过期（早已超过最小等待时间与重试间隔）时，忽略持久化状态。"""
+        """
+        熔断的探测窗口已到（早已超过最小等待时间与重试间隔）时，
+        熔断状态本身仍必须无条件恢复——这个熔断器是被动探测型的，
+        recovery_time 只表示"允许下一次尝试作为探测"，不代表 IP 已恢复；
+        真正的恢复要等探测任务执行成功。
+
+        如果这里因为"看起来已过期"就忽略持久化状态直接回到 NORMAL，
+        服务重启后所有排队任务会全速放行、完全跳过探测分析，持久化
+        保护形同虚设（尤其 FULLY_BANNED 场景，加上 D3 每次 push 都
+        重启，这个窗口经常是小时级）。
+        """
         test_settings.ip_ban_min_wait_before_retry = 60
         test_settings.ip_ban_max_retry_interval = 60
 
@@ -522,7 +533,37 @@ class TestWorkerIPBanStartupRestore:
         worker = _make_worker(test_db, test_settings)
         await worker._restore_ip_ban_state()
 
-        assert worker.ip_ban_breaker.get_current_level() == IPBanLevel.NORMAL
+        # 熔断级别必须原样恢复，不能因为探测窗口已到就被当成过期忽略。
+        assert worker.ip_ban_breaker.get_current_level() == IPBanLevel.AUDIO_BANNED
+        assert worker.ip_ban_breaker.failed_attempts == 1
+
+        # 被动探测机制天然自洽：探测窗口已到，对应任务类型应被
+        # should_allow_attempt() 放行（当作探测），而不是被拦截。
+        allowed, reason = worker.ip_ban_breaker.should_allow_attempt("audio")
+        assert allowed
+        assert "Allowed" in reason
+
+    @pytest.mark.asyncio
+    async def test_restore_probe_window_not_reached_blocks_attempt(
+        self, test_db: Database, test_settings: Settings
+    ) -> None:
+        """熔断的探测窗口尚未到时，恢复后应继续拦截尝试（回归覆盖旧的未过期分支）。"""
+        test_settings.ip_ban_min_wait_before_retry = 3600
+        test_settings.ip_ban_max_retry_interval = 1800
+
+        await test_db.save_ip_ban_state(
+            current_level=IPBanLevel.AUDIO_BANNED,
+            banned_at=datetime.now() - timedelta(minutes=5),
+            last_attempt_at=None,
+            failed_attempts=1,
+        )
+
+        worker = _make_worker(test_db, test_settings)
+        await worker._restore_ip_ban_state()
+
+        assert worker.ip_ban_breaker.get_current_level() == IPBanLevel.AUDIO_BANNED
+        allowed, _ = worker.ip_ban_breaker.should_allow_attempt("audio")
+        assert not allowed
 
     @pytest.mark.asyncio
     async def test_state_change_after_restore_persists_to_db(
@@ -543,6 +584,56 @@ class TestWorkerIPBanStartupRestore:
         row = await cursor.fetchone()
         assert row is not None
         assert row["event_type"] == "triggered"
+
+    @pytest.mark.asyncio
+    async def test_fully_banned_restart_first_task_is_probe_not_full_speed(
+        self, test_db: Database, test_settings: Settings
+    ) -> None:
+        """
+        端到端语义测试：FULLY_BANNED 状态持久化后，服务重启（探测窗口已到）
+        恢复出的第一个任务必须走"探测"分支（ExecutionDecision.is_probe=True），
+        而不是被当成 NORMAL 直接全速放行（decision is None）。
+
+        对应 P1 缺陷场景：FULLY_BANNED 的探测窗口可达小时级，D3 又是每次
+        push 就重启，如果重启时把"探测窗口已到"误判为"IP 已恢复"，
+        所有排队任务会跳过 _check_ip_ban_and_decide 的探测判定全速放行，
+        完全绕过 _analyze_result_and_update_ban 的探测分析。
+        """
+        test_settings.ip_ban_min_wait_before_retry = 60
+        test_settings.ip_ban_max_retry_interval = 60
+
+        # 模拟 5 小时前触发的全局熔断，早已超过探测窗口
+        await test_db.save_ip_ban_state(
+            current_level=IPBanLevel.FULLY_BANNED,
+            banned_at=datetime.now() - timedelta(hours=5),
+            last_attempt_at=datetime.now() - timedelta(hours=5),
+            failed_attempts=2,
+        )
+
+        worker = _make_worker(test_db, test_settings)
+        await worker._restore_ip_ban_state()
+
+        # 熔断状态必须原样恢复为 FULLY_BANNED，不能被当成过期回到 NORMAL
+        assert worker.ip_ban_breaker.get_current_level() == IPBanLevel.FULLY_BANNED
+
+        task = Task(
+            id="task-1",
+            video_id="video-1",
+            video_url="https://youtube.com/watch?v=video-1",
+            status=TaskStatus.PENDING,
+            include_audio=True,
+            include_transcript=True,
+            priority=TaskPriority.NORMAL,
+            created_at=datetime.now(timezone.utc),
+        )
+
+        decision = await worker._check_ip_ban_and_decide(task)
+
+        # 必须走探测分支：decision 不为 None，且 is_probe=True。
+        # 如果重启时把探测窗口已到误判为"已恢复"，这里会是 None（全速放行）。
+        assert decision is not None
+        assert decision.action == "execute"
+        assert decision.is_probe is True
 
 
 # ==================== Settings 配置项测试 ====================
