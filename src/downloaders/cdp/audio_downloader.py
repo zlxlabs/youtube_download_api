@@ -281,11 +281,17 @@ class AudioDownloader:
         cookies: Optional[List[Dict[str, Any]]], url: str
     ) -> List[Dict[str, Any]]:
         """
-        筛选出适用于目标 URL 的 cookie（RFC6265 简化版域匹配）。
+        筛选出适用于目标 URL 的 cookie（RFC6265 域匹配语义）。
 
-        匹配规则：
-        - host 与 cookie.domain 完全相等，或 host 以 "." + cookie.domain（去除
-          前导点）结尾（即 domain 以 "." 开头表示包含子域）
+        匹配规则（domain 字段是否带前导点决定 cookie 类型，语义来自 RFC6265
+        §5.1.3，CDP ``Network.getAllCookies`` 原样透传浏览器内部存储，带不带
+        点直接反映 Set-Cookie 时是否显式指定了 Domain 属性）：
+        - domain 以 "." 开头 → 域 cookie（domain cookie）：host 与去除前导点
+          后的 domain 完全相等，或 host 以 "." + domain 结尾（允许匹配子域）。
+        - domain 不以 "." 开头 → host-only cookie：只有 host 与 domain
+          完全相等才匹配，**不做子域匹配**——否则会把 cookie 发给浏览器本身
+          不会发送的子域主机（如 host-only 的 googlevideo.com cookie 被错误
+          发往 rr1.googlevideo.com），造成 cookie 作用域泄漏。
         - secure cookie 仅用于 https 请求
         - path 简化为默认全匹配（不做路径前缀校验）
 
@@ -310,11 +316,20 @@ class AudioDownloader:
 
         matched = []
         for cookie in cookies:
-            domain = (cookie.get("domain") or "").lstrip(".")
+            raw_domain = cookie.get("domain") or ""
+            if not raw_domain:
+                continue
+            is_domain_cookie = raw_domain.startswith(".")
+            domain = raw_domain.lstrip(".")
             if not domain:
                 continue
-            if host != domain and not host.endswith("." + domain):
-                continue
+            if is_domain_cookie:
+                if host != domain and not host.endswith("." + domain):
+                    continue
+            else:
+                # host-only：仅完全相等才匹配，禁止子域后缀匹配
+                if host != domain:
+                    continue
             if cookie.get("secure") and not is_https:
                 continue
             if not cookie.get("name"):

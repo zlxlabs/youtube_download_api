@@ -51,7 +51,7 @@ class TestBuildCookieHeader:
     """测试 cookie 列表 -> Cookie 请求头字符串的纯函数。"""
 
     def test_exact_domain_match(self):
-        """cookie.domain 与目标 host 完全相等时应命中。"""
+        """cookie.domain 与目标 host 完全相等时应命中（host-only 或 domain cookie 均适用）。"""
         cookies = [
             {"name": "SID", "value": "abc123", "domain": "rr1---sn-npoe7ndl.googlevideo.com", "secure": False},
         ]
@@ -65,6 +65,39 @@ class TestBuildCookieHeader:
         ]
         header = AudioDownloader._build_cookie_header(cookies, TARGET_URL)
         assert header == "HSID=xyz789"
+
+    def test_host_only_domain_does_not_match_subdomain(self):
+        """
+        host-only cookie（RFC6265，domain 无前导点）不应做子域匹配。
+
+        场景：cookie.domain="googlevideo.com"（无前导点，host-only），
+        目标 URL host 是其子域 "rr1---sn-npoe7ndl.googlevideo.com"。
+        按 RFC6265，浏览器本身也不会把这条 host-only cookie 发给该子域，
+        因此这里同样不应匹配，否则会造成 cookie 作用域泄漏。
+        """
+        cookies = [
+            {"name": "HOST_ONLY", "value": "leak", "domain": "googlevideo.com", "secure": False},
+        ]
+        header = AudioDownloader._build_cookie_header(cookies, TARGET_URL)
+        assert header == ""
+
+    def test_host_only_domain_matches_exact_host_only(self):
+        """host-only cookie 的 domain 与 host 完全相等（无子域）时仍应命中。"""
+        cookies = [
+            {"name": "HOST_ONLY", "value": "ok", "domain": "googlevideo.com", "secure": False},
+        ]
+        exact_host_url = "https://googlevideo.com/videoplayback?itag=140"
+        header = AudioDownloader._build_cookie_header(cookies, exact_host_url)
+        assert header == "HOST_ONLY=ok"
+
+    def test_domain_cookie_matches_root_domain_itself(self):
+        """domain cookie（带前导点）应同时匹配根域名自身，不仅仅是子域。"""
+        cookies = [
+            {"name": "ROOT", "value": "ok", "domain": ".googlevideo.com", "secure": False},
+        ]
+        root_url = "https://googlevideo.com/videoplayback?itag=140"
+        header = AudioDownloader._build_cookie_header(cookies, root_url)
+        assert header == "ROOT=ok"
 
     def test_non_matching_domain_excluded(self):
         """domain 不匹配的 cookie 应被排除。"""
