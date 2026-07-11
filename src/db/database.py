@@ -1415,8 +1415,8 @@ class Database:
 
         聚合最近 N 天的任务数据：状态分布、失败 error_code 分布、
         内容级（VIDEO_* 前缀）vs 系统级失败拆分、音频/字幕下载器归属分布、
-        按 ISO 周的完成/失败趋势。全部通过 SQL GROUP BY 聚合，不在 Python 中
-        遍历全表，避免任务量增长后端点变慢。
+        按周（自然周，非严格 ISO 8601 周）的完成/失败趋势。全部通过 SQL
+        GROUP BY 聚合，不在 Python 中遍历全表，避免任务量增长后端点变慢。
 
         Args:
             days: 统计时间窗口（天数）。
@@ -1510,12 +1510,21 @@ class Database:
             "transcript_downloader": transcript_downloader_dist,
         }
 
-        # 5. 按 ISO 周统计完成/失败趋势
-        # strftime('%G-W%V', ...) 输出 ISO 8601 年份+周号（如 "2026-W28"），
-        # 跨年边界处理正确，与公历周（%Y-%W）不同。
+        # 5. 按周统计完成/失败趋势
+        # 用 %Y-W%W（公历年 + 周一起始的年内周序，00-53）拼出周标签，如 "2026-W27"。
+        # 不用 strftime('%G-W%V', ...)（ISO 8601 年份+周号）：%G/%V 是 SQLite
+        # 3.46.0（2024-05）才加入的，本地/生产环境的 SQLite（含 Debian bookworm
+        # 上 python:3.11-slim 自带的 3.40.1）都更旧，遇到不支持的格式码
+        # strftime 直接返回 NULL，GROUP BY 会把所有行并成一个 {None: ...} 桶，
+        # 统计整体失真。%Y/%W 是 SQLite 从最早版本就支持的格式码，牺牲的是
+        # 严格 ISO 周语义：年末/年初几天可能出现"日期属于上一/下一个 ISO 周"
+        # 但这里仍按公历年份分桶的情况，跨年边界的周标签可能与真正的 ISO
+        # 8601 周号不完全一致，属已知折衷（换取版本兼容性）。
         weekly_cursor = await self.execute(
             """
-            SELECT strftime('%G-W%V', created_at) as week, status, COUNT(*) as count
+            SELECT strftime('%Y', created_at) || '-W' || strftime('%W', created_at)
+                   as week,
+                   status, COUNT(*) as count
             FROM tasks
             WHERE created_at >= ? AND status IN ('completed', 'failed')
             GROUP BY week, status

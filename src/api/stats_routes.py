@@ -36,7 +36,7 @@ DatabaseDep = Annotated[Database, Depends(get_database)]
     description=(
         "聚合最近 N 天的任务数据：状态分布、失败 error_code 分布、"
         "内容级（视频本身问题）/系统级（下载器/网络/风控等）失败拆分、"
-        "音频/字幕下载器归属分布、按 ISO 周的完成/失败趋势。"
+        "音频/字幕下载器归属分布、按自然周（非严格 ISO 周）的完成/失败趋势。"
     ),
 )
 async def get_download_stats(

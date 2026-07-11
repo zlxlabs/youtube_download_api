@@ -406,9 +406,15 @@ class DownloaderDistribution(BaseModel):
 
 
 class WeeklyTrendItem(BaseModel):
-    """单个 ISO 周的完成/失败趋势。"""
+    """单个自然周（%Y-%W，非严格 ISO 8601 周）的完成/失败趋势。"""
 
-    week: str = Field(..., description="ISO 8601 周标识，如 '2026-W28'")
+    week: str = Field(
+        ...,
+        description=(
+            "周标识，如 '2026-W28'（公历年 + 周一起始的年内周序，"
+            "非严格 ISO 8601 周，年末/年初边界可能有 1 周误差）"
+        ),
+    )
     completed: int = Field(..., description="该周完成任务数")
     failed: int = Field(..., description="该周失败任务数")
 
@@ -424,4 +430,6 @@ class DownloadStatsResponse(BaseModel):
     )
     failure_split: FailureSplitStats = Field(..., description="内容级/系统级失败拆分")
     by_downloader: DownloaderDistribution = Field(..., description="下载器归属分布")
-    weekly_trend: list[WeeklyTrendItem] = Field(..., description="按 ISO 周的完成/失败趋势")
+    weekly_trend: list[WeeklyTrendItem] = Field(
+        ..., description="按自然周（非严格 ISO 周）的完成/失败趋势"
+    )

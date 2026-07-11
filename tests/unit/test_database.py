@@ -1532,7 +1532,7 @@ class TestDownloadStatsAggregation:
             await test_db.update_task_status(task_id, status)
 
         # create_task/update_task_status 内部用 CURRENT_TIMESTAMP/now() 写入 created_at，
-        # 这里按需改写为测试指定的时间点，用于模拟不同时间窗口/不同 ISO 周的历史数据。
+        # 这里按需改写为测试指定的时间点，用于模拟不同时间窗口/不同自然周的历史数据。
         # 使用公开的 transaction() API 提交，不直接碰内部连接属性。
         if created_at is not None:
             async with test_db.transaction() as conn:
@@ -1615,6 +1615,13 @@ class TestDownloadStatsAggregation:
         assert stats["by_downloader"]["transcript_downloader"]["unknown"] == 1
 
     async def test_get_download_stats_weekly_trend(self, test_db: Database):
+        """
+        weekly_trend 的周标签规则是 %Y-W%W（公历年 + 周一起始年内周序），
+        不是 %G-W%V（ISO 8601 年份+周号）——后者要求 SQLite 3.46.0+，本地/
+        生产环境的 SQLite 版本都更旧，用它会让 strftime 返回 NULL。这里的
+        期望值必须用同一套规则在 Python 侧算，否则测试只在恰好装了新版
+        SQLite 的机器上偶然通过。
+        """
         now = datetime.now(timezone.utc)
         await self._seed_task(
             test_db, task_id="ds_30", video_id="ds_v30",
@@ -1627,8 +1634,9 @@ class TestDownloadStatsAggregation:
 
         stats = await test_db.get_download_stats(days=30)
 
-        current_week = now.strftime("%G-W%V")
+        current_week = f"{now.strftime('%Y')}-W{now.strftime('%W')}"
         weeks = {item["week"]: item for item in stats["weekly_trend"]}
+        assert None not in weeks, "week 键不应为 None（strftime 格式码在当前 SQLite 版本上不受支持）"
         assert current_week in weeks
         assert weeks[current_week]["completed"] == 1
         assert weeks[current_week]["failed"] == 1
