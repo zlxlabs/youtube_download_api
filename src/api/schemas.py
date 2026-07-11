@@ -269,6 +269,23 @@ class ErrorResponse(BaseModel):
     error_code: Optional[str] = None
 
 
+class VideoNotDownloadableResponse(BaseModel):
+    """
+    Response body returned when a video is rejected by the pre-creation
+    availability check (precheck).
+
+    Returned with HTTP 422 when the video is known to be undownloadable
+    before any download task is created — e.g. it is currently live,
+    an upcoming premiere, unavailable, private, or region blocked.
+    """
+
+    error_code: ErrorCode = Field(
+        ..., description="Machine-readable error code, e.g. VIDEO_LIVE_STREAM"
+    )
+    message: str = Field(..., description="Human-readable explanation")
+    video_id: str = Field(..., description="YouTube video ID that was rejected")
+
+
 class ValidationErrorDetail(BaseModel):
     """Validation error detail."""
 
