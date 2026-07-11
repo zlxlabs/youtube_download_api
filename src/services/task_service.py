@@ -184,15 +184,17 @@ class TaskService:
         # 最新一条时漏掉更早的、恰好覆盖本次请求的任务，造成重复创建。
         active_tasks = await self.db.get_active_tasks_by_video(video_id)
         if active_tasks:
-            # 需求覆盖校验：任意一条活跃任务只要涵盖本次请求需要的全部资源即可复用。
-            # 例：活跃任务只请求了音频（include_transcript=False），
-            # 而新请求需要字幕，这条任务不能满足，需要继续看下一条/照常建新任务。
+            # 需求覆盖校验：任意一条活跃任务只要涵盖本次请求"剩余需要"的资源即可复用。
+            # 注意这里对照的是 need_audio/need_transcript（剩余需求），而不是
+            # request.include_audio/include_transcript（原始请求）——文件级缓存
+            # 已命中的部分不需要任何任务提供，不应计入覆盖判断。
+            # 例：音频已缓存（need_audio=False）+ 字幕未缓存（need_transcript=True），
+            # 一条只请求了字幕的活跃任务已经能覆盖剩余需求，即使它 include_audio=False，
+            # 也应当被复用，而不是因为"没请求音频"被误判为不覆盖。
             # 全部活跃任务都覆盖不足时才创建新任务（文件级缓存会让重复部分开销很小）。
             for active_task in active_tasks:
-                covers_audio = (not request.include_audio) or active_task.include_audio
-                covers_transcript = (
-                    not request.include_transcript
-                ) or active_task.include_transcript
+                covers_audio = (not need_audio) or active_task.include_audio
+                covers_transcript = (not need_transcript) or active_task.include_transcript
                 if covers_audio and covers_transcript:
                     logger.info(f"Found active task for video {video_id}: {active_task.id}")
                     response = await self._build_task_response(active_task)
@@ -200,8 +202,8 @@ class TaskService:
                     return response
 
             logger.info(
-                f"{len(active_tasks)} active task(s) for video {video_id} do not cover requested "
-                f"resources (requested audio={request.include_audio}/transcript={request.include_transcript}); "
+                f"{len(active_tasks)} active task(s) for video {video_id} do not cover remaining "
+                f"need (need_audio={need_audio}/need_transcript={need_transcript}); "
                 f"creating a new task instead of reusing any of them"
             )
 

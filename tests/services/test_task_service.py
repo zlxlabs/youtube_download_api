@@ -511,3 +511,120 @@ class TestActiveTaskDedupCoverage:
         # 不应该额外创建新任务：数据库里仍然只有这两条活跃任务
         active_tasks = await test_db.get_active_tasks_by_video(video_id)
         assert len(active_tasks) == 2
+
+    @pytest.mark.asyncio
+    async def test_cached_audio_plus_transcript_only_active_task_covers_remaining_need(
+        self, test_db: Database, test_settings: Settings, file_service: FileService, service: TaskService
+    ) -> None:
+        """
+        覆盖判断应对照"剩余需求"而非原始请求：音频已经文件级缓存命中
+        （不再需要任何任务提供），只有 transcript-only 的活跃任务在跑，
+        新请求同时要音频+字幕。
+
+        实际缺口只有 transcript，活跃任务的 include_transcript=True 已经能
+        覆盖这个缺口——不应该因为该任务 include_audio=False 就误判"不覆盖"，
+        从而重复创建一个新任务。
+        """
+        from src.db.models import FileRecord, FileType
+
+        video_id = "deduptest006"
+        await test_db.get_or_create_video_resource(video_id)
+
+        # 音频已文件级缓存命中
+        audio_dir = test_settings.audio_dir
+        audio_dir.mkdir(parents=True, exist_ok=True)
+        audio_path = audio_dir / "cached-audio.m4a"
+        audio_path.write_text("mock audio")
+        audio_record = FileRecord(
+            id="cached-audio-file-006",
+            video_id=video_id,
+            file_type=FileType.AUDIO,
+            filename="cached-audio.m4a",
+            filepath=str(audio_path.relative_to(test_settings.data_dir)),
+            size=100,
+            format="m4a",
+            created_at=datetime.now(timezone.utc),
+            last_accessed_at=datetime.now(timezone.utc),
+            expires_at=datetime.now(timezone.utc),
+        )
+        await test_db.create_file(audio_record)
+
+        # 仅有一条 transcript-only 的活跃任务
+        transcript_only_task = Task(
+            id="transcript-only-task-006",
+            video_id=video_id,
+            video_url=_video_url(video_id),
+            status=TaskStatus.PENDING,
+            include_audio=False,
+            include_transcript=True,
+        )
+        await test_db.create_task(transcript_only_task)
+
+        # 新请求：音频（已缓存）+ 字幕（剩余需求，活跃任务可覆盖）
+        request = CreateTaskRequest(
+            video_url=_video_url(video_id),
+            include_audio=True,
+            include_transcript=True,
+        )
+        response = await service.create_task(request)
+
+        assert response.task_id == transcript_only_task.id
+        assert response.message == "Task already in progress"
+
+        # 不应该额外创建新任务
+        active_tasks = await test_db.get_active_tasks_by_video(video_id)
+        assert len(active_tasks) == 1
+
+    @pytest.mark.asyncio
+    async def test_cached_audio_plus_uncovered_remaining_need_still_creates_task(
+        self, test_db: Database, test_settings: Settings, file_service: FileService, service: TaskService
+    ) -> None:
+        """
+        对照场景：音频已缓存，但活跃任务是 audio-only（不含字幕），
+        新请求需要音频+字幕。剩余需求（字幕）未被任何活跃任务覆盖，
+        必须照常创建新任务，不能被误判为"已覆盖"。
+        """
+        from src.db.models import FileRecord, FileType
+
+        video_id = "deduptest007"
+        await test_db.get_or_create_video_resource(video_id)
+
+        audio_dir = test_settings.audio_dir
+        audio_dir.mkdir(parents=True, exist_ok=True)
+        audio_path = audio_dir / "cached-audio.m4a"
+        audio_path.write_text("mock audio")
+        audio_record = FileRecord(
+            id="cached-audio-file-007",
+            video_id=video_id,
+            file_type=FileType.AUDIO,
+            filename="cached-audio.m4a",
+            filepath=str(audio_path.relative_to(test_settings.data_dir)),
+            size=100,
+            format="m4a",
+            created_at=datetime.now(timezone.utc),
+            last_accessed_at=datetime.now(timezone.utc),
+            expires_at=datetime.now(timezone.utc),
+        )
+        await test_db.create_file(audio_record)
+
+        # 活跃任务只覆盖音频（对剩余需求——字幕——没有帮助）
+        audio_only_task = Task(
+            id="audio-only-task-007",
+            video_id=video_id,
+            video_url=_video_url(video_id),
+            status=TaskStatus.PENDING,
+            include_audio=True,
+            include_transcript=False,
+        )
+        await test_db.create_task(audio_only_task)
+
+        request = CreateTaskRequest(
+            video_url=_video_url(video_id),
+            include_audio=True,
+            include_transcript=True,
+        )
+        response = await service.create_task(request)
+
+        assert response.task_id is not None
+        assert response.task_id != audio_only_task.id
+        assert response.message != "Task already in progress"
