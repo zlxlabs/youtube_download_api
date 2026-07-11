@@ -286,6 +286,22 @@ class VideoNotDownloadableResponse(BaseModel):
     video_id: str = Field(..., description="YouTube video ID that was rejected")
 
 
+class VideoNotDownloadableErrorResponse(BaseModel):
+    """
+    422 响应体的实际包裹结构。
+
+    实现里 POST /tasks 通过 ``raise HTTPException(422, detail={...})`` 抛出，
+    FastAPI 会把 detail 包一层，实际响应体是 ``{"detail": {error_code, message,
+    video_id}}``——不是 VideoNotDownloadableResponse 那种平铺结构。此模型仅用于
+    OpenAPI responses 声明，使生成的文档/客户端代码与真实响应体一致；不改变
+    任何实际返回内容。
+    """
+
+    detail: VideoNotDownloadableResponse = Field(
+        ..., description="Structured error detail (FastAPI HTTPException wrapping convention)"
+    )
+
+
 class ValidationErrorDetail(BaseModel):
     """Validation error detail."""
 

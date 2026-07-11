@@ -389,6 +389,36 @@ class TestCreateTask:
         assert body["error_code"] == ErrorCode.VIDEO_UNAVAILABLE.value
         assert body["video_id"] == TEST_VIDEO_ID
 
+    def test_create_task_422_openapi_schema_matches_actual_response_shape(
+        self, client: TestClient
+    ) -> None:
+        """
+        422 响应的 OpenAPI 声明必须与实际响应体一致。
+
+        实现里通过 ``raise HTTPException(422, detail={...})`` 抛出，实际响应体是
+        ``{"detail": {error_code, message, video_id}}``（FastAPI HTTPException 的
+        detail 包裹惯例，上面两个用例已验证），而不是平铺的
+        ``{error_code, message, video_id}``。因此 OpenAPI responses 声明必须引用
+        一个带 detail 字段的包裹模型（VideoNotDownloadableErrorResponse），
+        否则据此生成的客户端代码会按错误的契约反序列化。
+        """
+        schema = client.app.openapi()  # type: ignore[union-attr]
+        responses = schema["paths"]["/api/v1/tasks"]["post"]["responses"]
+        ref = responses["422"]["content"]["application/json"]["schema"]["$ref"]
+        model_name = ref.rsplit("/", 1)[-1]
+
+        assert model_name == "VideoNotDownloadableErrorResponse"
+
+        wrapper_schema = schema["components"]["schemas"][model_name]
+        assert "detail" in wrapper_schema["properties"]
+
+        detail_ref = wrapper_schema["properties"]["detail"]["$ref"]
+        detail_model_name = detail_ref.rsplit("/", 1)[-1]
+        assert detail_model_name == "VideoNotDownloadableResponse"
+
+        detail_schema = schema["components"]["schemas"][detail_model_name]
+        assert set(detail_schema["properties"]) == {"error_code", "message", "video_id"}
+
     def test_create_task_unexpected_error_returns_500(
         self, client: TestClient, mock_task_service: AsyncMock
     ) -> None:

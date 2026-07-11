@@ -19,7 +19,7 @@ from src.api.schemas import (
     ErrorResponse,
     TaskListResponse,
     TaskResponse,
-    VideoNotDownloadableResponse,
+    VideoNotDownloadableErrorResponse,
 )
 from src.db.models import TaskStatus
 from src.services.file_service import FileService, FileOperationError
@@ -81,7 +81,12 @@ FileServiceDep = Annotated[FileService, Depends(get_file_service)]
         401: {"model": ErrorResponse, "description": "Unauthorized"},
         403: {"model": ErrorResponse, "description": "Forbidden"},
         422: {
-            "model": VideoNotDownloadableResponse,
+            # 实际响应体是 FastAPI HTTPException 的 detail 包裹结构
+            # （{"detail": {error_code, message, video_id}}），因此声明用
+            # VideoNotDownloadableErrorResponse（包一层 detail），而不是
+            # 平铺的 VideoNotDownloadableResponse——否则生成的 OpenAPI 文档/
+            # 客户端代码会按错误的契约反序列化。
+            "model": VideoNotDownloadableErrorResponse,
             "description": "Video is not downloadable (live stream, upcoming premiere, "
             "unavailable, private, or region blocked)",
         },
