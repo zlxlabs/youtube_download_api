@@ -13,7 +13,9 @@ fetch_metadata 本身或 _get_youtube_service），驱动真实的 fetch_metadat
 代码路径验证修复。
 """
 
+import asyncio
 import json
+import time
 from unittest.mock import MagicMock, patch
 
 import httplib2
@@ -201,3 +203,88 @@ class TestFetchMetadataNetworkErrorClassification:
                 await downloader.fetch_metadata(TEST_VIDEO_URL, TEST_VIDEO_ID)
 
         assert exc_info.value.error_code == ErrorCode.NETWORK_ERROR
+
+
+class TestFetchMetadataDoesNotBlockEventLoop:
+    """
+    回归（外部 code review 第 13 轮，Codex P1 指控 1）：fetch_metadata 内部直接调用
+    同步的 request.execute()（google-api-python-client 是同步库），会整段阻塞
+    事件循环本身——asyncio.wait_for 只能取消"等待"，取消不了一个正在运行、
+    尚未让出控制权的同步调用，所以 precheck 的超时形同虚设，而且不止 precheck
+    请求被卡，同一进程里其他所有并发请求都会被这一次慢 API 调用拖住。
+
+    验证方式：把 execute() mock 成一个耗时的同步函数（time.sleep 模拟慢 API），
+    与 fetch_metadata 并发跑一个很短的 asyncio.sleep 任务。若 execute() 仍在
+    协程里同步阻塞，事件循环在 execute() 返回前无法调度任何其他任务，短 sleep
+    会被拖到 execute() 结束之后才完成；若已改用 asyncio.to_thread 把阻塞调用
+    甩到线程池，短 sleep 应该几乎立刻按预期完成。
+    """
+
+    @pytest.mark.asyncio
+    async def test_slow_execute_does_not_block_concurrent_coroutine(
+        self, downloader: YoutubeDataApiDownloader
+    ) -> None:
+        slow_seconds = 0.3
+
+        def slow_execute():
+            # 模拟慢 API：同步阻塞线程（这正是 google-api-python-client 的真实行为）
+            time.sleep(slow_seconds)
+            return {
+                "items": [
+                    {
+                        "snippet": {"title": "T", "channelTitle": "A"},
+                        "contentDetails": {"duration": "PT1S"},
+                        "statistics": {},
+                    }
+                ]
+            }
+
+        service = _mock_youtube_service(execute_side_effect=slow_execute)
+
+        with patch(
+            "src.downloaders.youtube_data_api_downloader.build", return_value=service
+        ):
+            start = time.monotonic()
+            fetch_task = asyncio.create_task(
+                downloader.fetch_metadata(TEST_VIDEO_URL, TEST_VIDEO_ID)
+            )
+
+            # 与 fetch_task 并发跑一个很短的 sleep：若 execute() 未被丢进线程池，
+            # asyncio.create_task 调度的 fetch_task 会先被事件循环取到并同步跑完
+            # 整个 0.3s 阻塞调用，才轮到这里的 sleep(0.01) 开始计时。
+            await asyncio.sleep(0.01)
+            concurrent_sleep_elapsed = time.monotonic() - start
+
+            result = await fetch_task
+
+        assert result is not None
+        # 事件循环未被阻塞：并发的短 sleep 应该在远小于 slow_seconds 的时间内完成，
+        # 不会被 execute() 的同步阻塞拖住。
+        assert concurrent_sleep_elapsed < slow_seconds / 2
+
+    @pytest.mark.asyncio
+    async def test_slow_execute_can_be_interrupted_by_wait_for_timeout(
+        self, downloader: YoutubeDataApiDownloader
+    ) -> None:
+        """precheck 场景的真实约束：asyncio.wait_for 短超时必须能真正让调用方
+        及时拿到 TimeoutError 返回，而不是被同步阻塞拖到 execute() 自然结束。"""
+
+        def slow_execute():
+            time.sleep(0.3)
+            return {"items": []}
+
+        service = _mock_youtube_service(execute_side_effect=slow_execute)
+
+        with patch(
+            "src.downloaders.youtube_data_api_downloader.build", return_value=service
+        ):
+            start = time.monotonic()
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(
+                    downloader.fetch_metadata(TEST_VIDEO_URL, TEST_VIDEO_ID),
+                    timeout=0.05,
+                )
+            elapsed = time.monotonic() - start
+
+        # 超时应该在接近 0.05s 时生效，而不是等到 slow_execute 的 0.3s 结束
+        assert elapsed < 0.2

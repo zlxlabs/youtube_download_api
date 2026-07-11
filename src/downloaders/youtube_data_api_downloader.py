@@ -4,6 +4,7 @@ YouTube Data API v3 下载器实现。
 仅用于获取视频元数据，不支持资源下载。
 """
 
+import asyncio
 import re
 from pathlib import Path
 from typing import Optional
@@ -187,7 +188,14 @@ class YoutubeDataApiDownloader(BaseDownloader):
                 id=video_id,
             )
 
-            response = request.execute()
+            # google-api-python-client 是同步库，request.execute() 会阻塞发起调用的
+            # 线程。若直接在协程里同步调用，asyncio.wait_for 等超时机制形同虚设——
+            # 它只能取消"等待"，取消不了一个已经在运行、尚未让出控制权的同步调用；
+            # 更严重的是，Google API 慢的时候会连带卡住同一进程里的整个事件循环，
+            # 拖慢所有并发请求（不只是本次调用）。因此把 execute() 丢进线程池执行，
+            # 让协程在等待期间把控制权还给事件循环。异常（HttpError/其他）会经由
+            # asyncio.to_thread 原样透传，不影响下面的 except 分支。
+            response = await asyncio.to_thread(request.execute)
 
             # 检查是否找到视频
             if not response.get("items"):
