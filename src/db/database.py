@@ -16,6 +16,7 @@ import aiosqlite
 
 from src.core.ip_ban_models import IPBanLevel
 from src.db.models import (
+    CONTENT_LEVEL_ERROR_CODES,
     CallbackStatus,
     ErrorCode,
     FileRecord,
@@ -1444,9 +1445,10 @@ class Database:
         获取下载失败归因统计（供 GET /api/v1/stats/downloads 端点使用）。
 
         聚合最近 N 天的任务数据：状态分布、失败 error_code 分布、
-        内容级（VIDEO_* 前缀）vs 系统级失败拆分、音频/字幕下载器归属分布、
-        按周（自然周，非严格 ISO 8601 周）的完成/失败趋势。全部通过 SQL
-        GROUP BY 聚合，不在 Python 中遍历全表，避免任务量增长后端点变慢。
+        内容级（视频客观状态导致，见 CONTENT_LEVEL_ERROR_CODES）vs 系统级
+        失败拆分、音频/字幕下载器归属分布、按周（自然周，非严格 ISO 8601 周）
+        的完成/失败趋势。全部通过 SQL GROUP BY 聚合，不在 Python 中遍历全表，
+        避免任务量增长后端点变慢。
 
         Args:
             days: 统计时间窗口（天数）。
@@ -1490,19 +1492,36 @@ class Database:
             row["error_code"]: row["count"] for row in error_rows
         }
 
-        # 3. 失败归因拆分：内容级（VIDEO_ 前缀，视频本身问题，无法通过重试/换下载器解决）
-        #    vs 系统级（下载器/网络/风控等，理论上可通过技术手段改善）。
-        #    "unknown"（原 error_code 为 NULL）不以 VIDEO_ 开头，归入系统级——
-        #    这保证了不变式 content_level + system_level == by_status["failed"]。
+        # 3. 失败归因拆分：内容级（error_code 属于 CONTENT_LEVEL_ERROR_CODES，
+        #    由视频自身客观状态导致：不存在/私有/直播/年龄限制，无法通过重试/
+        #    换下载器解决）vs 系统级（其余 error_code，含下载器/网络/风控等，
+        #    理论上可通过技术手段改善）。
+        #
+        #    分类必须以 CONTENT_LEVEL_ERROR_CODES 这个集合为唯一事实来源，不能
+        #    用 error_code 是否以 "VIDEO_" 开头做字符串前缀判断——VIDEO_REGION_
+        #    BLOCKED（地区限制）虽是 VIDEO_ 前缀，但语义上是"下载器/出口位置相关"
+        #    错误而非视频客观状态，已被排除在 CONTENT_LEVEL_ERROR_CODES 之外
+        #    （见该常量定义处注释、外部 review 第14轮问题1）；若仍按前缀判断，会把
+        #    地区限制误计入 content_level，在遇到地区限制的部署里让比率失真。
+        #
+        #    "unknown"（原 error_code 为 NULL）不在 CONTENT_LEVEL_ERROR_CODES 中，
+        #    归入系统级——这保证了不变式
+        #    content_level + system_level == by_status["failed"]。
+        #
+        #    这里 code 是 SQL 侧 COALESCE 出来的纯字符串（如 "VIDEO_PRIVATE"），
+        #    CONTENT_LEVEL_ERROR_CODES 是 ErrorCode（str 混入的 Enum）成员的
+        #    frozenset；str 混入 Enum 的哈希/相等性与其字符串值一致，因此
+        #    `code in CONTENT_LEVEL_ERROR_CODES` 无需先转换成 .value 即可正确
+        #    比较，不引入循环导入（该常量定义于 src.db.models，与本文件同层）。
         content_level = sum(
             count
             for code, count in failures_by_error_code.items()
-            if code.startswith("VIDEO_")
+            if code in CONTENT_LEVEL_ERROR_CODES
         )
         system_level = sum(
             count
             for code, count in failures_by_error_code.items()
-            if not code.startswith("VIDEO_")
+            if code not in CONTENT_LEVEL_ERROR_CODES
         )
         total_failures = content_level + system_level
         failure_split = {

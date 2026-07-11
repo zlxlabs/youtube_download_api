@@ -1669,6 +1669,36 @@ class TestDownloadStatsAggregation:
         assert split["system_level"] == 3  # CDP_NO_COOKIES(1) + unknown(2)
         assert split["content_level"] + split["system_level"] == stats["by_status"]["failed"]
 
+    async def test_get_download_stats_region_blocked_is_system_level(
+        self, test_db: Database
+    ):
+        """
+        VIDEO_REGION_BLOCKED 虽是 VIDEO_ 前缀，但已从 CONTENT_LEVEL_ERROR_CODES
+        中移除（下载器/出口位置相关错误，非视频客观状态，见
+        src.db.models.CONTENT_LEVEL_ERROR_CODES 的注释）。failure_split 的分类
+        必须以该常量为唯一事实来源，不能再用字符串前缀判断，否则地区限制会被
+        误计入 content_level，在遇到地区限制的部署里让比率失真。
+        """
+        now = datetime.now(timezone.utc)
+        # 地区限制：应归入 system_level（尽管 error_code 以 VIDEO_ 开头）
+        await self._seed_task(
+            test_db, task_id="ds_60", video_id="ds_v60",
+            status=TaskStatus.FAILED, error_code=ErrorCode.VIDEO_REGION_BLOCKED, created_at=now,
+        )
+        # 真正的内容级失败：应归入 content_level
+        await self._seed_task(
+            test_db, task_id="ds_61", video_id="ds_v61",
+            status=TaskStatus.FAILED, error_code=ErrorCode.VIDEO_PRIVATE, created_at=now,
+        )
+
+        stats = await test_db.get_download_stats(days=30)
+
+        split = stats["failure_split"]
+        assert split["content_level"] == 1  # 仅 VIDEO_PRIVATE
+        assert split["system_level"] == 1  # VIDEO_REGION_BLOCKED
+        # 不变式：content_level + system_level 必须等于 by_status 里 failed 的总数
+        assert split["content_level"] + split["system_level"] == stats["by_status"]["failed"]
+
     async def test_get_download_stats_by_downloader_unknown_bucket(
         self, test_db: Database
     ):

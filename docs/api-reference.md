@@ -778,8 +778,8 @@ curl -H "X-API-Key: your-api-key" \
 | `total` | integer | 窗口内任务总数 |
 | `by_status` | object | 任务状态 -> 计数 |
 | `failures_by_error_code` | object | 失败任务 error_code -> 计数（`error_code` 为 `NULL` 的失败任务归入 `"unknown"` 桶，不会被丢弃） |
-| `failure_split.content_level` | integer | 内容级失败数（`error_code` 以 `VIDEO_` 开头，视频本身问题，重试/换下载器解决不了） |
-| `failure_split.system_level` | integer | 系统级失败数（其余 error_code，含 `"unknown"`，理论上可通过技术手段改善） |
+| `failure_split.content_level` | integer | 内容级失败数（视频客观状态导致：不存在/私有/直播/年龄限制，重试/换下载器解决不了；判定依据是 `CONTENT_LEVEL_ERROR_CODES` 集合，而非 `error_code` 前缀——`VIDEO_REGION_BLOCKED` 虽以 `VIDEO_` 开头但属于系统级，见下） |
+| `failure_split.system_level` | integer | 系统级失败数（其余 error_code，含 `"unknown"` 与 `VIDEO_REGION_BLOCKED`，理论上可通过技术手段改善；地区限制是下载器/出口位置相关问题而非视频客观状态，换一个出口/下载器可能就能成功） |
 | `failure_split.content_level_ratio` | float | 内容级失败占比（0-1） |
 | `failure_split.system_level_ratio` | float | 系统级失败占比（0-1） |
 | `by_downloader.audio_downloader` | object | 音频下载器名称 -> 任务数 |

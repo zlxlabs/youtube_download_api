@@ -23,9 +23,10 @@ from src.downloaders.youtube_data_api_downloader import YoutubeDataApiDownloader
 from src.downloaders.ytdlp_downloader import YtdlpDownloader
 from src.utils.logger import logger
 
-# CONTENT_LEVEL_ERROR_CODES 的定义已迁移到 src.downloaders.models（避免 manager.py
-# 与各下载器实现模块之间的循环导入，见该模块内注释）。这里通过 import 保留同名模块
-# 属性，`from src.downloaders.manager import CONTENT_LEVEL_ERROR_CODES` 的旧引用不受影响。
+# CONTENT_LEVEL_ERROR_CODES 的定义位于 src.db.models（被 src.downloaders.models
+# 再导入并保留同名属性，见该模块内注释；避免 manager.py 与各下载器实现模块之间的
+# 循环导入）。这里通过 import 保留同名模块属性，`from src.downloaders.manager
+# import CONTENT_LEVEL_ERROR_CODES` 的旧引用不受影响。
 
 
 class DownloaderStats:
