@@ -601,11 +601,22 @@ class DownloadWorker:
                 )
 
             # 如果是探测尝试，分析结果并更新熔断状态
+            #
+            # P1 修复（2026-07-11，Codex 第 16 轮）：修复前 _execute_task /
+            # _execute_download_with_manager 返回的成功结果 dict 从不携带
+            # "downloader_result" 键，导致这里的 isinstance 检查恒为 False——
+            # 探测任务成功执行也从来不会触发熔断降级/解除，持久化恢复出来的
+            # 熔断状态因此会永久卡在熔断态（"熔断永生"）。现在
+            # _execute_download_with_manager 在成功路径上会显式写入
+            # downloader_result（以及 audio_requested/transcript_requested，
+            # 用于区分"真正探测到仍失败"与"任务本不需要/走了缓存复用"）。
             if is_probe and isinstance(result.get("downloader_result"), DownloaderResult):
                 await self._analyze_result_and_update_ban(
                     result["downloader_result"],
                     was_probe=True,
                     ban_level_before=ban_level_before,
+                    audio_requested=result.get("audio_requested", True),
+                    transcript_requested=result.get("transcript_requested", True),
                 )
 
             # Update task completion with retry logic
@@ -871,6 +882,18 @@ class DownloadWorker:
                     "downloader": result.downloader,  # 下载器名称
                     "audio_downloader": audio_downloader,  # 产出音频文件的下载器（未下载则为 None）
                     "transcript_downloader": transcript_downloader,  # 产出字幕文件的下载器（未下载则为 None）
+                    # 被动探测熔断分析用（见 _process_next_task -> _analyze_result_and_update_ban）。
+                    # 故意使用 first_result 而不是上面可能被 audio_fallback 二次下载覆盖的
+                    # result：audio_fallback 的二次下载只请求音频（include_transcript=False），
+                    # 如果直接用最终 result，会把首次字幕探测的真实结果（成功/失败）抹掉，
+                    # 让熔断分析看到一个"transcript_path=None"的假象，误判为字幕仍不可用。
+                    "downloader_result": first_result,
+                    # 本次是否真正向下载器请求了对应资源。区分"没请求"（任务本不需要，
+                    # 或已有缓存复用）与"请求了但失败"——前者 first_result 对应字段恒为
+                    # None，不能被熔断分析当作"探测到仍然失败"，否则会把纯粹的缓存命中
+                    # 误判成风控故障，错误延长甚至升级熔断级别。
+                    "audio_requested": need_audio,
+                    "transcript_requested": need_transcript,
                 }
 
         except (DownloaderError, AllDownloadersFailed) as e:
@@ -1423,15 +1446,29 @@ class DownloadWorker:
         return None
 
     async def _analyze_result_and_update_ban(
-        self, result: DownloaderResult, was_probe: bool, ban_level_before: IPBanLevel
+        self,
+        result: DownloaderResult,
+        was_probe: bool,
+        ban_level_before: IPBanLevel,
+        audio_requested: bool = True,
+        transcript_requested: bool = True,
     ) -> None:
         """
         分析下载结果，更新熔断状态（被动探测核心）。
 
         Args:
-            result: 下载结果
+            result: 下载结果（探测任务本次真正请求资源后拿到的首次结果，
+                见 _execute_download_with_manager 的 downloader_result 字段说明——
+                必须是"本次原始请求"的结果，不能是被 audio_fallback 二次下载覆盖后
+                的结果，否则会误判字幕探测状态）
             was_probe: 是否是探测尝试
             ban_level_before: 执行前的熔断级别
+            audio_requested: 本次是否真正向下载器请求了音频。False 表示任务本就
+                不需要音频，或音频已有缓存直接复用——这两种情况 result.audio_path
+                恒为 None，不代表"探测到音频仍然失败"，必须跳过音频熔断分析，
+                否则会把纯缓存命中误判为风控故障。
+            transcript_requested: 本次是否真正向下载器请求了字幕，语义同上，
+                用于全局熔断分析。
         """
         if ban_level_before == IPBanLevel.NORMAL or not was_probe:
             # 不是探测，或本来就是正常状态，无需分析
@@ -1442,6 +1479,15 @@ class DownloadWorker:
 
         # 音频熔断期间的探测
         if ban_level_before == IPBanLevel.AUDIO_BANNED:
+            if not audio_requested:
+                # 本次任务没有真正向下载器请求音频（缓存复用或任务本不需要），
+                # 无法据此判断音频熔断是否恢复，跳过分析（既不延长也不解除）。
+                logger.debug(
+                    "Probe task did not actually request audio this run "
+                    "(cache reuse or not needed), skipping audio-ban analysis"
+                )
+                return
+
             if audio_success:
                 # 音频恢复！
                 logger.info("🎉 Audio recovery detected! Lifting audio ban.")
@@ -1462,6 +1508,15 @@ class DownloadWorker:
 
         # 全局熔断期间的探测
         elif ban_level_before == IPBanLevel.FULLY_BANNED:
+            if not transcript_requested:
+                # 本次任务没有真正向下载器请求字幕（缓存复用或任务本不需要），
+                # 无法据此判断全局熔断是否恢复，跳过分析。
+                logger.debug(
+                    "Probe task did not actually request transcript this run "
+                    "(cache reuse or not needed), skipping full-ban analysis"
+                )
+                return
+
             if transcript_success:
                 # 字幕恢复，降级到音频熔断
                 logger.info("📉 Transcript recovered, downgrading to audio ban")
