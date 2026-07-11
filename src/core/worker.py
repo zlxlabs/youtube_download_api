@@ -6,6 +6,7 @@ Only downloads what's needed - reuses existing files when available.
 """
 
 import asyncio
+import json
 import random
 import tempfile
 import traceback
@@ -20,7 +21,7 @@ from src.core.downloader import (
 from src.core.ip_ban_breaker import IPBanCircuitBreaker
 from src.core.ip_ban_models import ExecutionDecision, IPBanLevel
 from src.db.database import Database
-from src.downloaders.exceptions import AllDownloadersFailed, DownloaderError
+from src.downloaders.exceptions import AllDownloadersFailed, DownloaderAttempt, DownloaderError
 from src.downloaders.manager import DownloaderManager
 from src.downloaders.models import DownloaderResult
 from src.db.models import (
@@ -578,6 +579,9 @@ class DownloadWorker:
                 # Process audio file
                 audio_file_id = existing_audio.id if existing_audio else None
                 reused_audio = existing_audio is not None
+                # 下载器归属：仅在本次真正新下载时记录，复用缓存时保持 None
+                # （reused_audio 标志已表达来源，不写占位值）
+                audio_downloader: Optional[str] = None
 
                 # 修复：audio_fallback 场景下也需要保存音频
                 if (need_audio or audio_fallback) and result.audio_path and result.audio_path.exists():
@@ -590,11 +594,13 @@ class DownloadWorker:
                     )
                     audio_file_id = audio_file.id
                     reused_audio = False
+                    audio_downloader = result.downloader
 
                 # Process transcript file
                 # 优化：无论用户是否请求字幕，只要下载器返回了字幕就保存
                 transcript_file_id = existing_transcript.id if existing_transcript else None
                 reused_transcript = existing_transcript is not None
+                transcript_downloader: Optional[str] = None
 
                 if result.transcript_path and result.transcript_path.exists():
                     if existing_transcript is None:
@@ -609,6 +615,7 @@ class DownloadWorker:
                         )
                         transcript_file_id = transcript_file.id
                         reused_transcript = False
+                        transcript_downloader = result.downloader
                         logger.info(
                             f"Task {task.id}: Saved transcript (requested={need_transcript})"
                         )
@@ -620,6 +627,8 @@ class DownloadWorker:
                     "reused_transcript": reused_transcript,
                     "audio_fallback": audio_fallback,  # 标记是否触发了音频降级
                     "downloader": result.downloader,  # 下载器名称
+                    "audio_downloader": audio_downloader,  # 产出音频文件的下载器（未下载则为 None）
+                    "transcript_downloader": transcript_downloader,  # 产出字幕文件的下载器（未下载则为 None）
                 }
 
         except (DownloaderError, AllDownloadersFailed) as e:
@@ -679,6 +688,49 @@ class DownloadWorker:
             has_native_transcript=has_native_transcript,
         )
         logger.debug(f"Updated video resource: {video_id}")
+
+    # 单条失败详情 message 的截断长度，避免超长日志片段撑爆 failure_details 列
+    _FAILURE_MESSAGE_MAX_LEN = 200
+
+    def _build_failure_details(self, error: DownloaderError) -> str:
+        """
+        构建失败归因 JSON 字符串，写入 tasks.failure_details 列。
+
+        - AllDownloadersFailed 且携带结构化 attempts：使用 attempts 列表，
+          每个下载器一条记录（下载器名/error_code/message），完整还原整条
+          降级链的尝试结果。
+        - 其他情况（普通 DownloaderError，如任务级超时、未预期异常转换后的
+          单次错误，或 AllDownloadersFailed 未携带 attempts 的旧路径）：
+          退化为单条记录。
+
+        Args:
+            error: 失败异常（DownloaderError 或其子类 AllDownloadersFailed）。
+
+        Returns:
+            JSON 字符串，形如
+            '[{"downloader": "cdp", "error_code": "CDP_NO_COOKIES", "message": "..."}]'
+        """
+        attempts: list[DownloaderAttempt]
+        if isinstance(error, AllDownloadersFailed) and error.attempts:
+            attempts = error.attempts
+        else:
+            attempts = [
+                DownloaderAttempt(
+                    downloader=error.downloader or "unknown",
+                    error_code=error.error_code.value,
+                    message=error.message,
+                )
+            ]
+
+        records = [
+            {
+                "downloader": a.downloader,
+                "error_code": a.error_code,
+                "message": a.message[: self._FAILURE_MESSAGE_MAX_LEN],
+            }
+            for a in attempts
+        ]
+        return json.dumps(records, ensure_ascii=False)
 
     async def _handle_download_error(self, task: Task, error: DownloaderError) -> None:
         """
@@ -757,6 +809,7 @@ class DownloadWorker:
             status=TaskStatus.FAILED,
             error_code=error.error_code,
             error_message=error.message,
+            failure_details=self._build_failure_details(error),
         )
 
         # Record metrics: task failed
@@ -814,6 +867,8 @@ class DownloadWorker:
                     f"using cached file"
                 )
                 # 直接使用缓存的字幕完成任务
+                # 归属列保持 None：reused_transcript=True 已表达"来自缓存"，
+                # 不写占位值（如 'cache'）
                 await self.db.update_task_completed(
                     task_id=task.id,
                     audio_file_id=None,
@@ -899,6 +954,7 @@ class DownloadWorker:
                         transcript_file_id=transcript_file.id,
                         reused_audio=False,
                         reused_transcript=False,
+                        transcript_downloader=result.downloader,
                     )
 
                     # 发送完成通知
@@ -974,6 +1030,10 @@ class DownloadWorker:
                     transcript_file_id=result["transcript_file_id"],
                     reused_audio=result["reused_audio"],
                     reused_transcript=result["reused_transcript"],
+                    # "全部复用/无需下载"的早退路径不携带这两个 key，用 .get()
+                    # 兜底为 None，与 reused=True 场景的语义保持一致
+                    audio_downloader=result.get("audio_downloader"),
+                    transcript_downloader=result.get("transcript_downloader"),
                 )
                 return  # 成功，直接返回
             except Exception as e:
