@@ -14,6 +14,7 @@ from typing import Any, AsyncGenerator, Optional
 
 import aiosqlite
 
+from src.core.ip_ban_models import IPBanLevel
 from src.db.models import (
     CallbackStatus,
     ErrorCode,
@@ -233,6 +234,29 @@ class Database:
                 """
             )
 
+        # Migration 4: Add event_type column to ip_ban_history (existing table
+        # created before IP ban persistence feature landed only had episode-style
+        # columns; event_type turns it into an append-only event log so
+        # append_ip_ban_history can distinguish triggered/upgraded/downgraded/
+        # recovered/restored events without overloading unrelated columns).
+        cursor = await self.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='ip_ban_history'"
+        )
+        ip_ban_history_exists = await cursor.fetchone()
+
+        if ip_ban_history_exists:
+            cursor = await self.execute("PRAGMA table_info(ip_ban_history)")
+            columns = await cursor.fetchall()
+            column_names = {col["name"] for col in columns}
+
+            if "event_type" not in column_names:
+                await self.execute(
+                    "ALTER TABLE ip_ban_history ADD COLUMN event_type TEXT NOT NULL DEFAULT 'triggered'"
+                )
+                logger.info(
+                    "Migration: Added 'event_type' column to ip_ban_history table"
+                )
+
         # Create IP ban tables if not exist
         await self._create_ip_ban_tables()
 
@@ -256,10 +280,12 @@ class Database:
             VALUES (1, 'normal')
         """)
 
-        # IP ban history table
+        # IP ban history table（追加写入的事件日志：每次触发/升级/降级/恢复/
+        # 启动恢复都插入一条新记录，而不是原地更新一条"熔断episode"记录）
         await self.execute("""
             CREATE TABLE IF NOT EXISTS ip_ban_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL DEFAULT 'triggered',
                 ban_level TEXT NOT NULL,
                 trigger_source TEXT,
                 trigger_task_id TEXT,
@@ -1348,6 +1374,164 @@ class Database:
             stats["total"] += count
 
         return stats
+
+    # ==================== IP Ban Persistence Operations ====================
+    # 为 IPBanCircuitBreaker（src/core/ip_ban_breaker.py，被动探测型三级熔断器）
+    # 提供状态持久化。背景：熔断器状态完全在内存，D3 自动部署每次 push 到 main
+    # 都会重启容器，重启后如果不恢复，服务会误判为 NORMAL 全速请求 YouTube，
+    # 加重封禁。这里的方法只负责读写，何时调用由 worker.py 的回调/启动恢复
+    # 流程决定，Database 本身不感知熔断器的业务语义。
+
+    async def save_ip_ban_state(
+        self,
+        current_level: IPBanLevel,
+        banned_at: Optional[datetime],
+        last_attempt_at: Optional[datetime],
+        failed_attempts: int,
+    ) -> None:
+        """
+        持久化 IP 熔断器当前状态（upsert 单行表 ip_ban_status，id 恒为 1）。
+
+        通常由 IPBanCircuitBreaker 的 on_state_change 回调驱动，在每次状态
+        变更（触发/升级/降级/恢复/延长/启动恢复）后调用。
+
+        Note:
+            banned_at / last_attempt_at 应传入 IPBanCircuitBreaker 内部使用的
+            naive datetime（datetime.now()）。存储时按现有全局适配器规则处理
+            （naive 视为 UTC 写入），读取时 load_ip_ban_state 会去掉时区信息
+            还原为 naive，与 breaker 内部的时间运算保持兼容。
+
+        Args:
+            current_level: 当前熔断级别
+            banned_at: 熔断触发时间（NORMAL 时为 None）
+            last_attempt_at: 最近一次（被动探测）尝试时间
+            failed_attempts: 熔断期间失败尝试次数
+        """
+        now = datetime.now(timezone.utc)
+
+        async with self.transaction():
+            await self.execute(
+                """
+                INSERT INTO ip_ban_status (
+                    id, current_level, banned_at, last_attempt_at,
+                    failed_attempts, updated_at
+                ) VALUES (1, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    current_level = excluded.current_level,
+                    banned_at = excluded.banned_at,
+                    last_attempt_at = excluded.last_attempt_at,
+                    failed_attempts = excluded.failed_attempts,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    current_level.value,
+                    banned_at,
+                    last_attempt_at,
+                    failed_attempts,
+                    now,
+                ),
+            )
+
+        logger.debug(
+            f"IP ban state persisted: level={current_level.value}, "
+            f"failed_attempts={failed_attempts}"
+        )
+
+    async def load_ip_ban_state(self) -> Optional[dict[str, Any]]:
+        """
+        读取持久化的 IP 熔断器状态（服务启动时调用，用于恢复熔断状态）。
+
+        Returns:
+            字典，包含：
+            - current_level (IPBanLevel): 当前熔断级别
+            - banned_at (Optional[datetime]): 熔断触发时间（naive）
+            - last_attempt_at (Optional[datetime]): 最近一次尝试时间（naive）
+            - failed_attempts (int): 熔断期间失败尝试次数
+
+            单行表记录不存在时返回 None（正常情况下建表逻辑会预置一条
+            current_level='normal' 的种子行，只有该行被手动删除等异常场景
+            才会出现 None；调用方对 None 与 NORMAL 应做相同处理：不恢复）。
+        """
+        cursor = await self.execute(
+            "SELECT current_level, banned_at, last_attempt_at, failed_attempts "
+            "FROM ip_ban_status WHERE id = 1"
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+
+        def _to_naive(value: Optional[datetime]) -> Optional[datetime]:
+            """去掉时区信息，还原为 IPBanCircuitBreaker 内部使用的 naive datetime。"""
+            if value is None:
+                return None
+            return value.replace(tzinfo=None)
+
+        return {
+            "current_level": IPBanLevel(row["current_level"]),
+            "banned_at": _to_naive(row["banned_at"]),
+            "last_attempt_at": _to_naive(row["last_attempt_at"]),
+            "failed_attempts": row["failed_attempts"] or 0,
+        }
+
+    async def append_ip_ban_history(
+        self,
+        event_type: str,
+        ban_level: str,
+        trigger_source: Optional[str] = None,
+        trigger_task_id: Optional[str] = None,
+        trigger_downloader: Optional[str] = None,
+        trigger_error: Optional[str] = None,
+        banned_at: Optional[datetime] = None,
+        recovered_at: Optional[datetime] = None,
+        duration_seconds: Optional[int] = None,
+        probe_count: int = 0,
+        recovery_method: Optional[str] = None,
+    ) -> None:
+        """
+        追加一条 IP 熔断历史事件记录（append-only 事件日志，不更新已有记录）。
+
+        Args:
+            event_type: 事件类型 -- triggered(触发) | upgraded(升级) |
+                downgraded(降级) | recovered(恢复正常) | restored(启动时从
+                持久化恢复)
+            ban_level: 事件发生后的熔断级别（IPBanLevel.value）
+            trigger_source: 触发来源（如 'audio' | 'transcript' | 'mixed'），可选
+            trigger_task_id: 触发事件的任务 ID，可选
+            trigger_downloader: 触发事件的下载器名称，可选
+            trigger_error: 触发原因/错误描述，可选
+            banned_at: 本次事件对应的熔断开始时间；未提供时使用当前时间
+            recovered_at: 恢复时间（通常仅 recovered 事件填写）
+            duration_seconds: 本次熔断持续时长（秒），可选
+            probe_count: 探测次数，默认 0
+            recovery_method: 恢复方式（如 'auto_probe' | 'restored'），可选
+        """
+        now = datetime.now(timezone.utc)
+
+        async with self.transaction():
+            await self.execute(
+                """
+                INSERT INTO ip_ban_history (
+                    event_type, ban_level, trigger_source, trigger_task_id,
+                    trigger_downloader, trigger_error, banned_at, recovered_at,
+                    duration_seconds, probe_count, recovery_method
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event_type,
+                    ban_level,
+                    trigger_source,
+                    trigger_task_id,
+                    trigger_downloader,
+                    trigger_error,
+                    banned_at or now,
+                    recovered_at,
+                    duration_seconds,
+                    probe_count,
+                    recovery_method,
+                ),
+            )
+
+        logger.info(f"IP ban history recorded: event={event_type}, level={ban_level}")
 
     # ==================== Helper Methods ====================
 
