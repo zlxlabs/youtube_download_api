@@ -8,6 +8,7 @@ from src.downloaders.base import BaseDownloader
 from src.downloaders.circuit_breaker import CircuitBreaker, CircuitBreakerOpen, CircuitState
 from src.downloaders.exceptions import (
     AllDownloadersFailed,
+    DownloaderAttempt,
     DownloaderError,
     DownloaderNotAvailable,
 )
@@ -29,6 +30,7 @@ __all__ = [
     "DownloaderError",
     "DownloaderNotAvailable",
     "AllDownloadersFailed",
+    "DownloaderAttempt",
     # Circuit Breaker
     "CircuitBreaker",
     "CircuitBreakerOpen",

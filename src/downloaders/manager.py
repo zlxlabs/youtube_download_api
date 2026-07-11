@@ -15,7 +15,7 @@ from src.db.database import Database
 from src.downloaders.base import BaseDownloader
 from src.downloaders.cdp import CDPDownloader
 from src.downloaders.circuit_breaker import CircuitBreaker, CircuitBreakerOpen
-from src.downloaders.exceptions import AllDownloadersFailed, DownloaderError
+from src.downloaders.exceptions import AllDownloadersFailed, DownloaderAttempt, DownloaderError
 from src.downloaders.models import DownloaderResult, VideoMetadata
 from src.downloaders.tikhub_downloader import TikHubDownloader
 from src.downloaders.youtube_data_api_downloader import YoutubeDataApiDownloader
@@ -381,6 +381,9 @@ class DownloaderManager:
             DownloadCancelledError: 下载被取消
         """
         errors: List[str] = []
+        # 结构化的每次下载器尝试记录（下载器名/错误码/消息），随 errors 同步收集，
+        # 失败时一并传给 AllDownloadersFailed，供 worker 序列化写入 failure_details。
+        attempts: List[DownloaderAttempt] = []
         last_error: Optional[Exception] = None
 
         # 1. 先获取完整的视频元数据（使用 metadata_priority）
@@ -509,6 +512,13 @@ class DownloaderManager:
                     f"✗ {downloader.name} [orchestration] circuit breaker open: {e.message}"
                 )
                 errors.append(f"{downloader.name}: Circuit breaker open")
+                attempts.append(
+                    DownloaderAttempt(
+                        downloader=downloader.name,
+                        error_code="CIRCUIT_BREAKER_OPEN",
+                        message="Circuit breaker open",
+                    )
+                )
                 continue
 
             except DownloadCancelledError:
@@ -522,6 +532,13 @@ class DownloaderManager:
                     f"✗ {downloader.name} failed after retries: {e.error_code.value} - {e.message}"
                 )
                 errors.append(f"{downloader.name}: {e.message}")
+                attempts.append(
+                    DownloaderAttempt(
+                        downloader=downloader.name,
+                        error_code=e.error_code.value,
+                        message=e.message,
+                    )
+                )
                 last_error = e
 
                 # 记录统计
@@ -552,7 +569,9 @@ class DownloaderManager:
                     )
                     # 直接抛出异常，不再尝试其他下载器
                     # 保留原始错误码（如 VIDEO_LIVE_STREAM），避免降级为 DOWNLOAD_FAILED
-                    raise AllDownloadersFailed(errors, error_code=e.error_code)
+                    raise AllDownloadersFailed(
+                        errors, error_code=e.error_code, attempts=attempts
+                    )
 
                 # 继续尝试下一个下载器（降级）
                 # 注意：此时已经过了下载器内部的重试（最多3次）
@@ -563,6 +582,13 @@ class DownloaderManager:
                 # 未预期的错误
                 logger.error(f"✗ {downloader.name} unexpected error: {e}")
                 errors.append(f"{downloader.name}: {e}")
+                attempts.append(
+                    DownloaderAttempt(
+                        downloader=downloader.name,
+                        error_code="UNKNOWN_ERROR",
+                        message=str(e),
+                    )
+                )
                 last_error = e
 
                 # 记录统计
@@ -586,7 +612,7 @@ class DownloaderManager:
             and last_error.error_code != ErrorCode.DOWNLOAD_FAILED
             else ErrorCode.DOWNLOAD_FAILED
         )
-        raise AllDownloadersFailed(errors, error_code=final_error_code)
+        raise AllDownloadersFailed(errors, error_code=final_error_code, attempts=attempts)
 
     def _get_max_retries_for_error(self, error: DownloaderError) -> int:
         """
