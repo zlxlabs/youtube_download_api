@@ -1524,6 +1524,40 @@ class AudioDownloader:
 
         return ranges
 
+    @staticmethod
+    async def _cancel_and_await_tasks(tasks: "List[asyncio.Task[Any]]") -> None:
+        """
+        取消列表中所有未完成的 asyncio 任务，并 await 其真正结束。
+
+        背景：multipart 分片下载用 asyncio.gather(*tasks) 并发等待所有分片。
+        gather() 在默认（非 return_exceptions）模式下，一旦某个任务抛出异常
+        就会立即向调用方传播，但**不会自动取消**其余仍在运行的任务——那些
+        任务会继续在后台运行，可能仍在读写 .partN 分片文件。如果调用方
+        紧接着（如 403 阶段级 cookie 重试）用相同路径立刻发起新一轮下载，
+        新旧两批任务会竞争同一批文件，可能损坏合并结果或让本可成功的重试
+        失败。
+
+        这里先对每个未完成任务调用 cancel()，再用
+        asyncio.gather(*tasks, return_exceptions=True) 等待它们全部真正
+        结束（包括吞掉取消引发的 CancelledError），确保本函数返回/抛出时
+        不存在任何仍在运行的分片任务。
+
+        注意：若某个任务此刻正在执行同步阻塞的网络 I/O（curl_cffi 请求跑在
+        线程池线程里），asyncio 层面的取消只能让"等待该线程结果"的协程立刻
+        以 CancelledError 结束，无法强制中断已经在系统线程里运行的请求本身
+        （Python 无法强杀线程）——该线程会在后台自然运行完并被静默丢弃。
+        这是 CPython 线程模型的固有限制，不在本次修复范围内；本修复消除的
+        是绝大多数场景下的竞争窗口：尚未开始实际下载（仍在排队等待信号量或
+        启动延迟）的分片会被立即取消，不再有机会触碰 .partN 文件。
+
+        Args:
+            tasks: asyncio.create_task 创建的分片下载任务列表
+        """
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
     async def _download_with_curl_cffi_multipart(
         self,
         url: str,
@@ -1742,6 +1776,14 @@ class AudioDownloader:
             await asyncio.gather(*tasks)
 
         except DownloaderError:
+            # 某个分片抛出不可重试的错误（如 403）：asyncio.gather() 在默认
+            # （非 return_exceptions）模式下遇到异常会立即向上传播，但不会
+            # 自动取消其余仍在运行的分片任务——它们可能仍在读写 .partN 文件。
+            # 必须显式取消并 await 其真正结束，否则调用方（403 阶段级 cookie
+            # 重试）紧接着用相同 target_path/.partN 路径重新下载时，会与这些
+            # 仍在后台运行的"僵尸任务"竞争同一批文件，损坏合并结果或让本可
+            # 成功的重试失败。
+            await self._cancel_and_await_tasks(tasks)
             # 清理分片文件
             for pf in part_files.values():
                 if pf.exists():
@@ -1749,6 +1791,8 @@ class AudioDownloader:
             raise
         except Exception as e:
             logger.error(f"[{self.downloader_name}] Multipart download failed: {e}")
+            # 同样先取消并等待其余分片任务结束，避免遗留后台任务
+            await self._cancel_and_await_tasks(tasks)
             # 清理分片文件
             for pf in part_files.values():
                 if pf.exists():
