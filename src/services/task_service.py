@@ -178,26 +178,31 @@ class TaskService:
                 transcript_file=existing_transcript,
             )
 
-        # Check for active (pending/downloading) task for same video
-        active_task = await self.db.get_active_task_by_video(video_id)
-        if active_task:
-            # 需求覆盖校验：只有当活跃任务已经涵盖本次请求需要的全部资源时才复用。
+        # Check for active (pending/downloading) tasks for same video.
+        # 同一视频允许同时存在多条活跃任务（如旧的 audio-only 任务仍在跑，又来了
+        # 一个 transcript-only 请求）。取全部活跃任务而非只取最新一条，避免只看
+        # 最新一条时漏掉更早的、恰好覆盖本次请求的任务，造成重复创建。
+        active_tasks = await self.db.get_active_tasks_by_video(video_id)
+        if active_tasks:
+            # 需求覆盖校验：任意一条活跃任务只要涵盖本次请求需要的全部资源即可复用。
             # 例：活跃任务只请求了音频（include_transcript=False），
-            # 而新请求需要字幕，直接复用会返回一个永远不会产出字幕的任务 ID。
-            # 覆盖不足时不复用，照常走后续流程创建新任务（文件级缓存会让重复部分开销很小）。
-            covers_audio = (not request.include_audio) or active_task.include_audio
-            covers_transcript = (not request.include_transcript) or active_task.include_transcript
-            if covers_audio and covers_transcript:
-                logger.info(f"Found active task for video {video_id}: {active_task.id}")
-                response = await self._build_task_response(active_task)
-                response.message = "Task already in progress"
-                return response
+            # 而新请求需要字幕，这条任务不能满足，需要继续看下一条/照常建新任务。
+            # 全部活跃任务都覆盖不足时才创建新任务（文件级缓存会让重复部分开销很小）。
+            for active_task in active_tasks:
+                covers_audio = (not request.include_audio) or active_task.include_audio
+                covers_transcript = (
+                    not request.include_transcript
+                ) or active_task.include_transcript
+                if covers_audio and covers_transcript:
+                    logger.info(f"Found active task for video {video_id}: {active_task.id}")
+                    response = await self._build_task_response(active_task)
+                    response.message = "Task already in progress"
+                    return response
 
             logger.info(
-                f"Active task {active_task.id} for video {video_id} does not cover requested "
-                f"resources (requested audio={request.include_audio}/transcript={request.include_transcript}, "
-                f"active task audio={active_task.include_audio}/transcript={active_task.include_transcript}); "
-                f"creating a new task instead of reusing it"
+                f"{len(active_tasks)} active task(s) for video {video_id} do not cover requested "
+                f"resources (requested audio={request.include_audio}/transcript={request.include_transcript}); "
+                f"creating a new task instead of reusing any of them"
             )
 
         # 前置检查：在真正创建任务前，拦截已知不可下载的视频（直播/预约首播/不可用等）。

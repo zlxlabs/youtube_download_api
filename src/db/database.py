@@ -956,7 +956,11 @@ class Database:
 
     async def get_active_task_by_video(self, video_id: str) -> Optional[Task]:
         """
-        Find active (pending/downloading) task by video ID.
+        Find the most recent active (pending/downloading) task by video ID.
+
+        注意：同一视频允许存在多条活跃任务（如先建了一个 audio 任务，后来又建了一个
+        transcript 任务），本方法只返回最新一条。需要遍历全部活跃任务做覆盖判断的
+        场景（如 TaskService 的去重覆盖校验），请用 get_active_tasks_by_video。
 
         Args:
             video_id: YouTube video ID.
@@ -975,6 +979,32 @@ class Database:
         )
         row = await cursor.fetchone()
         return self._row_to_task(row) if row else None
+
+    async def get_active_tasks_by_video(self, video_id: str) -> list[Task]:
+        """
+        Find all active (pending/downloading) tasks by video ID.
+
+        与 get_active_task_by_video 的区别：后者只返回最新一条，可能漏掉更早创建、
+        仍在跑但请求范围不同的活跃任务（例如旧的 audio-only 任务 + 新的
+        transcript-only 任务同时活跃时，只看最新一条会让覆盖判断出现假阴性，
+        导致重复创建任务）。调用方需要遍历全部活跃任务做覆盖判断时应使用本方法。
+
+        Args:
+            video_id: YouTube video ID.
+
+        Returns:
+            按创建时间倒序排列的活跃任务列表，没有则返回空列表。
+        """
+        cursor = await self.execute(
+            """
+            SELECT * FROM tasks
+            WHERE video_id = ? AND status IN ('pending', 'downloading')
+            ORDER BY created_at DESC
+            """,
+            (video_id,),
+        )
+        rows = await cursor.fetchall()
+        return [self._row_to_task(row) for row in rows]
 
     async def list_tasks(
         self,

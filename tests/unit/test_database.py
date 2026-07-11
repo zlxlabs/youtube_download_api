@@ -807,6 +807,41 @@ class TestTaskQueries:
         result = await test_db.get_active_task_by_video("nonexistent_vid")
         assert result is None
 
+    async def test_get_active_tasks_by_video_returns_all_active(self, test_db: Database):
+        """多条活跃任务（pending/downloading）都应被返回，按创建时间倒序。"""
+        older = make_task(
+            video_id="vid_multi_active", task_id="multi_older", include_transcript=False
+        )
+        older.created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        await test_db.create_task(older)
+
+        newer = make_task(
+            video_id="vid_multi_active", task_id="multi_newer", include_audio=False
+        )
+        newer.created_at = datetime(2026, 1, 2, tzinfo=timezone.utc)
+        await test_db.create_task(newer)
+
+        result = await test_db.get_active_tasks_by_video("vid_multi_active")
+
+        assert [t.id for t in result] == ["multi_newer", "multi_older"]
+
+    async def test_get_active_tasks_by_video_excludes_terminal_status(self, test_db: Database):
+        """已完成/已取消的任务不应出现在活跃任务列表中。"""
+        active = make_task(video_id="vid_multi_active_02", task_id="multi_active")
+        await test_db.create_task(active)
+        completed = make_task(video_id="vid_multi_active_02", task_id="multi_completed")
+        await test_db.create_task(completed)
+        await test_db.update_task_status("multi_completed", TaskStatus.COMPLETED)
+
+        result = await test_db.get_active_tasks_by_video("vid_multi_active_02")
+
+        assert [t.id for t in result] == ["multi_active"]
+
+    async def test_get_active_tasks_by_video_none(self, test_db: Database):
+        """没有活跃任务时应返回空列表。"""
+        result = await test_db.get_active_tasks_by_video("nonexistent_vid_multi")
+        assert result == []
+
     async def test_get_pending_tasks(self, test_db: Database):
         """Get pending tasks ordered by creation time."""
         for i in range(3):

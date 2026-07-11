@@ -461,3 +461,53 @@ class TestActiveTaskDedupCoverage:
         assert response.task_id is not None
         assert response.task_id != existing_task.id
         assert response.message != "Task already in progress"
+
+    @pytest.mark.asyncio
+    async def test_older_active_task_covering_request_is_reused_even_if_not_latest(
+        self, test_db: Database, service: TaskService
+    ) -> None:
+        """
+        同一视频同时存在旧的 audio-only 活跃任务和更新的 transcript-only 活跃任务时，
+        只检查"最新一条"活跃任务会漏掉更早的、恰好覆盖新请求的 audio 任务——
+        新来的 audio 请求会被误判为不覆盖（因为最新一条是 transcript-only），
+        进而重复创建一个新的 audio 任务。应遍历全部活跃任务，命中覆盖的那条
+        （即使不是最新的）就应该被复用，不创建新任务。
+        """
+        video_id = "deduptest005"
+        await test_db.get_or_create_video_resource(video_id)
+
+        older_audio_task = Task(
+            id="older-audio-task",
+            video_id=video_id,
+            video_url=_video_url(video_id),
+            status=TaskStatus.PENDING,
+            include_audio=True,
+            include_transcript=False,
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        await test_db.create_task(older_audio_task)
+
+        newer_transcript_task = Task(
+            id="newer-transcript-task",
+            video_id=video_id,
+            video_url=_video_url(video_id),
+            status=TaskStatus.PENDING,
+            include_audio=False,
+            include_transcript=True,
+            created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+        await test_db.create_task(newer_transcript_task)
+
+        request = CreateTaskRequest(
+            video_url=_video_url(video_id),
+            include_audio=True,
+            include_transcript=False,
+        )
+        response = await service.create_task(request)
+
+        assert response.task_id == older_audio_task.id
+        assert response.message == "Task already in progress"
+
+        # 不应该额外创建新任务：数据库里仍然只有这两条活跃任务
+        active_tasks = await test_db.get_active_tasks_by_video(video_id)
+        assert len(active_tasks) == 2
