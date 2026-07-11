@@ -958,7 +958,8 @@ class TestConcurrentSameVideoRequestsDeduped:
     此前没有互斥保护：并发 POST 同一个未缓存视频时，两个请求都能通过活跃任务检查，
     然后各自 await 元数据探测（最长 precheck_timeout），再各自插入任务，造成重复任务。
 
-    TaskService 现在按 video_id 维护一把进程内 asyncio.Lock，把整段临界区串行化。
+    TaskService 现在按 video_id 通过 KeyedLockManager（src/utils/keyed_lock.py）
+    维护一把进程内互斥锁，把整段临界区串行化。
     """
 
     @pytest.mark.asyncio
@@ -1014,28 +1015,58 @@ class TestConcurrentSameVideoRequestsDeduped:
         test_settings.precheck_enabled = False
         service = TaskService(test_db, test_settings, file_service)
 
-        lock_a = service._get_video_lock("videoaaaaaa")
-        lock_b = service._get_video_lock("videobbbbbb")
-        assert lock_a is not lock_b
-
-        async with lock_a:
-            acquired_b = await asyncio.wait_for(lock_b.acquire(), timeout=0.1)
+        async with service._video_locks.acquire("videoaaaaaa"):
+            acquired_b = False
+            async with asyncio.timeout(0.1):
+                async with service._video_locks.acquire("videobbbbbb"):
+                    acquired_b = True
             assert acquired_b is True
-            lock_b.release()
 
     @pytest.mark.asyncio
-    async def test_video_lock_dict_stays_bounded(
+    async def test_video_lock_dict_has_no_leak_after_sequential_requests(
         self, test_db: Database, test_settings: Settings, file_service: FileService
     ) -> None:
-        """锁 dict 不应随请求数量无限增长：超过阈值后应清理已释放的锁。"""
+        """
+        Codex 第10轮问题2(P2)：video 锁不再使用"超过阈值按 locked() 清理"策略
+        （该策略在 release 后、waiter 尚未被事件循环恢复的窗口里会误删仍有 waiter
+        排队的锁，导致后来者拿到新锁并发穿过临界区）。改为引用计数管理生命周期：
+        字典大小天然有界于"当前正在使用中的 video_id 数量"，每个请求处理完毕后
+        对应条目应立即清理，不留下任何僵尸引用。
+        """
         test_settings.precheck_enabled = False
         service = TaskService(test_db, test_settings, file_service)
-        service._VIDEO_LOCKS_MAX = 5
 
         for i in range(20):
             video_id = f"boundedlk{i:03d}"
             request = CreateTaskRequest(video_url=_video_url(video_id))
             response = await service.create_task(request)
             assert response.task_id is not None
+            # 每个请求处理完毕后，该 video_id 对应的锁条目应立即被清理
+            assert video_id not in service._video_locks
 
-        assert len(service._video_locks) <= service._VIDEO_LOCKS_MAX
+        # 全部处理完毕后字典应为空，不随请求数量累积增长
+        assert len(service._video_locks) == 0
+
+    @pytest.mark.asyncio
+    async def test_concurrent_requests_video_lock_dict_empty_when_idle(
+        self,
+        test_db: Database,
+        test_settings: Settings,
+        file_service: FileService,
+        mock_downloader_manager: MagicMock,
+    ) -> None:
+        """
+        并发场景下（多个不同视频同时建任务）：锁字典在任意时刻的大小都不应超过
+        "当前正在处理中的视频数"，且全部请求完成后字典应清空，验证引用计数
+        管理生命周期不会泄漏。
+        """
+        service = TaskService(
+            test_db, test_settings, file_service, downloader_manager=mock_downloader_manager
+        )
+        video_ids = [f"concurrlk{i:03d}" for i in range(10)]
+        requests = [CreateTaskRequest(video_url=_video_url(vid)) for vid in video_ids]
+
+        responses = await asyncio.gather(*(service.create_task(r) for r in requests))
+
+        assert all(r.task_id is not None for r in responses)
+        assert len(service._video_locks) == 0

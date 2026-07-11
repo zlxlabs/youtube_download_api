@@ -9,7 +9,7 @@ returns them without creating a new download task.
 import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Optional
 from uuid import uuid4
 
 from src.api.schemas import (
@@ -38,6 +38,7 @@ from src.downloaders.exceptions import DownloaderError
 from src.downloaders.manager import DownloaderManager
 from src.services.file_service import FileService
 from src.utils.helpers import extract_video_id
+from src.utils.keyed_lock import KeyedLockManager
 from src.utils.logger import logger
 
 
@@ -109,37 +110,24 @@ class TaskService:
         # 按 video_id 的进程内互斥锁：串行化 create_task 里"文件缓存检查 ->
         # 活跃任务检查 -> precheck -> 建任务"整段临界区，防止同一视频并发 POST 时
         # 两个请求都通过活跃任务检查、各自 await precheck（最长 precheck_timeout）
-        # 后重复插入任务。锁字典有界（见 _get_video_lock），防止长期运行内存泄漏，
-        # 清理策略与 DownloaderManager._metadata_locks 保持一致。
-        self._video_locks: Dict[str, asyncio.Lock] = {}
-        self._VIDEO_LOCKS_MAX = 256
+        # 后重复插入任务。
+        #
+        # 使用引用计数的 KeyedLockManager（而非"超过阈值按 locked() 判断清理"），
+        # 原因见 Codex 第10轮问题2：asyncio.Lock 在"持有者 release() 之后、排队
+        # waiter 尚未被事件循环恢复"的窗口里 locked() 返回 False，按阈值清理会把
+        # 仍有 waiter 排队的条目误删，导致后来者创建一把全新的锁绕开排队并发穿过
+        # 临界区，锁失去互斥意义。引用计数从根本上避免了这个问题，字典大小天然
+        # 有界于"当前正在使用中的 video_id 数量"，不再需要显式上限/清理逻辑。
+        #
+        # 注：DownloaderManager._metadata_locks（见 downloaders/manager.py）目前
+        # 仍是同款按阈值 + locked() 清理的旧策略，本轮未同步修复——它的竞态后果
+        # 只是重复拉一次元数据（幂等、无害），不影响正确性，留待后续按需处理。
+        self._video_locks = KeyedLockManager()
 
     @property
     def task_queue(self) -> asyncio.PriorityQueue[tuple[int, str]]:
         """Get the task queue."""
         return self._task_queue
-
-    def _get_video_lock(self, video_id: str) -> asyncio.Lock:
-        """
-        获取或创建 video 级请求锁，并保持锁字典有界。
-
-        超过阈值时丢弃未持有的锁，防止 dict 随 video_id 无界增长。极端情况下
-        （锁刚释放、等待者尚未唤醒时被清理）同一视频可能短暂并发进入临界区，
-        但这只是把 TOCTOU 窗口缩小而非引入新风险，不影响正确性上限。
-        """
-        if video_id not in self._video_locks:
-            if len(self._video_locks) >= self._VIDEO_LOCKS_MAX:
-                before = len(self._video_locks)
-                self._video_locks = {
-                    vid: lock
-                    for vid, lock in self._video_locks.items()
-                    if lock.locked()
-                }
-                logger.debug(
-                    f"Pruned video locks: {before} -> {len(self._video_locks)}"
-                )
-            self._video_locks[video_id] = asyncio.Lock()
-        return self._video_locks[video_id]
 
     async def create_task(self, request: CreateTaskRequest) -> TaskResponse:
         """
@@ -152,8 +140,9 @@ class TaskService:
         4. If active task exists for same video -> return existing task
 
         并发安全：整个方法体（文件缓存检查/活跃任务检查/precheck/建任务）都在
-        video 级锁内执行（见 _get_video_lock），串行化同一视频的并发请求，
-        避免 TOCTOU 窗口内重复建任务。不同视频使用不同的锁实例，互不阻塞。
+        video 级锁内执行（见 self._video_locks，KeyedLockManager），串行化同一
+        视频的并发请求，避免 TOCTOU 窗口内重复建任务。不同视频使用不同的锁实例，
+        互不阻塞。
 
         Args:
             request: Task creation request.
@@ -165,7 +154,7 @@ class TaskService:
         if not video_id:
             raise ValueError("Invalid YouTube URL")
 
-        async with self._get_video_lock(video_id):
+        async with self._video_locks.acquire(video_id):
             return await self._create_task_locked(video_id, request)
 
     async def _create_task_locked(
