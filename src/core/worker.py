@@ -367,9 +367,10 @@ class DownloadWorker:
             last_attempt_at=saved["last_attempt_at"],
             failed_attempts=saved["failed_attempts"],
         )
-        return True
 
-        # 探测窗口是否已到只影响日志措辞，不影响恢复决策本身。
+        # 探测窗口是否已到只影响下面的日志措辞，不影响上面已经做出的恢复决策
+        # 本身（P2 修复，2026-07-11：这段日志曾被一个提前 return True 挡成
+        # 不可达死代码，见 git blame，这里必须放在 return 之前才能真正执行到）。
         recovery_time = calculate_ban_recovery_time(
             banned_at,
             saved["last_attempt_at"],
@@ -392,6 +393,8 @@ class DownloadWorker:
                 f"full-speed requests to YouTube right after a container restart "
                 f"while still IP-banned."
             )
+
+        return True
 
     def _send_callback_background(self, task: Task) -> None:
         """

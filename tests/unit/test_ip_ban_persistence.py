@@ -15,6 +15,7 @@
 7. Settings 新增的 ip_ban_min_wait_before_retry / ip_ban_max_retry_interval
 """
 
+from collections.abc import Generator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,26 @@ from src.core.ip_ban_models import IPBanLevel, IPBanStateChangeContext
 from src.core.worker import DownloadWorker
 from src.db.database import Database
 from src.db.models import Task, TaskPriority, TaskStatus
+from src.utils.logger import logger as app_logger
+
+
+@pytest.fixture
+def captured_logs() -> Generator[list[str], None, None]:
+    """
+    捕获 loguru 输出的日志正文，用于断言启动恢复流程打印的运维日志措辞。
+
+    worker.py 里用的 `from src.utils.logger import logger` 与这里的
+    `app_logger` 是同一个 loguru 单例（logger.py 只是重新导出），
+    loguru 默认不会像标准库 logging 那样接入 pytest 的 caplog，
+    这里用 logger.add() 挂一个临时 sink 收集消息文本，测试结束后移除，
+    不影响其他测试的日志输出。
+    """
+    messages: list[str] = []
+    sink_id = app_logger.add(
+        lambda message: messages.append(message.record["message"]), level="DEBUG"
+    )
+    yield messages
+    app_logger.remove(sink_id)
 
 
 # ==================== Database 持久化测试 ====================
@@ -564,6 +585,73 @@ class TestWorkerIPBanStartupRestore:
         assert worker.ip_ban_breaker.get_current_level() == IPBanLevel.AUDIO_BANNED
         allowed, _ = worker.ip_ban_breaker.should_allow_attempt("audio")
         assert not allowed
+
+    @pytest.mark.asyncio
+    async def test_restore_probe_window_elapsed_logs_probe_already_eligible(
+        self,
+        test_db: Database,
+        test_settings: Settings,
+        captured_logs: list[str],
+    ) -> None:
+        """
+        P2 回归测试（Codex 第12轮）：探测窗口已到时，恢复流程必须真正
+        打印出"probe already eligible"措辞的启动日志。
+
+        背景：第6轮修复曾为这两条日志分支补上运维可见性，但第7轮引入
+        幂等 flag 时在 `await self.ip_ban_breaker.restore_state(...)` 之后
+        插入了一个提前 `return True`，导致这两条日志分支和它们前面的
+        recovery_time 计算彻底沦为不可达死代码——恢复场景下启动日志完全
+        不输出探测窗口信息。这里直接断言日志正文，锁死"必须真正执行到"
+        这一行为，而不仅仅是熔断级别恢复正确。
+        """
+        test_settings.ip_ban_min_wait_before_retry = 60
+        test_settings.ip_ban_max_retry_interval = 60
+
+        await test_db.save_ip_ban_state(
+            current_level=IPBanLevel.AUDIO_BANNED,
+            banned_at=datetime.now() - timedelta(hours=5),
+            last_attempt_at=datetime.now() - timedelta(hours=5),
+            failed_attempts=1,
+        )
+
+        worker = _make_worker(test_db, test_settings)
+        result = await worker._restore_ip_ban_state()
+
+        assert result is True
+        assert any("probe already eligible" in msg for msg in captured_logs), (
+            f"探测窗口已到场景下未输出预期的启动日志，实际捕获日志：{captured_logs}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_restore_probe_window_not_reached_logs_next_probe_eligible_time(
+        self,
+        test_db: Database,
+        test_settings: Settings,
+        captured_logs: list[str],
+    ) -> None:
+        """
+        P2 回归测试（Codex 第12轮）：探测窗口尚未到时，恢复流程必须真正
+        打印出预计探测时间（"next probe eligible at"措辞）的启动日志。
+
+        与上一条测试互补，锁死死代码修复后的两个分支都被真正执行到。
+        """
+        test_settings.ip_ban_min_wait_before_retry = 3600
+        test_settings.ip_ban_max_retry_interval = 1800
+
+        await test_db.save_ip_ban_state(
+            current_level=IPBanLevel.AUDIO_BANNED,
+            banned_at=datetime.now() - timedelta(minutes=5),
+            last_attempt_at=None,
+            failed_attempts=1,
+        )
+
+        worker = _make_worker(test_db, test_settings)
+        result = await worker._restore_ip_ban_state()
+
+        assert result is True
+        assert any("next probe eligible at" in msg for msg in captured_logs), (
+            f"探测窗口未到场景下未输出预期的启动日志，实际捕获日志：{captured_logs}"
+        )
 
     @pytest.mark.asyncio
     async def test_state_change_after_restore_persists_to_db(
