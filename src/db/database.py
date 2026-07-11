@@ -1006,12 +1006,18 @@ class Database:
         logger.debug(f"Listed {len(tasks)} tasks (total: {total}, filters: status={status}, search={search})")
         return tasks, total
 
-    async def get_pending_tasks(self, limit: int = 10) -> list[Task]:
+    async def get_pending_tasks(self, limit: int = 10, offset: int = 0) -> list[Task]:
         """
         Get pending tasks ordered by creation time.
 
+        offset 参数用于分批拉取（配合 TaskService.restore_pending_tasks 分页
+        恢复全部 pending 任务，避免单次查询硬编码上限导致堆积任务被静默丢弃）。
+        ORDER BY 追加 id 作为次级排序键，保证 created_at 相同时跨页结果依然
+        稳定、不重复、不遗漏。
+
         Args:
             limit: Maximum number of tasks to return.
+            offset: Number of tasks to skip（用于分页）。
 
         Returns:
             List of pending tasks.
@@ -1020,10 +1026,10 @@ class Database:
             """
             SELECT * FROM tasks
             WHERE status = 'pending'
-            ORDER BY created_at ASC
-            LIMIT ?
+            ORDER BY created_at ASC, id ASC
+            LIMIT ? OFFSET ?
             """,
-            (limit,),
+            (limit, offset),
         )
         rows = await cursor.fetchall()
         return [self._row_to_task(row) for row in rows]
