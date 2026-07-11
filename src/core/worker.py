@@ -58,6 +58,7 @@ class DownloadWorker:
         callback_service: CallbackService,
         notify_service: NotificationService,
         metrics_collector: Optional[MetricsCollector] = None,
+        downloader_manager: Optional[DownloaderManager] = None,
     ):
         """
         Initialize download worker.
@@ -70,6 +71,11 @@ class DownloadWorker:
             callback_service: Callback service.
             notify_service: Notification service.
             metrics_collector: Prometheus metrics collector (optional).
+            downloader_manager: 共享的下载器管理器实例（可选）。生产环境应
+                由 main.py 统一创建并注入，确保 API 路由层与 Worker 执行层
+                共用同一份熔断器状态和统计数据，避免出现两套互相独立的
+                下载器健康视图。未传入时（如单元测试直接构造 Worker）回退
+                为自建一份独立实例，保持向后兼容。
         """
         self.db = db
         self.settings = settings
@@ -80,7 +86,7 @@ class DownloadWorker:
         self.metrics_collector = metrics_collector
 
         # 使用下载器管理器（支持多下载器降级 + 元数据缓存）
-        self.downloader_manager = DownloaderManager(settings, db)
+        self.downloader_manager = downloader_manager or DownloaderManager(settings, db)
         self._running = False
         self._current_task: Optional[Task] = None
 

@@ -132,10 +132,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         file_service = FileService(db, settings)
         task_service = TaskService(db, settings, file_service)
         callback_service = CallbackService(db, file_service)
-        notify_service = NotificationService(settings, db)
 
-        # 初始化下载器管理器（用于元数据获取和下载）
+        # 全局唯一的下载器管理器实例（用于元数据获取和下载）。
+        # 必须在此处创建一次，后续统一注入给 Worker、通知服务、视频信息
+        # 路由、人工上传服务，避免出现多份互相独立的熔断器/统计状态。
         downloader_manager = DownloaderManager(settings, db)
+        notify_service = NotificationService(settings, db, downloader_manager)
 
         if settings.manual_upload_enabled:
             transcode_service = TranscodeService()
@@ -159,6 +161,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         set_manual_upload_service(manual_upload_service)
 
     # Initialize download worker
+    # 注入全局唯一的 downloader_manager，确保 Worker 实际下载所用的熔断器/
+    # 统计状态与 API 路由、通知服务看到的完全一致（不再各自持有一份）。
     download_worker = DownloadWorker(
         db=db,
         settings=settings,
@@ -167,10 +171,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         callback_service=callback_service,
         notify_service=notify_service,
         metrics_collector=metrics_collector,
+        downloader_manager=downloader_manager,
     )
-
-    # Link downloader manager to notification service (for stats in notifications)
-    notify_service.downloader_manager = download_worker.downloader_manager
 
     # Restore pending tasks to queue
     await task_service.restore_pending_tasks()
