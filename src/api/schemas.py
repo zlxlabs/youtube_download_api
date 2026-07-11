@@ -384,3 +384,44 @@ class VideoInfoDetailResponse(BaseModel):
         description="Metadata source: cached / youtube_data_api / ytdlp / tikhub"
     )
     fetched_at: datetime = Field(..., description="Metadata fetch/update timestamp")
+
+
+# ==================== Download Stats Schemas ====================
+
+
+class FailureSplitStats(BaseModel):
+    """失败归因拆分：内容级（视频本身问题）vs 系统级（下载器/网络/风控等）。"""
+
+    content_level: int = Field(..., description="内容级失败数（error_code 以 VIDEO_ 开头）")
+    system_level: int = Field(..., description="系统级失败数（其余 error_code）")
+    content_level_ratio: float = Field(..., description="内容级失败占比（0-1）")
+    system_level_ratio: float = Field(..., description="系统级失败占比（0-1）")
+
+
+class DownloaderDistribution(BaseModel):
+    """音频/字幕下载器归属分布，NULL 归为 'unknown'（未知/历史数据/复用缓存未下载）。"""
+
+    audio_downloader: dict[str, int] = Field(..., description="音频下载器名称 -> 任务数")
+    transcript_downloader: dict[str, int] = Field(..., description="字幕下载器名称 -> 任务数")
+
+
+class WeeklyTrendItem(BaseModel):
+    """单个 ISO 周的完成/失败趋势。"""
+
+    week: str = Field(..., description="ISO 8601 周标识，如 '2026-W28'")
+    completed: int = Field(..., description="该周完成任务数")
+    failed: int = Field(..., description="该周失败任务数")
+
+
+class DownloadStatsResponse(BaseModel):
+    """下载失败归因统计响应（GET /api/v1/stats/downloads）。"""
+
+    days: int = Field(..., description="统计时间窗口（天数）")
+    total: int = Field(..., description="窗口内任务总数")
+    by_status: dict[str, int] = Field(..., description="任务状态 -> 计数")
+    failures_by_error_code: dict[str, int] = Field(
+        ..., description="失败任务 error_code -> 计数"
+    )
+    failure_split: FailureSplitStats = Field(..., description="内容级/系统级失败拆分")
+    by_downloader: DownloaderDistribution = Field(..., description="下载器归属分布")
+    weekly_trend: list[WeeklyTrendItem] = Field(..., description="按 ISO 周的完成/失败趋势")

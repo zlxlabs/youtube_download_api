@@ -27,6 +27,7 @@ from src.api.manual_upload_routes import set_manual_upload_service
 from src.api.video_resource_routes import router as video_resource_router
 from src.api.video_resource_routes import set_file_service as set_vr_file_service
 from src.api.settings_routes import router as settings_router
+from src.api.stats_routes import router as stats_router
 from src.api.video_info_routes import router as video_info_router
 from src.api.video_info_routes import set_services as set_video_info_services
 from src.api.schemas import ComponentStatus, HealthResponse, QueueStatus
@@ -338,6 +339,7 @@ app.include_router(api_router)
 app.include_router(video_resource_router)
 app.include_router(video_info_router)
 app.include_router(settings_router)
+app.include_router(stats_router)
 
 # Include manual upload routes and admin UI when enabled
 if get_settings().manual_upload_enabled:
