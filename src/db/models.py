@@ -258,6 +258,10 @@ class Task:
     reused_audio: bool = False  # Whether audio file was reused
     reused_transcript: bool = False  # Whether transcript file was reused
 
+    # Downloader attribution（哪个下载器最终产出了该文件；NULL=未知/历史数据/复用缓存未下载）
+    audio_downloader: Optional[str] = None  # 产出音频文件的下载器名称，如 "cdp" / "ytdlp" / "tikhub"
+    transcript_downloader: Optional[str] = None  # 产出字幕文件的下载器名称
+
     # Callback configuration
     callback_url: Optional[str] = None
     callback_secret: Optional[str] = None

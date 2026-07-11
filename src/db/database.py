@@ -8,7 +8,7 @@ Architecture: Video -> Files <- Task (video owns files, tasks reference files)
 import json
 import sqlite3
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
 
@@ -200,6 +200,21 @@ class Database:
                 )
                 logger.info("Migration: Added 'failure_details' column to tasks table")
 
+            # Migration 4/5: Add downloader attribution columns
+            # 记录音频/字幕分别由哪个下载器最终产出，用于失败归因统计
+            # （此前只能翻日志才能回答"哪个下载器完成的下载"）。NULL 表示未知/历史数据。
+            if "audio_downloader" not in column_names:
+                await self.execute(
+                    "ALTER TABLE tasks ADD COLUMN audio_downloader TEXT"
+                )
+                logger.info("Migration: Added 'audio_downloader' column to tasks table")
+
+            if "transcript_downloader" not in column_names:
+                await self.execute(
+                    "ALTER TABLE tasks ADD COLUMN transcript_downloader TEXT"
+                )
+                logger.info("Migration: Added 'transcript_downloader' column to tasks table")
+
         # Check if files table exists for manual upload migrations
         cursor = await self.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='files'"
@@ -336,6 +351,8 @@ class Database:
                     transcript_file_id TEXT,
                     reused_audio INTEGER DEFAULT 0,
                     reused_transcript INTEGER DEFAULT 0,
+                    audio_downloader TEXT,
+                    transcript_downloader TEXT,
                     callback_url TEXT,
                     callback_secret TEXT,
                     callback_status TEXT,
@@ -343,6 +360,8 @@ class Database:
                     error_code TEXT,
                     error_message TEXT,
                     retry_count INTEGER DEFAULT 0,
+                    partial_success INTEGER DEFAULT 0,
+                    failure_details TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     started_at TIMESTAMP,
                     completed_at TIMESTAMP,
@@ -1040,6 +1059,7 @@ class Database:
         status: TaskStatus,
         error_code: Optional[ErrorCode] = None,
         error_message: Optional[str] = None,
+        failure_details: Optional[str] = None,
     ) -> None:
         """
         Update task status.
@@ -1049,6 +1069,9 @@ class Database:
             status: New status.
             error_code: Error code if failed.
             error_message: Error message if failed.
+            failure_details: 失败归因详情（JSON 字符串），记录降级链中每个下载器的
+                尝试结果（下载器名/error_code/message）。仅在 status=FAILED 时写入，
+                其他状态传入会被忽略。
         """
         now = datetime.now(timezone.utc)
 
@@ -1067,13 +1090,15 @@ class Database:
                 await self.execute(
                     """
                     UPDATE tasks
-                    SET status = ?, error_code = ?, error_message = ?, completed_at = ?
+                    SET status = ?, error_code = ?, error_message = ?,
+                        failure_details = ?, completed_at = ?
                     WHERE id = ?
                     """,
                     (
                         status.value,
                         error_code.value if error_code else None,
                         error_message,
+                        failure_details,
                         now,
                         task_id,
                     ),
@@ -1093,6 +1118,8 @@ class Database:
         transcript_file_id: Optional[str] = None,
         reused_audio: bool = False,
         reused_transcript: bool = False,
+        audio_downloader: Optional[str] = None,
+        transcript_downloader: Optional[str] = None,
     ) -> None:
         """
         Update task as completed with file references.
@@ -1103,6 +1130,9 @@ class Database:
             transcript_file_id: Transcript file UUID (may be None).
             reused_audio: Whether audio file was reused.
             reused_transcript: Whether transcript file was reused.
+            audio_downloader: 产出音频文件的下载器名称（复用缓存时应为 None，
+                由 reused_audio 标志表达来源，不写占位值）。
+            transcript_downloader: 产出字幕文件的下载器名称（同上）。
         """
         now = datetime.now(timezone.utc)
 
@@ -1111,7 +1141,9 @@ class Database:
                 """
                 UPDATE tasks
                 SET status = ?, audio_file_id = ?, transcript_file_id = ?,
-                    reused_audio = ?, reused_transcript = ?, completed_at = ?
+                    reused_audio = ?, reused_transcript = ?,
+                    audio_downloader = ?, transcript_downloader = ?,
+                    completed_at = ?
                 WHERE id = ?
                 """,
                 (
@@ -1120,6 +1152,8 @@ class Database:
                     transcript_file_id,
                     1 if reused_audio else 0,
                     1 if reused_transcript else 0,
+                    audio_downloader,
+                    transcript_downloader,
                     now,
                     task_id,
                 ),
@@ -1349,6 +1383,141 @@ class Database:
 
         return stats
 
+    async def get_download_stats(self, days: int = 30) -> dict[str, Any]:
+        """
+        获取下载失败归因统计（供 GET /api/v1/stats/downloads 端点使用）。
+
+        聚合最近 N 天的任务数据：状态分布、失败 error_code 分布、
+        内容级（VIDEO_* 前缀）vs 系统级失败拆分、音频/字幕下载器归属分布、
+        按 ISO 周的完成/失败趋势。全部通过 SQL GROUP BY 聚合，不在 Python 中
+        遍历全表，避免任务量增长后端点变慢。
+
+        Args:
+            days: 统计时间窗口（天数）。
+
+        Returns:
+            聚合结果字典，字段：total / by_status / failures_by_error_code /
+            failure_split / by_downloader / weekly_trend。
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+
+        # 1. 状态分布 + 总数
+        status_cursor = await self.execute(
+            """
+            SELECT status, COUNT(*) as count
+            FROM tasks
+            WHERE created_at >= ?
+            GROUP BY status
+            """,
+            (cutoff,),
+        )
+        status_rows = await status_cursor.fetchall()
+        by_status: dict[str, int] = {row["status"]: row["count"] for row in status_rows}
+        total = sum(by_status.values())
+
+        # 2. 失败任务按 error_code 分布
+        error_cursor = await self.execute(
+            """
+            SELECT error_code, COUNT(*) as count
+            FROM tasks
+            WHERE created_at >= ? AND status = 'failed' AND error_code IS NOT NULL
+            GROUP BY error_code
+            """,
+            (cutoff,),
+        )
+        error_rows = await error_cursor.fetchall()
+        failures_by_error_code: dict[str, int] = {
+            row["error_code"]: row["count"] for row in error_rows
+        }
+
+        # 3. 失败归因拆分：内容级（VIDEO_ 前缀，视频本身问题，无法通过重试/换下载器解决）
+        #    vs 系统级（下载器/网络/风控等，理论上可通过技术手段改善）
+        content_level = sum(
+            count
+            for code, count in failures_by_error_code.items()
+            if code.startswith("VIDEO_")
+        )
+        system_level = sum(
+            count
+            for code, count in failures_by_error_code.items()
+            if not code.startswith("VIDEO_")
+        )
+        total_failures = content_level + system_level
+        failure_split = {
+            "content_level": content_level,
+            "system_level": system_level,
+            "content_level_ratio": (content_level / total_failures) if total_failures else 0.0,
+            "system_level_ratio": (system_level / total_failures) if total_failures else 0.0,
+        }
+
+        # 4. 音频/字幕下载器归属分布（NULL 归为 'unknown'：未知/历史数据/复用缓存未下载）
+        audio_downloader_cursor = await self.execute(
+            """
+            SELECT COALESCE(audio_downloader, 'unknown') as downloader, COUNT(*) as count
+            FROM tasks
+            WHERE created_at >= ?
+            GROUP BY downloader
+            """,
+            (cutoff,),
+        )
+        audio_downloader_rows = await audio_downloader_cursor.fetchall()
+        audio_downloader_dist: dict[str, int] = {
+            row["downloader"]: row["count"] for row in audio_downloader_rows
+        }
+
+        transcript_downloader_cursor = await self.execute(
+            """
+            SELECT COALESCE(transcript_downloader, 'unknown') as downloader, COUNT(*) as count
+            FROM tasks
+            WHERE created_at >= ?
+            GROUP BY downloader
+            """,
+            (cutoff,),
+        )
+        transcript_downloader_rows = await transcript_downloader_cursor.fetchall()
+        transcript_downloader_dist: dict[str, int] = {
+            row["downloader"]: row["count"] for row in transcript_downloader_rows
+        }
+
+        by_downloader = {
+            "audio_downloader": audio_downloader_dist,
+            "transcript_downloader": transcript_downloader_dist,
+        }
+
+        # 5. 按 ISO 周统计完成/失败趋势
+        # strftime('%G-W%V', ...) 输出 ISO 8601 年份+周号（如 "2026-W28"），
+        # 跨年边界处理正确，与公历周（%Y-%W）不同。
+        weekly_cursor = await self.execute(
+            """
+            SELECT strftime('%G-W%V', created_at) as week, status, COUNT(*) as count
+            FROM tasks
+            WHERE created_at >= ? AND status IN ('completed', 'failed')
+            GROUP BY week, status
+            ORDER BY week
+            """,
+            (cutoff,),
+        )
+        weekly_rows = await weekly_cursor.fetchall()
+        weekly_map: dict[str, dict[str, int]] = {}
+        for row in weekly_rows:
+            week = row["week"]
+            weekly_map.setdefault(week, {"completed": 0, "failed": 0})
+            weekly_map[week][row["status"]] = row["count"]
+
+        weekly_trend = [
+            {"week": week, "completed": counts["completed"], "failed": counts["failed"]}
+            for week, counts in sorted(weekly_map.items())
+        ]
+
+        return {
+            "total": total,
+            "by_status": by_status,
+            "failures_by_error_code": failures_by_error_code,
+            "failure_split": failure_split,
+            "by_downloader": by_downloader,
+            "weekly_trend": weekly_trend,
+        }
+
     # ==================== Helper Methods ====================
 
     def _row_to_video_resource(self, row: aiosqlite.Row) -> VideoResource:
@@ -1384,6 +1553,8 @@ class Database:
             transcript_file_id=row["transcript_file_id"],
             reused_audio=bool(row["reused_audio"]),
             reused_transcript=bool(row["reused_transcript"]),
+            audio_downloader=row["audio_downloader"],
+            transcript_downloader=row["transcript_downloader"],
             callback_url=row["callback_url"],
             callback_secret=row["callback_secret"],
             callback_status=CallbackStatus(row["callback_status"])
@@ -1393,6 +1564,8 @@ class Database:
             error_code=ErrorCode(row["error_code"]) if row["error_code"] else None,
             error_message=row["error_message"],
             retry_count=row["retry_count"] or 0,
+            partial_success=bool(row["partial_success"]),
+            failure_details=row["failure_details"],
             created_at=row["created_at"],
             started_at=row["started_at"],
             completed_at=row["completed_at"],
