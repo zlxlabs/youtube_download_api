@@ -555,25 +555,48 @@ class TaskService:
         except asyncio.TimeoutError:
             return None
 
+    # 恢复 pending 任务时每批拉取的数量。
+    # 历史 bug：曾经硬编码 get_pending_tasks(limit=100) 单次拉取，堆积超过
+    # 100 条时超出部分永远恢复不到队列里，导致任务静默卡死。现在改为以此
+    # 批大小循环分页拉取，直到取完全部 pending 任务为止，不再有隐藏上限。
+    _RESTORE_BATCH_SIZE = 100
+
     async def restore_pending_tasks(self) -> int:
         """
         Restore pending tasks to queue after restart.
 
+        分批循环拉取全部 pending 任务（而非一次性限量拉取），保持
+        get_pending_tasks 现有的排序语义（created_at ASC），确保堆积
+        再多任务也能被完整恢复入队，不会有任务被静默遗漏。
+
         Returns:
             Number of tasks restored.
         """
-        tasks = await self.db.get_pending_tasks(limit=100)
         count = 0
+        offset = 0
 
-        for task in tasks:
-            # 启动时恢复的任务，重新计算队列优先级
-            queue_priority = calculate_queue_priority(
-                user_priority=task.priority,
-                include_audio=task.include_audio,
-                include_transcript=task.include_transcript,
+        while True:
+            tasks = await self.db.get_pending_tasks(
+                limit=self._RESTORE_BATCH_SIZE, offset=offset
             )
-            await self._task_queue.put((queue_priority, task.id))
-            count += 1
+            if not tasks:
+                break
+
+            for task in tasks:
+                # 启动时恢复的任务，重新计算队列优先级
+                queue_priority = calculate_queue_priority(
+                    user_priority=task.priority,
+                    include_audio=task.include_audio,
+                    include_transcript=task.include_transcript,
+                )
+                await self._task_queue.put((queue_priority, task.id))
+                count += 1
+
+            offset += len(tasks)
+
+            # 本批数量小于批大小，说明已经是最后一批，无需再查询
+            if len(tasks) < self._RESTORE_BATCH_SIZE:
+                break
 
         if count > 0:
             logger.info(f"Restored {count} pending tasks to queue")

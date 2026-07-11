@@ -826,6 +826,21 @@ class TestTaskQueries:
         pending = await test_db.get_pending_tasks(limit=2)
         assert len(pending) == 2
 
+    async def test_get_pending_tasks_offset(self, test_db: Database):
+        """get_pending_tasks 应支持 offset 分页，用于批量恢复超过单批次上限的任务。"""
+        for i in range(5):
+            task = make_task(video_id=f"vid_pend_off_{i}", task_id=f"pend_off_{i}")
+            await test_db.create_task(task)
+
+        first_page = await test_db.get_pending_tasks(limit=2, offset=0)
+        second_page = await test_db.get_pending_tasks(limit=2, offset=2)
+        third_page = await test_db.get_pending_tasks(limit=2, offset=4)
+
+        # 分页之间既不遗漏也不重复，且顺序与全量查询一致（created_at ASC）
+        assert [t.id for t in first_page] == ["pend_off_0", "pend_off_1"]
+        assert [t.id for t in second_page] == ["pend_off_2", "pend_off_3"]
+        assert [t.id for t in third_page] == ["pend_off_4"]
+
     async def test_get_pending_tasks_excludes_other_statuses(self, test_db: Database):
         """get_pending_tasks should only return pending tasks."""
         pending_task = make_task(video_id="vid_pend_ex_1", task_id="pend_ex_1")

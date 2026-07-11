@@ -7,7 +7,7 @@
 import pytest
 import tempfile
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from src.config import Settings
 from src.db.database import Database
@@ -193,6 +193,52 @@ async def test_database_stores_priority_correctly(test_db):
     assert retrieved_task is not None
     assert retrieved_task.priority == TaskPriority.URGENT
     assert isinstance(retrieved_task.priority, TaskPriority)
+
+
+@pytest.mark.asyncio
+async def test_task_restore_handles_more_than_single_batch(test_db, task_service):
+    """
+    回归测试：restore_pending_tasks 不应有静默上限。
+
+    历史 bug：曾经硬编码 get_pending_tasks(limit=100)，服务重启时堆积超过
+    100 条 pending 任务会导致超出部分永远恢复不到队列里，任务静默卡死。
+    这里直接造 150 条 pending 任务（超过恢复批次大小），验证：
+    1. 全部 150 条都被恢复计数、全部进队列（不多不少）；
+    2. 出队顺序语义正确——相同优先级下，按创建时间（恢复批次遍历顺序）先进先出。
+    """
+    total = 150
+    for i in range(total):
+        task = Task(
+            id=f"restore-task-{i:04d}",
+            video_id=f"restore-video-{i:04d}",
+            video_url=f"https://www.youtube.com/watch?v=restore-video-{i:04d}",
+            status=TaskStatus.PENDING,
+            priority=TaskPriority.NORMAL,
+            include_audio=True,
+            include_transcript=False,
+            created_at=datetime(2025, 1, 1, tzinfo=timezone.utc) + timedelta(microseconds=i),
+        )
+        await test_db.create_task(task)
+
+    # 清空队列（模拟重启前的状态，保证从空队列开始恢复）
+    while not task_service.task_queue.empty():
+        await task_service.task_queue.get()
+
+    restored_count = await task_service.restore_pending_tasks()
+
+    # 不再受硬编码 100 条上限影响，150 条应全部恢复
+    assert restored_count == total
+    assert task_service.task_queue.qsize() == total
+
+    # 相同优先级下，任务 id 按零填充编号与创建时间同序递增，
+    # 出队顺序应与创建顺序一致，验证恢复过程未打乱/遗漏/重复任何任务。
+    dequeued_ids = []
+    while not task_service.task_queue.empty():
+        _, task_id = await task_service.task_queue.get()
+        dequeued_ids.append(task_id)
+
+    expected_ids = [f"restore-task-{i:04d}" for i in range(total)]
+    assert dequeued_ids == expected_ids
 
 
 if __name__ == "__main__":
