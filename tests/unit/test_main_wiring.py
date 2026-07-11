@@ -12,6 +12,7 @@ video_info_routes / manual_upload_service 使用），DownloadWorker.__init__
 """
 
 import os
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -27,7 +28,10 @@ import pytest
 import src.main as main_module
 from src.api import video_info_routes
 from src.config import Settings
+from src.core.ip_ban_models import IPBanLevel
 from src.core.worker import DownloadWorker
+from src.db.database import Database
+from src.services.notify import NotificationService
 
 
 @pytest.fixture
@@ -87,3 +91,68 @@ async def test_lifespan_wires_single_shared_downloader_manager(
         # 人工上传服务（manual_upload_enabled=True 时）同样应共享同一实例。
         if main_module.manual_upload_service is not None:
             assert main_module.manual_upload_service.downloader_manager is shared_manager
+
+
+@pytest.mark.asyncio
+async def test_lifespan_restores_ip_ban_state_before_startup_notification(
+    monkeypatch: pytest.MonkeyPatch, wiring_settings: Settings
+) -> None:
+    """
+    P2 回归测试：startup 企微通知读到的必须是"恢复后"的熔断器状态。
+
+    历史 bug：src/main.py 的 lifespan 里，
+    `asyncio.create_task(download_worker.start())` 和
+    `await notify_service.notify_startup(...)` 之间没有任何真正让出事件
+    循环的 await 点（scheduler.start() 是同步调用，notify_startup 内部
+    也全是同步操作）。IP 熔断状态的启动恢复逻辑（原来只在
+    DownloadWorker.start() 内部触发）根本没机会在 notify_startup 读取
+    熔断器状态之前跑完，导致通知里看到的永远是
+    IPBanCircuitBreaker.__init__ 的初始值 NORMAL，而不是持久化恢复后的
+    真实状态（这是确定性 bug，不是偶发竞态）。
+
+    验证方式：预先向 lifespan 即将连接的同一个 db 文件写入 FULLY_BANNED
+    持久化状态，驱动一次 lifespan 启动流程，用 monkeypatch 替换
+    NotificationService.notify_startup 为一个记录用的桩函数，捕获它被
+    调用时 ip_ban_breaker.get_current_level() 的返回值，断言捕获到的是
+    FULLY_BANNED 而不是 NORMAL。
+    """
+    monkeypatch.delenv("SENTRY_DSN", raising=False)
+    monkeypatch.setattr(main_module, "get_settings", lambda: wiring_settings)
+
+    # 用独立的 Database 实例连到 lifespan 内部会用到的同一个 db 文件路径，
+    # 提前写入 FULLY_BANNED 状态（模拟"容器重启前正处于熔断中"），
+    # 再断开连接，避免和 lifespan 自己的连接冲突。
+    seed_db = Database(wiring_settings.db_path)
+    await seed_db.connect()
+    await seed_db.save_ip_ban_state(
+        current_level=IPBanLevel.FULLY_BANNED,
+        banned_at=datetime.now() - timedelta(minutes=5),
+        last_attempt_at=None,
+        failed_attempts=1,
+    )
+    await seed_db.disconnect()
+
+    # 跳过真实的 worker 任务循环（与上面的 wiring 测试一致）。恢复逻辑
+    # 现在由 main.py 在 asyncio.create_task(start()) 之前显式 await
+    # 调用 restore_persisted_state()，即使 start() 本身被整个 mock 掉，
+    # 恢复动作依然会真实执行——这是本次重构在可测试性上的额外收益。
+    monkeypatch.setattr(DownloadWorker, "start", AsyncMock())
+
+    # 用桩函数替换 notify_startup：只记录被调用瞬间 ip_ban_breaker 的状态，
+    # 不真正执行原方法体（避免真实发送企微 webhook），这样断言的是
+    # "notify_startup 被调用时能读到的状态"，精确对应 bug 描述的读取时机。
+    captured_levels: list[IPBanLevel] = []
+
+    async def fake_notify_startup(self, version, ip_ban_breaker=None) -> None:
+        assert ip_ban_breaker is not None, "测试期望 ip_ban_breaker 被传入"
+        captured_levels.append(ip_ban_breaker.get_current_level())
+
+    monkeypatch.setattr(NotificationService, "notify_startup", fake_notify_startup)
+
+    async with main_module.lifespan(main_module.app):
+        pass
+
+    assert captured_levels == [IPBanLevel.FULLY_BANNED], (
+        f"startup 通知读到的熔断状态应为恢复后的 FULLY_BANNED，实际捕获到: "
+        f"{captured_levels}（NORMAL 说明恢复逻辑未在读取前完成，bug 复现）"
+    )

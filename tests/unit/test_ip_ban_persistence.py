@@ -635,6 +635,51 @@ class TestWorkerIPBanStartupRestore:
         assert decision.action == "execute"
         assert decision.is_probe is True
 
+    @pytest.mark.asyncio
+    async def test_restore_persisted_state_is_idempotent(
+        self, test_db: Database, test_settings: Settings
+    ) -> None:
+        """
+        P2 回归测试：restore_persisted_state() 必须幂等。
+
+        背景：main.py 的 lifespan 现在会在 asyncio.create_task(start())
+        之前显式 await 调用一次 restore_persisted_state()（修复 startup
+        通知读到恢复前状态的 bug）；start() 内部又保留了同一方法的兜底
+        调用（应对 worker 脱离 main.py 编排被单独启动的场景）。如果这两次
+        调用都真正执行恢复动作，IPBanCircuitBreaker.restore_state() 会
+        无条件触发 "restored" 状态变更事件（不像 reset_to_normal 那样有
+        old_level 守卫），导致 ip_ban_history 表里多出一条重复记录。
+
+        这里直接模拟两次调用（对应"main.py 显式调用" + "start() 内部兜底
+        调用"），断言恢复后的熔断级别正确、且 ip_ban_history 里
+        event_type='restored' 的记录只有一条。
+        """
+        await test_db.save_ip_ban_state(
+            current_level=IPBanLevel.FULLY_BANNED,
+            banned_at=datetime.now() - timedelta(minutes=5),
+            last_attempt_at=None,
+            failed_attempts=1,
+        )
+
+        worker = _make_worker(test_db, test_settings)
+
+        # 第一次调用：模拟 main.py 在 create_task(start()) 之前的显式调用。
+        await worker.restore_persisted_state()
+        # 第二次调用：模拟 start() 内部保留的兜底调用，理应是幂等 no-op。
+        await worker.restore_persisted_state()
+
+        assert worker.ip_ban_breaker.get_current_level() == IPBanLevel.FULLY_BANNED
+
+        cursor = await test_db.execute(
+            "SELECT COUNT(*) as cnt FROM ip_ban_history WHERE event_type = 'restored'"
+        )
+        row = await cursor.fetchone()
+        assert row is not None
+        assert row["cnt"] == 1, (
+            "restore_persisted_state() 重复调用不应重复写入 ip_ban_history "
+            "的 restored 记录（幂等保护失效）"
+        )
+
 
 # ==================== Settings 配置项测试 ====================
 

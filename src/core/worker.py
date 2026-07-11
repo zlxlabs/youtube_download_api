@@ -91,6 +91,13 @@ class DownloadWorker:
         self._running = False
         self._current_task: Optional[Task] = None
 
+        # 幂等保护：确保启动恢复动作（restore_persisted_state）只真正执行
+        # 一次。main.py 的 lifespan 会在 asyncio.create_task(self.start())
+        # 之前显式 await 调用一次，start() 内部又保留了兜底调用，两处调用
+        # 若都真正执行会导致 IPBanCircuitBreaker.restore_state() 重复触发
+        # "restored" 状态变更事件，在 ip_ban_history 表里写入重复记录。
+        self._ip_ban_state_restored: bool = False
+
         # IP 熔断器（被动探测型）
         # 等待参数来自 settings（IP_BAN_MIN_WAIT_BEFORE_RETRY / IP_BAN_MAX_RETRY_INTERVAL），
         # 与项目其余熔断器保持一致的"全部可配置"风格。
@@ -120,7 +127,19 @@ class DownloadWorker:
 
         # 启动时先尝试从数据库恢复上次的 IP 熔断状态，避免容器重启（如 D3
         # 自动部署触发的重启）后误判为 NORMAL 全速请求 YouTube 加重封禁。
-        await self._restore_ip_ban_state()
+        #
+        # 这里调用的是幂等的 restore_persisted_state()，而不是直接调用
+        # _restore_ip_ban_state()：正常生产路径下，main.py 的 lifespan 已经
+        # 在 asyncio.create_task(self.start()) 之前显式 await 过一次
+        # restore_persisted_state()（这是修复"startup 通知读到恢复前状态"
+        # 这个 bug 的关键——start() 是异步调度的，它与紧随其后的
+        # notify_startup() 之间如果没有任何真正让出事件循环的 await 点，
+        # start() 内部的恢复动作根本没机会先跑完）。这里保留调用只是作为
+        # 兜底：万一 worker 脱离 main.py 编排被单独启动（例如单测直接构造
+        # DownloadWorker 后调用 start()），仍然能自我恢复。幂等保护
+        # （self._ip_ban_state_restored）确保两处调用不会导致
+        # ip_ban_history 表重复写入 "restored" 记录。
+        await self.restore_persisted_state()
 
         logger.info("Download worker started")
 
@@ -228,6 +247,40 @@ class DownloadWorker:
             logger.error(
                 f"Failed to persist IP ban state change (event={context.event_type}): {e}"
             )
+
+    async def restore_persisted_state(self) -> None:
+        """
+        对外暴露的启动恢复入口（幂等）。
+
+        背景：_restore_ip_ban_state() 原来只在 start() 内部触发。start()
+        是通过 asyncio.create_task() 异步调度的，如果调用方（main.py 的
+        lifespan）在 create_task 之后、读取熔断器状态（如发送 startup 通知）
+        之前没有任何真正让出事件循环的 await 点，start() 内部的恢复动作
+        根本没机会先跑完——导致读到的永远是 IPBanCircuitBreaker.__init__
+        的初始值 NORMAL，而不是持久化恢复后的真实状态。这是一个确定性
+        bug，不是偶发竞态。
+
+        修复方式：把恢复逻辑拆成这个公开、幂等的方法，由 main.py 在
+        asyncio.create_task(download_worker.start()) 之前显式 await 调用，
+        确保恢复动作严格发生在 worker 后台循环启动、以及后续读取熔断器
+        状态之前，不再依赖脆弱的事件循环调度细节。
+
+        幂等保护：用 self._ip_ban_state_restored 标志位确保恢复动作只
+        真正执行一次。IPBanCircuitBreaker.restore_state() 无条件触发
+        "restored" 状态变更事件（不像 reset_to_normal 那样有 old_level
+        守卫），重复调用会在 ip_ban_history 表里写入重复的 restored 记录；
+        start() 内部仍保留对本方法的兜底调用（应对 worker 脱离 main.py
+        编排、被单独启动的场景），因此这里的幂等保护是必须的。
+        """
+        if self._ip_ban_state_restored:
+            logger.debug(
+                "IP ban state already restored on this worker instance, "
+                "skipping duplicate restore"
+            )
+            return
+
+        self._ip_ban_state_restored = True
+        await self._restore_ip_ban_state()
 
     async def _restore_ip_ban_state(self) -> None:
         """

@@ -189,6 +189,23 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     #     for _ in range(settings.download_concurrency)
     # ]
     # 注意：多 worker 需要共享同一个 task_queue，并考虑风控风险
+    # 在启动 worker 后台循环之前，先同步完成一次 IP 熔断状态恢复。
+    #
+    # 背景：download_worker.start() 是通过 asyncio.create_task() 异步调度
+    # 的；它与下面的 await notify_service.notify_startup(...) 之间没有任何
+    # 真正让出事件循环的 await 点（scheduler.start() 是同步调用，
+    # notify_startup 内部也全是同步操作）——如果恢复逻辑仍然只在 start()
+    # 内部触发，start() 的任务循环根本没机会先跑完恢复动作，
+    # notify_startup 读到的会是 IPBanCircuitBreaker.__init__ 的初始值
+    # NORMAL，而不是持久化恢复后的真实状态。这是确定性 bug，不是偶发竞态。
+    #
+    # 这里显式 await 调用幂等的 restore_persisted_state()，确保恢复动作
+    # 严格发生在 worker 循环启动、以及下面读取熔断器状态发送 startup 通知
+    # 之前；start() 内部保留的兜底调用因为幂等保护，不会重复触发
+    # ip_ban_history 表里的 "restored" 记录。
+    if download_worker:
+        await download_worker.restore_persisted_state()
+
     worker_task = asyncio.create_task(download_worker.start())
 
     # Setup scheduler for periodic tasks
