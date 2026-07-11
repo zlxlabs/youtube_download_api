@@ -355,5 +355,133 @@ class TestCachedResourceDoesNotMisleadAnalysis:
         db.append_ip_ban_history.assert_not_called()
 
 
+class TestFullyBannedNoNativeCaptionIsNotMisreadAsStillBanned:
+    """
+    P2（独立 gate 审查复现）：FULLY_BANNED 分支把"探测成功"等同于
+    `transcript_path is not None`，但视频本身没有原生字幕时，下载器会成功
+    返回 transcript_path=None / has_transcript=False（不抛异常，见
+    ytdlp_downloader.py 的 _download_simple/_download_with_partial_success），
+    audio_fallback 二次下载也成功、任务 completed——熔断分析却误判为"仍被
+    封禁"，走到 extend_full_ban()。无字幕视频在真实流量中很常见，每命中一次
+    就把 FULLY_BANNED 自续一小时，IP 早已恢复也走不出来。
+    """
+
+    @pytest.mark.asyncio
+    async def test_fully_banned_probe_hits_video_without_captions_downgrades_not_extends(
+        self, ban_settings: Settings
+    ) -> None:
+        """
+        FULLY_BANNED + 字幕探测任务命中"视频本身没有原生字幕" + audio_fallback
+        成功 -> 任务应正常 completed，且熔断器必须按既有的"字幕探测成功"语义
+        降级到 AUDIO_BANNED（event_type="downgraded"），而不是被误判成
+        "两者都失败"继续停留在 FULLY_BANNED（event_type="extended"）。
+        """
+        db = AsyncMock()
+        worker = _make_worker(db, ban_settings)
+
+        await worker.ip_ban_breaker.trigger_full_ban(reason="seed")
+        # 手动回拨触发时间，模拟已经等待超过 FULLY_BANNED 对 transcript_only
+        # 任务的最小等待窗口（_check_ip_ban_and_decide 里硬编码 3600s）。
+        worker.ip_ban_breaker.banned_at -= timedelta(hours=8)
+        db.save_ip_ban_state.reset_mock()
+        db.append_ip_ban_history.reset_mock()
+
+        task = _make_task(
+            "probe-no-caption", include_audio=False, include_transcript=True
+        )
+        worker.task_service.get_next_task = AsyncMock(return_value=task)
+        worker.db.get_task = AsyncMock(return_value=task)
+
+        # 第一次调用：仅字幕探测，视频没有原生字幕——成功返回但 transcript_path
+        # 为 None、has_transcript=False（不是异常路径）。
+        no_caption_result = DownloaderResult(
+            success=True,
+            downloader="ytdlp",
+            video_metadata=VideoMetadata(video_id=task.video_id, title="NoCaption"),
+            audio_path=None,
+            transcript_path=None,
+            has_transcript=False,
+        )
+        # 第二次调用：audio_fallback 二次下载音频成功。
+        audio_fallback_result = DownloaderResult(
+            success=True,
+            downloader="ytdlp",
+            video_metadata=VideoMetadata(video_id=task.video_id, title="NoCaption"),
+            audio_path=Path("/tmp/fake-audio-fallback.m4a"),
+            transcript_path=None,
+            has_transcript=False,
+        )
+        worker.downloader_manager.download_with_fallback = AsyncMock(
+            side_effect=[no_caption_result, audio_fallback_result]
+        )
+
+        worker._running = True
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            await worker._process_next_task()
+
+        # 任务必须正常 completed（不是失败重试路径）。
+        db.update_task_completed.assert_called_once()
+
+        assert worker.ip_ban_breaker.get_current_level() == IPBanLevel.AUDIO_BANNED, (
+            "无字幕视频的成功探测必须被识别为'请求本身成功'，按既有语义降级到 "
+            "AUDIO_BANNED；如果仍是 FULLY_BANNED，说明探测成功判定又被误判为失败"
+        )
+        db.save_ip_ban_state.assert_called_once()
+        assert (
+            db.save_ip_ban_state.call_args.kwargs["current_level"]
+            == IPBanLevel.AUDIO_BANNED
+        )
+        db.append_ip_ban_history.assert_called_once()
+        assert db.append_ip_ban_history.call_args.kwargs["event_type"] == "downgraded", (
+            "必须是'降级'而不是'延长'——修复前这里会是 extend_full_ban 产生的 "
+            "'extended' 事件，把 banned_at 错误地在 FULLY_BANNED 里自续一小时"
+        )
+        worker.notify_service.send_ip_recovery_notification.assert_called_once()
+
+
+class TestFullyBannedTranscriptRealFailureKeepsBanActive:
+    """回归测试：FULLY_BANNED 期间字幕探测真正失败（403 异常）的既有语义不受影响。"""
+
+    @pytest.mark.asyncio
+    async def test_fully_banned_transcript_probe_403_exception_keeps_full_ban(
+        self, ban_settings: Settings
+    ) -> None:
+        """
+        字幕探测走异常路径（下载器抛 403），走的是既有的 _trigger_ban_from_error
+        机制（不经过 _analyze_result_and_update_ban，因为下载器抛异常时
+        _execute_task 根本不会返回成功结果 dict）。验证熔断状态在真失败后
+        仍然保持 FULLY_BANNED，不会被本次修复误放行。
+        """
+        db = AsyncMock()
+        worker = _make_worker(db, ban_settings)
+
+        await worker.ip_ban_breaker.trigger_full_ban(reason="seed")
+        worker.ip_ban_breaker.banned_at -= timedelta(hours=8)
+        db.save_ip_ban_state.reset_mock()
+        db.append_ip_ban_history.reset_mock()
+
+        task = _make_task(
+            "probe-transcript-fail", include_audio=False, include_transcript=True
+        )
+        worker.task_service.get_next_task = AsyncMock(return_value=task)
+        worker.db.get_task = AsyncMock(return_value=task)
+        worker.downloader_manager.download_with_fallback = AsyncMock(
+            side_effect=DownloaderError(
+                message="HTTP 403 Forbidden",
+                error_code=ErrorCode.RATE_LIMITED,
+                downloader="ytdlp",
+                http_status_code=403,
+                operation="transcript",
+            )
+        )
+
+        worker._running = True
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            await worker._process_next_task()
+
+        assert worker.ip_ban_breaker.get_current_level() == IPBanLevel.FULLY_BANNED
+        worker.notify_service.send_ip_ban_notification.assert_called_once()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

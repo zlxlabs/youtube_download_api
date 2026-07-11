@@ -1474,6 +1474,13 @@ class DownloadWorker:
             # 不是探测，或本来就是正常状态，无需分析
             return
 
+        # 注意：audio_success 不存在和 transcript_success 对称的"成功但无资源"
+        # 场景，不需要同样的修正。字幕是可选内容（视频可以没有原生字幕），三个
+        # 下载器（ytdlp/tikhub/cdp）在字幕缺失时都会成功返回 has_transcript=
+        # False 而不抛异常；音频则是必选内容，各下载器要么真正拿到 audio_path，
+        # 要么直接抛 DownloaderError（例如 tikhub_downloader.py 找不到音频直链
+        # 时的 raise），没有"请求成功但没有音频资源"的中间态，因此
+        # audio_path is not None 已经是准确的探测成功判定，不需要改动。
         audio_success = result.audio_path is not None
         transcript_success = result.transcript_path is not None
 
@@ -1511,13 +1518,36 @@ class DownloadWorker:
             if not transcript_requested:
                 # 本次任务没有真正向下载器请求字幕（缓存复用或任务本不需要），
                 # 无法据此判断全局熔断是否恢复，跳过分析。
+                #
+                # 取舍说明（P2 修复顺带评估，2026-07-11）：如果这是一个纯音频
+                # 探测任务（transcript_requested=False），即使 audio_success 为
+                # True，这里也不会做任何降级——ip_ban_breaker 没有"FULLY_BANNED
+                # 期间音频探测成功"对应的干净降级路径（现有分级语义里，
+                # FULLY_BANNED 只能通过字幕探测成功降级到 AUDIO_BANNED，见
+                # downgrade_to_audio_ban；音频和字幕是两条独立探测的资源，音频
+                # 恢复不能反推字幕也已解封，硬造一个"音频探测成功直接降级"的
+                # 路径会破坏这套语义）。保守起见维持现状：不处理，等待字幕探测
+                # 覆盖这个视频。下面对 transcript_success 的判定修复后，字幕探测
+                # 的成功率已经修正回真实值，这条恢复通路不再被"无字幕视频"误判
+                # 堵死，因此没有为音频探测单独新增路径的必要。
                 logger.debug(
                     "Probe task did not actually request transcript this run "
                     "(cache reuse or not needed), skipping full-ban analysis"
                 )
                 return
 
-            if transcript_success:
+            # 探测"成功"不能只看 transcript_path 是否非空：视频本身没有原生
+            # 字幕时，下载器会成功返回 transcript_path=None、has_transcript=
+            # False（不抛异常，见 ytdlp_downloader.py 的
+            # _download_simple/_download_with_partial_success 以及
+            # tikhub_downloader.py 的同等分支）——这同样证明本次请求没有被
+            # 封禁，是和"真正拿到字幕"同等有效的恢复信号。如果仍然只按
+            # transcript_success 判定，无字幕视频（真实流量中很常见）每命中一次
+            # 就会被误判为"探测仍失败"，把 banned_at 重置延长一小时，导致 IP
+            # 早已恢复也走不出熔断（P2，独立 gate 审查复现）。
+            transcript_probe_succeeded = transcript_success or result.has_transcript is False
+
+            if transcript_probe_succeeded:
                 # 字幕恢复，降级到音频熔断
                 logger.info("📉 Transcript recovered, downgrading to audio ban")
                 await self.ip_ban_breaker.downgrade_to_audio_ban()
