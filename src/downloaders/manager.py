@@ -1091,10 +1091,22 @@ class DownloaderManager:
                 # 创建新记录
                 from src.db.models import VideoResource
 
+                # has_native_transcript 必须写 None（未知），不能写 False。
+                # 这里走的是 get_metadata() 缓存未命中路径（含 precheck 触发的元数据
+                # 探测），只抓取了标题/时长等基础元数据，根本没有检查过字幕可用性——
+                # 写 False 等于对"没测过"的事情断言"确认没有"，会让 task_service.py
+                # 里的音频兜底逻辑（has_native_transcript is False）在字幕其实存在的
+                # 视频上被误触发。真实的字幕探测结果只应由 worker 真正下载/尝试下载后
+                # 通过 update_video_resource(has_native_transcript=...) 写入。
+                #
+                # 已知限制：本修复只保证新写入路径语义正确；此前被本方法错误写成
+                # False 的历史存量记录无法回溯区分"precheck 误写"还是"worker 真实
+                # 探测出无字幕"，不做历史数据回填——这些视频下次被 worker 真实下载时
+                # 会被真实探测结果自然覆盖。
                 resource = VideoResource(
                     video_id=video_id,
                     video_info=video_info,
-                    has_native_transcript=False,  # 暂时未知
+                    has_native_transcript=None,
                 )
                 await self.db.create_video_resource(resource)
                 logger.debug(f"Saved metadata to database: {video_id}")

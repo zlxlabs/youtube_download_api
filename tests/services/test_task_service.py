@@ -628,3 +628,101 @@ class TestActiveTaskDedupCoverage:
         assert response.task_id is not None
         assert response.task_id != audio_only_task.id
         assert response.message != "Task already in progress"
+
+
+# ==================== has_native_transcript 语义回归：未知(None) vs 确认无字幕(False) ====================
+
+
+class TestTranscriptFallbackHasNativeTranscriptSemantics:
+    """
+    create_task 顶部的音频兜底判断只应在 video_resource.has_native_transcript
+    严格等于 False（== 已被 worker 真实探测确认无字幕）时触发；has_native_transcript
+    为 None（尚未探测）绝不能触发兜底，否则 precheck 元数据落库时误写的 False
+    （已修复的 P2 bug）一旦复现，会让原本只是"还没探测过"的视频被错误地当成
+    "确认无字幕"处理，把用户请求的字幕悄悄替换成音频。
+
+    使用禁用 precheck 的 TaskService，隔离前置检查逻辑，只验证这段读取判断本身。
+    """
+
+    @pytest_asyncio.fixture
+    async def service(
+        self, test_db: Database, test_settings: Settings, file_service: FileService
+    ) -> TaskService:
+        """禁用 precheck，避免前置检查逻辑干扰音频兜底判断本身的验证。"""
+        test_settings.precheck_enabled = False
+        return TaskService(test_db, test_settings, file_service)
+
+    async def _create_cached_audio(
+        self, test_db: Database, test_settings: Settings, video_id: str
+    ) -> None:
+        """在给定 video_id 下预置一份文件级缓存的音频（供音频兜底逻辑复用）。"""
+        from src.db.models import FileRecord, FileType
+
+        audio_dir = test_settings.audio_dir
+        audio_dir.mkdir(parents=True, exist_ok=True)
+        audio_path = audio_dir / f"{video_id}-audio.m4a"
+        audio_path.write_text("mock audio")
+        audio_record = FileRecord(
+            id=f"cached-audio-{video_id}",
+            video_id=video_id,
+            file_type=FileType.AUDIO,
+            filename=audio_path.name,
+            filepath=str(audio_path.relative_to(test_settings.data_dir)),
+            size=100,
+            format="m4a",
+            created_at=datetime.now(timezone.utc),
+            last_accessed_at=datetime.now(timezone.utc),
+            expires_at=datetime.now(timezone.utc),
+        )
+        await test_db.create_file(audio_record)
+
+    @pytest.mark.asyncio
+    async def test_unknown_transcript_status_does_not_trigger_audio_fallback(
+        self, test_db: Database, test_settings: Settings, service: TaskService
+    ) -> None:
+        """
+        测试 C：has_native_transcript=None（未探测）+ 音频已缓存 + 请求字幕
+        -> 不应触发音频兜底，应正常创建下载任务，等待 worker 真实探测字幕。
+        """
+        video_id = "transcriptc01"
+        # get_or_create_video_resource 默认创建 has_native_transcript=None 的记录
+        await test_db.get_or_create_video_resource(video_id)
+        await self._create_cached_audio(test_db, test_settings, video_id)
+
+        request = CreateTaskRequest(
+            video_url=_video_url(video_id),
+            include_audio=False,
+            include_transcript=True,
+        )
+        response = await service.create_task(request)
+
+        # 不是缓存兜底响应，而是正常创建了一个待处理的下载任务
+        assert response.cache_hit is False
+        assert response.task_id is not None
+        assert response.status == TaskStatus.PENDING
+
+    @pytest.mark.asyncio
+    async def test_confirmed_no_transcript_triggers_audio_fallback(
+        self, test_db: Database, test_settings: Settings, service: TaskService
+    ) -> None:
+        """
+        测试 D（回归，锁定既有行为不被破坏）：has_native_transcript=False
+        （worker 真实探测确认无字幕）+ 音频已缓存 + 请求字幕
+        -> 应触发音频兜底，直接返回缓存的音频，不创建新任务。
+        """
+        video_id = "transcriptd01"
+        await test_db.get_or_create_video_resource(video_id)
+        await test_db.update_video_resource(video_id, has_native_transcript=False)
+        await self._create_cached_audio(test_db, test_settings, video_id)
+
+        request = CreateTaskRequest(
+            video_url=_video_url(video_id),
+            include_audio=False,
+            include_transcript=True,
+        )
+        response = await service.create_task(request)
+
+        assert response.cache_hit is True
+        assert response.task_id is None
+        assert response.result is not None
+        assert response.result.audio_fallback is True
