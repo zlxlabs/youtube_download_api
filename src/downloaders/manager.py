@@ -873,10 +873,13 @@ class DownloaderManager:
             force_refresh: 强制刷新（跳过数据库缓存）
             raise_content_errors: 为 True 时，若降级链中某个下载器抛出内容级终态错误
                 （见模块级 CONTENT_LEVEL_ERROR_CODES：VIDEO_UNAVAILABLE/VIDEO_PRIVATE/
-                VIDEO_REGION_BLOCKED/VIDEO_LIVE_STREAM/VIDEO_AGE_RESTRICTED），立即将
-                该 DownloaderError 向上抛出，不再尝试链上其余下载器。默认为 False，
-                行为与此前完全一致（吞掉所有下载器异常，全部失败时返回 None），
-                因此除显式传参的调用点外，其余调用点零影响。
+                VIDEO_LIVE_STREAM/VIDEO_AGE_RESTRICTED），立即将该 DownloaderError
+                向上抛出，不再尝试链上其余下载器。注意 VIDEO_REGION_BLOCKED 不在此列
+                （地区限制是下载器/出口位置相关的错误，不是视频客观状态，不应终止
+                降级链，详见 CONTENT_LEVEL_ERROR_CODES 的注释），遇到时按普通失败处理，
+                照常尝试链上下一个下载器。默认为 False，行为与此前完全一致（吞掉所有
+                下载器异常，全部失败时返回 None），因此除显式传参的调用点外，其余
+                调用点零影响。
 
         Returns:
             视频元数据字典，失败返回 None（force_refresh 命中数据库缓存的路径不受

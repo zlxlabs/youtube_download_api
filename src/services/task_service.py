@@ -44,11 +44,15 @@ from src.utils.logger import logger
 
 # 前置检查中，元数据获取抛出 DownloaderError 时，哪些错误码代表视频已明确不可下载，
 # 应该拒绝创建任务。不在此集合内的错误码（如网络错误、限流等）一律 fail-open。
+#
+# VIDEO_REGION_BLOCKED 不在此列：地区限制是下载器/出口位置相关的错误（本地部署
+# 探测到的地区限制不代表其他下载器/远端服务也下载不了），不是视频的客观终态，
+# 详见 src.downloaders.models.CONTENT_LEVEL_ERROR_CODES 的注释。与该集合保持
+# 语义一致，避免同一个错误码在两处出现不同判定。
 _PRECHECK_REJECT_ERROR_CODES = frozenset(
     {
         ErrorCode.VIDEO_UNAVAILABLE,
         ErrorCode.VIDEO_PRIVATE,
-        ErrorCode.VIDEO_REGION_BLOCKED,
         ErrorCode.VIDEO_LIVE_STREAM,
     }
 )
@@ -59,7 +63,9 @@ class VideoNotDownloadableError(Exception):
     视频不可下载错误。
 
     在 create_task 的前置检查阶段，一旦通过元数据探测明确判定视频不可下载
-    （直播中/预约首播/已被删除/私享/地区限制等）时抛出。
+    （直播中/预约首播/已被删除/私享等，见 _PRECHECK_REJECT_ERROR_CODES）时抛出。
+    地区限制（VIDEO_REGION_BLOCKED）不在此列——它是下载器/出口位置相关的错误，
+    不是视频客观状态，不会触发本异常，详见 _PRECHECK_REJECT_ERROR_CODES 的注释。
     API 层捕获后返回 HTTP 422，避免下游客户端异步等待到下载阶段才收到失败反馈。
     """
 
@@ -308,8 +314,10 @@ class TaskService:
 
         复用 DownloaderManager.get_metadata()（先查 DB 永久缓存，未命中再按
         METADATA_PRIORITY 降级调用下载器）快速判断视频是否为直播/预约首播/
-        已被删除/私享/地区限制，从而在任务创建前就能给下游明确的失败反馈，
-        而不必等到异步下载流程跑到元数据阶段才暴露。
+        已被删除/私享，从而在任务创建前就能给下游明确的失败反馈，而不必等到
+        异步下载流程跑到元数据阶段才暴露。地区限制不在拦截范围内（详见
+        _PRECHECK_REJECT_ERROR_CODES 的注释），fail-open 交给 worker 的完整
+        下载降级链判定。
 
         缓存陈旧问题：get_metadata() 命中的 DB 缓存永久有效，若曾经探测到
         live/upcoming 并落库，直播结束变成可下载录像之后，缓存不会自动刷新——

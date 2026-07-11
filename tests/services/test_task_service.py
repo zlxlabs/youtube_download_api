@@ -136,21 +136,6 @@ class TestPrecheckRejectsUndownloadable:
         assert exc_info.value.error_code == ErrorCode.VIDEO_PRIVATE
 
     @pytest.mark.asyncio
-    async def test_downloader_error_region_blocked_rejected(
-        self, task_service: TaskService, mock_downloader_manager: MagicMock
-    ) -> None:
-        """地区限制视频应被拒绝，error_code=VIDEO_REGION_BLOCKED。"""
-        mock_downloader_manager.get_metadata.side_effect = DownloaderError(
-            message="Blocked in your region", error_code=ErrorCode.VIDEO_REGION_BLOCKED
-        )
-        request = CreateTaskRequest(video_url=TEST_VIDEO_URL)
-
-        with pytest.raises(VideoNotDownloadableError) as exc_info:
-            await task_service.create_task(request)
-
-        assert exc_info.value.error_code == ErrorCode.VIDEO_REGION_BLOCKED
-
-    @pytest.mark.asyncio
     async def test_precheck_requests_content_errors_to_be_raised(
         self, task_service: TaskService, mock_downloader_manager: MagicMock
     ) -> None:
@@ -454,6 +439,26 @@ class TestPrecheckFailOpen:
     ) -> None:
         """所有下载器都拿不到元数据（返回 None）应 fail-open，任务正常创建。"""
         mock_downloader_manager.get_metadata.return_value = None
+        request = CreateTaskRequest(video_url=TEST_VIDEO_URL)
+
+        response = await task_service.create_task(request)
+
+        assert response.task_id is not None
+        assert response.status == TaskStatus.PENDING
+
+    @pytest.mark.asyncio
+    async def test_downloader_error_region_blocked_fails_open(
+        self, task_service: TaskService, mock_downloader_manager: MagicMock
+    ) -> None:
+        """
+        外部 review 第13轮问题2(P2)：VIDEO_REGION_BLOCKED 不再是拒绝创建任务的
+        终态错误码——地区限制是下载器/出口位置相关的错误（本地探测到地区限制，
+        不代表其他下载器/远端服务也下载不了同一视频），应 fail-open，正常建任务，
+        把最终能否下载交给 worker 的完整下载降级链判定。
+        """
+        mock_downloader_manager.get_metadata.side_effect = DownloaderError(
+            message="Blocked in your region", error_code=ErrorCode.VIDEO_REGION_BLOCKED
+        )
         request = CreateTaskRequest(video_url=TEST_VIDEO_URL)
 
         response = await task_service.create_task(request)

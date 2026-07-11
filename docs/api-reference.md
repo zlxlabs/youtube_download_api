@@ -225,7 +225,7 @@ curl -X POST http://localhost:8000/api/v1/tasks \
 }
 ```
 
-拦截信息位于 `detail` 字段内（FastAPI 标准错误包装），包含 `error_code` / `message` / `video_id` 三个字段。可能返回的 `error_code`：`VIDEO_UNAVAILABLE` / `VIDEO_PRIVATE` / `VIDEO_REGION_BLOCKED` / `VIDEO_LIVE_STREAM`（直播中或预约首播）。
+拦截信息位于 `detail` 字段内（FastAPI 标准错误包装），包含 `error_code` / `message` / `video_id` 三个字段。可能返回的 `error_code`：`VIDEO_UNAVAILABLE` / `VIDEO_PRIVATE` / `VIDEO_LIVE_STREAM`（直播中或预约首播）。注意：`VIDEO_REGION_BLOCKED`（地区限制）不会触发本前置拦截——地区限制是下载器/出口位置相关的错误而非视频客观状态，本地探测到地区限制不代表其他下载器也下载不了，因此交给完整的下载降级链自行判定，不在此处 fail-closed。
 
 注意：同一个 422 状态码还会在请求体本身未通过校验时返回（如 `video_url` 缺失、`include_audio` 与 `include_transcript` 同时为 `false`）。这种情况下 `detail` 是数组而非对象，形如 `{"detail": [{"loc": [...], "msg": "...", "type": "..."}]}`（FastAPI 标准校验错误结构）。调用方需要区分这两种 `detail` 形态。
 

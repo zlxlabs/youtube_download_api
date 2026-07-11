@@ -45,14 +45,21 @@ def _mock_downloader(name: str, error_code: ErrorCode, message: str) -> MagicMoc
 class TestContentLevelErrorCodesAlignment:
     """CONTENT_LEVEL_ERROR_CODES 应与 models.py 的 ErrorCode 枚举实际对齐。"""
 
-    def test_contains_exactly_five_content_level_codes(self) -> None:
+    def test_contains_exactly_four_content_level_codes(self) -> None:
         assert CONTENT_LEVEL_ERROR_CODES == {
             ErrorCode.VIDEO_UNAVAILABLE,
             ErrorCode.VIDEO_PRIVATE,
-            ErrorCode.VIDEO_REGION_BLOCKED,
             ErrorCode.VIDEO_LIVE_STREAM,
             ErrorCode.VIDEO_AGE_RESTRICTED,
         }
+
+    def test_region_blocked_excluded(self) -> None:
+        """
+        外部 review 第13轮问题2(P2)：VIDEO_REGION_BLOCKED 是下载器/出口位置相关的
+        错误（本地部署被地区封锁不代表远端下载器如 TikHub 也下载不了同一视频），
+        不是视频客观状态，因此不属于全局终态错误，不应终止元数据降级链。
+        """
+        assert ErrorCode.VIDEO_REGION_BLOCKED not in CONTENT_LEVEL_ERROR_CODES
 
 
 class TestGetMetadataRaiseContentErrors:
@@ -123,6 +130,35 @@ class TestGetMetadataRaiseContentErrors:
         succeeding.name = "tikhub"
         succeeding.fetch_metadata = AsyncMock(return_value={"title": "fallback success"})
         manager.downloaders = [failing, succeeding]
+
+        result = await manager.get_metadata(
+            "https://www.youtube.com/watch?v=test",
+            "test",
+            priority="ytdlp,tikhub",
+            raise_content_errors=True,
+        )
+
+        assert result == {"title": "fallback success"}
+
+    @pytest.mark.asyncio
+    async def test_region_blocked_swallowed_even_with_flag_falls_back_to_next_downloader(
+        self,
+    ) -> None:
+        """
+        外部 review 第13轮问题2(P2) 回归：VIDEO_REGION_BLOCKED 不再是内容级终态
+        错误，即使 raise_content_errors=True 也不应上抛，应像普通失败一样被吞掉、
+        照常降级到链上下一个下载器（地区限制是出口位置相关的错误，本地探测到
+        不代表其他下载器/远端服务也下载不了）。
+        """
+        mock_settings = MagicMock(spec=Settings)
+        manager = _make_manager(mock_settings)
+        blocked = _mock_downloader(
+            "ytdlp", ErrorCode.VIDEO_REGION_BLOCKED, "blocked in your region"
+        )
+        succeeding = MagicMock()
+        succeeding.name = "tikhub"
+        succeeding.fetch_metadata = AsyncMock(return_value={"title": "fallback success"})
+        manager.downloaders = [blocked, succeeding]
 
         result = await manager.get_metadata(
             "https://www.youtube.com/watch?v=test",

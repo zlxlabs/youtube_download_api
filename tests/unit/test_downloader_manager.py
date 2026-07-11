@@ -344,6 +344,44 @@ class TestGetMetadataLiveStatusProbe:
 
         assert exc_info.value.error_code == ErrorCode.VIDEO_PRIVATE
 
+    @pytest.mark.asyncio
+    async def test_probe_region_blocked_not_raised_keeps_primary_result(
+        self, manager: DownloaderManager
+    ) -> None:
+        """
+        外部 review 第13轮问题2(P2)：VIDEO_REGION_BLOCKED 是下载器/出口位置相关的
+        错误，不是视频客观状态——本地部署的 ytdlp 被地区封锁，不代表 TikHub（远端
+        服务）也下载不了同一视频。补全探测阶段若后续下载器（ytdlp）抛出
+        VIDEO_REGION_BLOCKED，即使 raise_content_errors=True 也不应上抛丢弃前面
+        已经成功的 TikHub 结果，而应像普通失败一样吞掉，返回 TikHub 的主体结果
+        （live 状态维持未知，语义与探测前一致）。
+        """
+        tikhub = _make_downloader(
+            "tikhub", AsyncMock(return_value=dict(TIKHUB_META_UNKNOWN_LIVE))
+        )
+        ytdlp = _make_downloader(
+            "ytdlp",
+            AsyncMock(
+                side_effect=DownloaderError(
+                    message="Blocked in your region",
+                    error_code=ErrorCode.VIDEO_REGION_BLOCKED,
+                    downloader="ytdlp",
+                )
+            ),
+        )
+        manager.downloaders = [tikhub, ytdlp]
+
+        result = await manager.get_metadata(
+            "https://www.youtube.com/watch?v=stu",
+            "stu",
+            priority="tikhub,ytdlp",
+            raise_content_errors=True,
+        )
+
+        assert result is not None
+        assert result["title"] == "TikHub Title"
+        assert result["live_broadcast_content"] is None
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
