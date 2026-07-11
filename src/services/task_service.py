@@ -27,15 +27,46 @@ from src.config import Settings
 from src.db.database import Database
 from src.db.models import (
     CallbackStatus,
+    ErrorCode,
     FileType,
     Task,
     TaskStatus,
     TaskPriority,
     calculate_queue_priority,
 )
+from src.downloaders.exceptions import DownloaderError
+from src.downloaders.manager import DownloaderManager
 from src.services.file_service import FileService
 from src.utils.helpers import extract_video_id
 from src.utils.logger import logger
+
+
+# 前置检查中，元数据获取抛出 DownloaderError 时，哪些错误码代表视频已明确不可下载，
+# 应该拒绝创建任务。不在此集合内的错误码（如网络错误、限流等）一律 fail-open。
+_PRECHECK_REJECT_ERROR_CODES = frozenset(
+    {
+        ErrorCode.VIDEO_UNAVAILABLE,
+        ErrorCode.VIDEO_PRIVATE,
+        ErrorCode.VIDEO_REGION_BLOCKED,
+        ErrorCode.VIDEO_LIVE_STREAM,
+    }
+)
+
+
+class VideoNotDownloadableError(Exception):
+    """
+    视频不可下载错误。
+
+    在 create_task 的前置检查阶段，一旦通过元数据探测明确判定视频不可下载
+    （直播中/预约首播/已被删除/私享/地区限制等）时抛出。
+    API 层捕获后返回 HTTP 422，避免下游客户端异步等待到下载阶段才收到失败反馈。
+    """
+
+    def __init__(self, video_id: str, error_code: ErrorCode, message: str):
+        self.video_id = video_id
+        self.error_code = error_code
+        self.message = message
+        super().__init__(message)
 
 
 class TaskService:
@@ -46,7 +77,13 @@ class TaskService:
     before creating download tasks. Files are shared across tasks for the same video.
     """
 
-    def __init__(self, db: Database, settings: Settings, file_service: FileService):
+    def __init__(
+        self,
+        db: Database,
+        settings: Settings,
+        file_service: FileService,
+        downloader_manager: Optional[DownloaderManager] = None,
+    ):
         """
         Initialize task service.
 
@@ -54,10 +91,15 @@ class TaskService:
             db: Database instance.
             settings: Application settings.
             file_service: File service for resource management.
+            downloader_manager: Optional downloader manager, used for the
+                pre-creation availability check (precheck). When None (default)
+                or when ``settings.precheck_enabled`` is False, precheck is
+                fully skipped so existing callers/tests are unaffected.
         """
         self.db = db
         self.settings = settings
         self.file_service = file_service
+        self.downloader_manager = downloader_manager
         # Task queue for worker to consume
         # 使用优先级队列：(priority, task_id)
         # priority=0: 新任务（高优先级）
@@ -139,10 +181,29 @@ class TaskService:
         # Check for active (pending/downloading) task for same video
         active_task = await self.db.get_active_task_by_video(video_id)
         if active_task:
-            logger.info(f"Found active task for video {video_id}: {active_task.id}")
-            response = await self._build_task_response(active_task)
-            response.message = "Task already in progress"
-            return response
+            # 需求覆盖校验：只有当活跃任务已经涵盖本次请求需要的全部资源时才复用。
+            # 例：活跃任务只请求了音频（include_transcript=False），
+            # 而新请求需要字幕，直接复用会返回一个永远不会产出字幕的任务 ID。
+            # 覆盖不足时不复用，照常走后续流程创建新任务（文件级缓存会让重复部分开销很小）。
+            covers_audio = (not request.include_audio) or active_task.include_audio
+            covers_transcript = (not request.include_transcript) or active_task.include_transcript
+            if covers_audio and covers_transcript:
+                logger.info(f"Found active task for video {video_id}: {active_task.id}")
+                response = await self._build_task_response(active_task)
+                response.message = "Task already in progress"
+                return response
+
+            logger.info(
+                f"Active task {active_task.id} for video {video_id} does not cover requested "
+                f"resources (requested audio={request.include_audio}/transcript={request.include_transcript}, "
+                f"active task audio={active_task.include_audio}/transcript={active_task.include_transcript}); "
+                f"creating a new task instead of reusing it"
+            )
+
+        # 前置检查：在真正创建任务前，拦截已知不可下载的视频（直播/预约首播/不可用等）。
+        # 位置刻意放在文件缓存命中检查、活跃任务去重之后——缓存命中和复用路径不应因此增加延迟。
+        # 检查本身严格 fail-open：只有明确判定不可下载时才拒绝，其余一律放行。
+        await self._precheck_video_downloadable(video_id, request)
 
         # Ensure video resource exists
         await self.db.get_or_create_video_resource(video_id)
@@ -189,6 +250,89 @@ class TaskService:
         # Build response
         response = await self._build_task_response(task)
         return response
+
+    async def _precheck_video_downloadable(
+        self, video_id: str, request: CreateTaskRequest
+    ) -> None:
+        """
+        创建任务前的前置校验：探测视频是否已知不可下载。
+
+        复用 DownloaderManager.get_metadata()（先查 DB 永久缓存，未命中再按
+        METADATA_PRIORITY 降级调用下载器）快速判断视频是否为直播/预约首播/
+        已被删除/私享/地区限制，从而在任务创建前就能给下游明确的失败反馈，
+        而不必等到异步下载流程跑到元数据阶段才暴露。
+
+        Fail-open 设计：只有明确判定为不可下载时才拒绝；探测超时、下载器全部
+        失败、或任何意外异常都视为“探测本身不可用”，直接放行，绝不能因为前置
+        检查故障而降低服务可用性。
+
+        Args:
+            video_id: YouTube 视频 ID。
+            request: 原始建任务请求（用于取 video_url）。
+
+        Raises:
+            VideoNotDownloadableError: 视频被明确判定为不可下载。
+        """
+        if self.downloader_manager is None or not self.settings.precheck_enabled:
+            return
+
+        try:
+            metadata = await asyncio.wait_for(
+                self.downloader_manager.get_metadata(
+                    video_url=request.video_url, video_id=video_id
+                ),
+                timeout=self.settings.precheck_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"Precheck timed out for video {video_id} after "
+                f"{self.settings.precheck_timeout}s, proceeding to create task (fail-open)"
+            )
+            return
+        except DownloaderError as e:
+            if e.error_code in _PRECHECK_REJECT_ERROR_CODES:
+                logger.warning(
+                    f"Precheck rejected video {video_id}: {e.error_code.value} - {e.message}"
+                )
+                raise VideoNotDownloadableError(
+                    video_id=video_id, error_code=e.error_code, message=e.message
+                ) from e
+            logger.warning(
+                f"Precheck metadata fetch raised non-blocking DownloaderError for video "
+                f"{video_id}: {e.error_code.value} - {e.message}, proceeding to create task "
+                f"(fail-open)"
+            )
+            return
+        except Exception as e:
+            # 包含 AllDownloadersFailed 之外的一切意外异常：网络错误、下载器内部 bug 等。
+            # 前置检查的可用性绝不能拖累任务创建，一律 fail-open。
+            logger.warning(
+                f"Precheck metadata fetch failed unexpectedly for video {video_id}: "
+                f"{type(e).__name__}: {e}, proceeding to create task (fail-open)"
+            )
+            return
+
+        if not metadata:
+            # 所有下载器都获取失败（get_metadata 内部已吞掉各下载器异常，返回 None）
+            logger.warning(
+                f"Precheck could not fetch metadata for video {video_id} "
+                f"(all downloaders failed), proceeding to create task (fail-open)"
+            )
+            return
+
+        live_status = metadata.get("live_broadcast_content")
+        if live_status in ("upcoming", "live"):
+            logger.warning(
+                f"Precheck rejected video {video_id}: live broadcast (status={live_status})"
+            )
+            raise VideoNotDownloadableError(
+                video_id=video_id,
+                error_code=ErrorCode.VIDEO_LIVE_STREAM,
+                message=(
+                    f"Video is a live broadcast (status: {live_status}), "
+                    "not available for download"
+                ),
+            )
 
     async def _build_cached_response(
         self,

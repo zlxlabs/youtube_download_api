@@ -95,6 +95,21 @@ class Settings(BaseSettings):
         default=300, ge=60, le=3600, description="Task-level timeout in seconds (safety net)"
     )
 
+    # ============ Task Precheck Configuration ============
+    # 创建任务前的前置校验：在真正创建下载任务前先做一次元数据探测，
+    # 提前拦截直播/预约首播/视频不可用等已知不可下载的场景，避免下游客户端
+    # 异步等待到下载阶段才收到失败反馈。
+    # 探测失败（超时/下载器全部失败/其他异常）一律 fail-open，绝不阻塞任务创建。
+    precheck_enabled: bool = Field(
+        default=True,
+        description="Enable pre-creation video availability check (live stream / unavailable detection)",
+    )
+    precheck_timeout: float = Field(
+        default=8.0,
+        gt=0,
+        description="Timeout in seconds for the pre-creation metadata check (fail-open on timeout)",
+    )
+
     # ============ Storage Configuration ============
     data_dir: Path = Field(default=Path("./data"), description="Data storage directory")
     file_retention_days: int = Field(
