@@ -271,6 +271,19 @@ class DownloadWorker:
         守卫），重复调用会在 ip_ban_history 表里写入重复的 restored 记录；
         start() 内部仍保留对本方法的兜底调用（应对 worker 脱离 main.py
         编排、被单独启动的场景），因此这里的幂等保护是必须的。
+
+        flag 置位时机（P2 修复，2026-07-11）：必须等 _restore_ip_ban_state()
+        确认数据库真正读取成功后才置位，不能在调用前就置位。原实现在调用前
+        无条件置位——如果 lifespan 首次调用时 load_ip_ban_state() 遇到瞬时
+        数据库错误，_restore_ip_ban_state() 内部 fail-open 捕获异常后直接
+        返回，但 flag 已经变成 True，导致 start() 内部的兜底恢复调用被幂等
+        保护挡成 no-op，进程整个生命周期停留在 NORMAL，恰好在存在持久化
+        熔断时失去保护。现在 _restore_ip_ban_state() 返回一个布尔值区分
+        "读取成功"（哪怕读到 None/NORMAL，即确认无需恢复）与"读取失败"，
+        只有前者才置位 flag，后者保留重试机会给下一次调用（通常是 start()
+        的兜底调用）。注意：main.py 是先 await 完 restore_persisted_state()
+        再 create_task(start())，两次调用之间不存在真正的并发重入，因此
+        这里用一个简单的布尔标志位即可，不需要引入锁。
         """
         if self._ip_ban_state_restored:
             logger.debug(
@@ -279,10 +292,16 @@ class DownloadWorker:
             )
             return
 
-        self._ip_ban_state_restored = True
-        await self._restore_ip_ban_state()
+        if await self._restore_ip_ban_state():
+            self._ip_ban_state_restored = True
+        else:
+            logger.warning(
+                "IP ban state restore failed due to a database read error; "
+                "idempotent flag left unset so a later call (e.g. start()'s "
+                "fallback) can retry"
+            )
 
-    async def _restore_ip_ban_state(self) -> None:
+    async def _restore_ip_ban_state(self) -> bool:
         """
         启动时从数据库恢复上次的 IP 熔断状态。
 
@@ -310,25 +329,36 @@ class DownloadWorker:
 
         数据库读取失败（如首次启动尚未建表的极端情况）fail-open：记录错误
         日志后放弃恢复，不阻塞 worker 启动。
+
+        Returns:
+            bool: 数据库是否被成功读取（即使读到 None 或 NORMAL、或数据不
+            一致而放弃恢复，只要 load_ip_ban_state() 本身没有抛异常，都算
+            成功，返回 True）。只有 load_ip_ban_state() 抛异常（读取失败）
+            才返回 False。调用方 restore_persisted_state() 依据这个返回值
+            决定是否置位幂等标志位——"确认无需恢复"和"读取失败留待重试"
+            必须严格区分，否则一次瞬时数据库错误就会让幂等保护误伤后续的
+            兜底恢复调用（P2 bug，见 restore_persisted_state 的 docstring）。
         """
         try:
             saved = await self.db.load_ip_ban_state()
         except Exception as e:
             logger.error(f"Failed to load persisted IP ban state, skip restore: {e}")
-            return
+            return False
 
         if saved is None or saved["current_level"] == IPBanLevel.NORMAL:
             logger.info("No active IP ban state to restore on startup")
-            return
+            return True
 
         banned_at = saved["banned_at"]
         if banned_at is None:
-            # 数据不一致：非 NORMAL 却缺少触发时间，无法计算探测窗口，保守起见不恢复
+            # 数据不一致：非 NORMAL 却缺少触发时间，无法计算探测窗口，保守起见
+            # 不恢复。但这属于"读取成功、数据本身有问题"，不是"读取失败"——
+            # 重试并不会让数据自愈，因此仍然算成功，让幂等 flag 正常置位。
             logger.warning(
                 f"Persisted IP ban state ({saved['current_level'].value}) has no "
                 f"banned_at timestamp, skip restore"
             )
-            return
+            return True
 
         # 无条件恢复：不判定是否过期（理由见上方 docstring）。
         await self.ip_ban_breaker.restore_state(
@@ -337,6 +367,7 @@ class DownloadWorker:
             last_attempt_at=saved["last_attempt_at"],
             failed_attempts=saved["failed_attempts"],
         )
+        return True
 
         # 探测窗口是否已到只影响日志措辞，不影响恢复决策本身。
         recovery_time = calculate_ban_recovery_time(

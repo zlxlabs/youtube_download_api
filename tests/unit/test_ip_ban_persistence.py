@@ -680,6 +680,91 @@ class TestWorkerIPBanStartupRestore:
             "的 restored 记录（幂等保护失效）"
         )
 
+    @pytest.mark.asyncio
+    async def test_restore_persisted_state_retries_after_transient_db_error(
+        self, test_db: Database, test_settings: Settings
+    ) -> None:
+        """
+        P2 回归测试：幂等 flag 只能在 load_ip_ban_state() 真正读取成功后置位。
+
+        背景：如果 flag 在调用 load_ip_ban_state() 之前（或不区分成功/失败）
+        就置位，一旦 lifespan 首次恢复时数据库发生瞬时错误，
+        _restore_ip_ban_state() 捕获异常后 fail-open 直接返回，但 flag
+        已经变成 True —— start() 内部的兜底恢复调用会被幂等保护挡掉，
+        变成 no-op，进程整个生命周期停留在 NORMAL，恰好在存在持久化熔断
+        时失去保护。
+
+        这里模拟：第一次 load 抛数据库异常，第二次 load 正常返回
+        FULLY_BANNED，断言第二次调用（对应 start() 的兜底调用）真正
+        执行了恢复。
+        """
+        # 预先写入一条 FULLY_BANNED 状态，供“第二次真正读取”时恢复。
+        await test_db.save_ip_ban_state(
+            current_level=IPBanLevel.FULLY_BANNED,
+            banned_at=datetime.now() - timedelta(minutes=5),
+            last_attempt_at=None,
+            failed_attempts=1,
+        )
+
+        worker = _make_worker(test_db, test_settings)
+
+        original_load = test_db.load_ip_ban_state
+        call_count = 0
+
+        async def flaky_load() -> Any:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("simulated transient db error")
+            return await original_load()
+
+        worker.db.load_ip_ban_state = flaky_load  # type: ignore[method-assign]
+
+        # 第一次调用：模拟 main.py 在 create_task(start()) 之前的显式调用，
+        # 数据库读取失败，fail-open：不应恢复，也不应置位幂等 flag。
+        await worker.restore_persisted_state()
+        assert worker.ip_ban_breaker.get_current_level() == IPBanLevel.NORMAL
+        assert worker._ip_ban_state_restored is False
+
+        # 第二次调用：模拟 start() 内部的兜底调用，此时数据库读取应该
+        # 成功并真正恢复出持久化的熔断状态（而不是被幂等保护挡成 no-op）。
+        await worker.restore_persisted_state()
+
+        assert worker.ip_ban_breaker.get_current_level() == IPBanLevel.FULLY_BANNED
+        assert worker._ip_ban_state_restored is True
+        assert call_count == 2, "第二次调用应该真正触发了一次新的数据库读取"
+
+    @pytest.mark.asyncio
+    async def test_restore_persisted_state_no_retry_after_successful_none_read(
+        self, test_db: Database, test_settings: Settings
+    ) -> None:
+        """
+        读到 None（数据库连状态行都没有）属于“确认无需恢复”的成功读取，
+        与“读取失败”必须区分：flag 应该照常置位，第二次调用不应该
+        再次查库（幂等保持）。
+        """
+        await test_db.execute("DELETE FROM ip_ban_status WHERE id = 1")
+        worker = _make_worker(test_db, test_settings)
+
+        original_load = test_db.load_ip_ban_state
+        call_count = 0
+
+        async def counting_load() -> Any:
+            nonlocal call_count
+            call_count += 1
+            return await original_load()
+
+        worker.db.load_ip_ban_state = counting_load  # type: ignore[method-assign]
+
+        await worker.restore_persisted_state()
+        assert call_count == 1
+        assert worker._ip_ban_state_restored is True
+        assert worker.ip_ban_breaker.get_current_level() == IPBanLevel.NORMAL
+
+        # 第二次调用应被幂等 flag 拦截，不应再次触发数据库读取。
+        await worker.restore_persisted_state()
+        assert call_count == 1
+
 
 # ==================== Settings 配置项测试 ====================
 
