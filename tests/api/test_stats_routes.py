@@ -173,3 +173,34 @@ class TestStatsOpenApiSchema:
         assert "503" in responses
         ref = responses["503"]["content"]["application/json"]["schema"]["$ref"]
         assert ref.rsplit("/", 1)[-1] == "ErrorResponse"
+
+    def test_openapi_422_schema_matches_actual_validation_error_shape(
+        self, client: TestClient
+    ) -> None:
+        """
+        外部 review 第15轮问题2(P2)：GET /api/v1/stats/downloads 的 422 只有一个
+        触发源——days 越界/非整数未通过 FastAPI/pydantic 校验，实际响应体是标准
+        RequestValidationError 结构 ``{"detail": [{loc, msg, type}, ...]}``（见
+        test_out_of_range_days_returns_422），detail 是数组而不是字符串。
+
+        这个端点没有像 POST /tasks 那样的业务 422（precheck 拒绝），所以不需要
+        像 VideoNotDownloadableErrorResponse 那样声明 Union/anyOf，直接复用
+        POST /tasks 同款校验错误变体模型 ValidationErrorResponse
+        （detail: list[ValidationErrorDetail]）即可——此前误声明成了 ErrorResponse
+        （detail: str），与实际响应体形态不符。
+        """
+        schema = client.app.openapi()  # type: ignore[union-attr]
+        responses = schema["paths"]["/api/v1/stats/downloads"]["get"]["responses"]
+
+        assert "422" in responses
+        ref = responses["422"]["content"]["application/json"]["schema"]["$ref"]
+        model_name = ref.rsplit("/", 1)[-1]
+
+        assert model_name == "ValidationErrorResponse"
+
+        model_schema = schema["components"]["schemas"][model_name]
+        detail_schema = model_schema["properties"]["detail"]
+        assert detail_schema["type"] == "array"
+
+        item_ref = detail_schema["items"]["$ref"]
+        assert item_ref.rsplit("/", 1)[-1] == "ValidationErrorDetail"

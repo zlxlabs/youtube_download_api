@@ -11,7 +11,7 @@ import aiosqlite
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from src.api.deps import ApiKeyDep
-from src.api.schemas import DownloadStatsResponse, ErrorResponse
+from src.api.schemas import DownloadStatsResponse, ErrorResponse, ValidationErrorResponse
 from src.db.database import Database, get_database
 from src.utils.logger import logger
 
@@ -29,7 +29,17 @@ DatabaseDep = Annotated[Database, Depends(get_database)]
     responses={
         401: {"model": ErrorResponse, "description": "Unauthorized"},
         403: {"model": ErrorResponse, "description": "Forbidden"},
-        422: {"model": ErrorResponse, "description": "Invalid days parameter"},
+        422: {
+            # 这个端点没有业务级 422（不像 POST /tasks 有 precheck 拒绝），
+            # 422 只有一个触发源：days 越界/非整数未通过 FastAPI/pydantic
+            # 校验，实际响应体是标准 RequestValidationError 结构
+            # ``{"detail": [{loc, msg, type}, ...]}``——detail 是数组而不是
+            # ErrorResponse 声明的字符串。这里直接复用 POST /tasks 同款的
+            # 校验错误变体模型，不需要像 VideoNotDownloadableErrorResponse
+            # 那样声明 Union/anyOf（外部 review 第 15 轮问题 2）。
+            "model": ValidationErrorResponse,
+            "description": "Invalid days parameter (out of range or not an integer)",
+        },
         503: {"model": ErrorResponse, "description": "Database error, please try again later"},
         500: {"model": ErrorResponse, "description": "Internal server error"},
     },
