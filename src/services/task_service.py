@@ -9,7 +9,7 @@ returns them without creating a new download task.
 import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 from uuid import uuid4
 
 from src.api.schemas import (
@@ -106,10 +106,40 @@ class TaskService:
         # priority=1: 重试任务（低优先级）
         self._task_queue: asyncio.PriorityQueue[tuple[int, str]] = asyncio.PriorityQueue()
 
+        # 按 video_id 的进程内互斥锁：串行化 create_task 里"文件缓存检查 ->
+        # 活跃任务检查 -> precheck -> 建任务"整段临界区，防止同一视频并发 POST 时
+        # 两个请求都通过活跃任务检查、各自 await precheck（最长 precheck_timeout）
+        # 后重复插入任务。锁字典有界（见 _get_video_lock），防止长期运行内存泄漏，
+        # 清理策略与 DownloaderManager._metadata_locks 保持一致。
+        self._video_locks: Dict[str, asyncio.Lock] = {}
+        self._VIDEO_LOCKS_MAX = 256
+
     @property
     def task_queue(self) -> asyncio.PriorityQueue[tuple[int, str]]:
         """Get the task queue."""
         return self._task_queue
+
+    def _get_video_lock(self, video_id: str) -> asyncio.Lock:
+        """
+        获取或创建 video 级请求锁，并保持锁字典有界。
+
+        超过阈值时丢弃未持有的锁，防止 dict 随 video_id 无界增长。极端情况下
+        （锁刚释放、等待者尚未唤醒时被清理）同一视频可能短暂并发进入临界区，
+        但这只是把 TOCTOU 窗口缩小而非引入新风险，不影响正确性上限。
+        """
+        if video_id not in self._video_locks:
+            if len(self._video_locks) >= self._VIDEO_LOCKS_MAX:
+                before = len(self._video_locks)
+                self._video_locks = {
+                    vid: lock
+                    for vid, lock in self._video_locks.items()
+                    if lock.locked()
+                }
+                logger.debug(
+                    f"Pruned video locks: {before} -> {len(self._video_locks)}"
+                )
+            self._video_locks[video_id] = asyncio.Lock()
+        return self._video_locks[video_id]
 
     async def create_task(self, request: CreateTaskRequest) -> TaskResponse:
         """
@@ -121,6 +151,10 @@ class TaskService:
         3. If some files missing -> create task to download missing files
         4. If active task exists for same video -> return existing task
 
+        并发安全：整个方法体（文件缓存检查/活跃任务检查/precheck/建任务）都在
+        video 级锁内执行（见 _get_video_lock），串行化同一视频的并发请求，
+        避免 TOCTOU 窗口内重复建任务。不同视频使用不同的锁实例，互不阻塞。
+
         Args:
             request: Task creation request.
 
@@ -131,6 +165,25 @@ class TaskService:
         if not video_id:
             raise ValueError("Invalid YouTube URL")
 
+        async with self._get_video_lock(video_id):
+            return await self._create_task_locked(video_id, request)
+
+    async def _create_task_locked(
+        self, video_id: str, request: CreateTaskRequest
+    ) -> TaskResponse:
+        """
+        create_task 的实际逻辑，调用方必须已持有该 video_id 的锁。
+
+        拆成独立方法只是为了让 create_task 的锁作用域一目了然；这里不重复
+        获取锁，也不做任何仅靠锁本身无法保证的额外校验。
+
+        Args:
+            video_id: 已从 request.video_url 解析出的视频 ID。
+            request: Task creation request.
+
+        Returns:
+            TaskResponse with task details or cached resources.
+        """
         # Check existing resources for this video
         existing_files = await self.file_service.get_all_files_for_video(video_id)
         existing_audio = existing_files.get("audio")

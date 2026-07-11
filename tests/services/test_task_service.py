@@ -846,3 +846,94 @@ class TestTranscriptFallbackHasNativeTranscriptSemantics:
         assert response.result is not None
         assert response.result.audio_fallback is True
 
+
+# ==================== 同视频并发建任务的 TOCTOU 窗口(Codex 第6轮问题2) ====================
+
+
+class TestConcurrentSameVideoRequestsDeduped:
+    """
+    create_task 里"活跃任务检查 -> 缓存检查 -> precheck -> 建任务"整段临界区
+    此前没有互斥保护：并发 POST 同一个未缓存视频时，两个请求都能通过活跃任务检查，
+    然后各自 await 元数据探测（最长 precheck_timeout），再各自插入任务，造成重复任务。
+
+    TaskService 现在按 video_id 维护一把进程内 asyncio.Lock，把整段临界区串行化。
+    """
+
+    @pytest.mark.asyncio
+    async def test_concurrent_same_video_creates_only_one_task(
+        self,
+        test_db: Database,
+        test_settings: Settings,
+        file_service: FileService,
+        mock_downloader_manager: MagicMock,
+    ) -> None:
+        """
+        并发两个同视频请求，precheck 用慢速 mock 拉开窗口：只应创建一条任务，
+        第二个请求应在活跃任务检查处复用第一个请求刚建的任务。
+        """
+        precheck_call_count = 0
+
+        async def _slow_metadata(**kwargs):
+            nonlocal precheck_call_count
+            precheck_call_count += 1
+            await asyncio.sleep(0.05)
+            return {"title": "Normal video", "live_broadcast_content": "none"}
+
+        mock_downloader_manager.get_metadata.side_effect = _slow_metadata
+
+        service = TaskService(
+            test_db, test_settings, file_service, downloader_manager=mock_downloader_manager
+        )
+        request = CreateTaskRequest(video_url=TEST_VIDEO_URL)
+
+        response_a, response_b = await asyncio.gather(
+            service.create_task(request), service.create_task(request)
+        )
+
+        active_tasks = await test_db.get_active_tasks_by_video(TEST_VIDEO_ID)
+        assert len(active_tasks) == 1
+
+        task_ids = {response_a.task_id, response_b.task_id}
+        assert len(task_ids) == 1
+        messages = {response_a.message, response_b.message}
+        assert "Task already in progress" in messages
+        # 加锁串行化后，第二个请求在活跃任务检查处就命中了第一个请求刚建的任务，
+        # 不会再走一次 precheck——get_metadata 全程只应被真正探测调用一次。
+        assert precheck_call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_different_videos_use_independent_locks(
+        self, test_db: Database, test_settings: Settings, file_service: FileService
+    ) -> None:
+        """
+        不同视频不应共享同一把锁、互相阻塞：验证锁按 video_id 隔离
+        （持有视频 A 的锁期间，视频 B 的锁应能立即被获取）。
+        """
+        test_settings.precheck_enabled = False
+        service = TaskService(test_db, test_settings, file_service)
+
+        lock_a = service._get_video_lock("videoaaaaaa")
+        lock_b = service._get_video_lock("videobbbbbb")
+        assert lock_a is not lock_b
+
+        async with lock_a:
+            acquired_b = await asyncio.wait_for(lock_b.acquire(), timeout=0.1)
+            assert acquired_b is True
+            lock_b.release()
+
+    @pytest.mark.asyncio
+    async def test_video_lock_dict_stays_bounded(
+        self, test_db: Database, test_settings: Settings, file_service: FileService
+    ) -> None:
+        """锁 dict 不应随请求数量无限增长：超过阈值后应清理已释放的锁。"""
+        test_settings.precheck_enabled = False
+        service = TaskService(test_db, test_settings, file_service)
+        service._VIDEO_LOCKS_MAX = 5
+
+        for i in range(20):
+            video_id = f"boundedlk{i:03d}"
+            request = CreateTaskRequest(video_url=_video_url(video_id))
+            response = await service.create_task(request)
+            assert response.task_id is not None
+
+        assert len(service._video_locks) <= service._VIDEO_LOCKS_MAX
