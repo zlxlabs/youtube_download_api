@@ -12,6 +12,7 @@ import asyncio
 import json
 import random
 import re
+import uuid
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
@@ -1558,6 +1559,30 @@ class AudioDownloader:
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
 
+    def _safe_unlink(self, path: Path, context: str) -> None:
+        """
+        尽力删除文件，失败时只记录警告，不向上抛出异常。
+
+        背景：分片下载的同步网络请求跑在线程池的系统线程里，asyncio 层面的
+        取消（见 _cancel_and_await_tasks）无法强制中断已经在系统线程里运行
+        的请求本身——残活线程可能在这里的清理逻辑执行 *之后* 才真正结束，
+        届时可能重新创建本方法试图删除的文件。每次下载尝试已经使用独立的
+        attempt token 路径（见 _download_with_curl_cffi_multipart），因此
+        这种残留写入至多产生一个不会被任何后续合并逻辑读取的孤儿文件，不
+        影响正确性；这里的删除只是尽力而为的磁盘空间回收，一次删除失败
+        （包括被残活线程抢先重建）不应中断主流程。
+
+        Args:
+            path: 待删除的文件路径
+            context: 用于日志的上下文描述（如 "multipart part file"）
+        """
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            logger.warning(f"[{self.downloader_name}] Failed to remove {context} {path}: {e}")
+
     async def _download_with_curl_cffi_multipart(
         self,
         url: str,
@@ -1616,9 +1641,17 @@ class AudioDownloader:
             f"impersonate={impersonate_target}"
         )
 
-        # 分片文件路径映射
+        # 本次下载尝试的唯一标识：调用方（如 403 阶段级 cookie 重试）可能
+        # 用完全相同的 target_path 立刻重新调用本函数。取消/gather 只能让
+        # asyncio 包装层退出，无法强制中断系统线程里的同步网络请求（见
+        # _cancel_and_await_tasks 注释）——残活线程仍可能在函数返回后重新
+        # 创建/覆写旧路径的分片文件。每次尝试都用独立 token 生成分片路径，
+        # 从路径层面彻底消除跨尝试的文件竞争，不依赖线程能否及时停止。
+        attempt_token = uuid.uuid4().hex[:8]
+
+        # 分片文件路径映射（带 attempt token，跨尝试互不冲突）
         part_files = {
-            idx: target_path.with_suffix(f"{target_path.suffix}.part{idx}")
+            idx: target_path.with_suffix(f"{target_path.suffix}.a{attempt_token}.part{idx}")
             for idx, _, _ in ranges
         }
 
@@ -1657,7 +1690,10 @@ class AudioDownloader:
                 chunk_headers = clean_headers.copy()
                 chunk_headers["Range"] = f"bytes={start}-{end}"
 
-                # 检查是否已下载（断点续传）
+                # 检查是否已下载（断点续传）。注意：part_file 路径带本次
+                # 调用独有的 attempt token，因此这里只可能命中"同一次调用内"
+                # 提前存在的分片文件，不会再误用其他调用（如 403 cookie
+                # 重试）遗留的分片文件——那些文件路径已经不同。
                 if part_file.exists():
                     existing_size = part_file.stat().st_size
                     if existing_size >= chunk_size:
@@ -1744,9 +1780,8 @@ class AudioDownloader:
                     except Exception as e:
                         last_error = e
 
-                    # 重试前清理可能的部分文件
-                    if part_file.exists():
-                        part_file.unlink()
+                    # 重试前清理可能的部分文件（尽力而为，失败仅记警告）
+                    self._safe_unlink(part_file, "multipart chunk retry part file")
 
                     # 指数退避延迟（1s, 2s, 4s）
                     if attempt < max_retries - 1:
@@ -1784,19 +1819,19 @@ class AudioDownloader:
             # 仍在后台运行的"僵尸任务"竞争同一批文件，损坏合并结果或让本可
             # 成功的重试失败。
             await self._cancel_and_await_tasks(tasks)
-            # 清理分片文件
+            # 清理本次尝试的分片文件（尽力而为：残活线程可能在清理之后才
+            # 重建文件，但那已经是不会被任何后续逻辑读取的孤儿文件，参见
+            # _safe_unlink 的说明）
             for pf in part_files.values():
-                if pf.exists():
-                    pf.unlink()
+                self._safe_unlink(pf, "multipart part file")
             raise
         except Exception as e:
             logger.error(f"[{self.downloader_name}] Multipart download failed: {e}")
             # 同样先取消并等待其余分片任务结束，避免遗留后台任务
             await self._cancel_and_await_tasks(tasks)
-            # 清理分片文件
+            # 清理本次尝试的分片文件（尽力而为）
             for pf in part_files.values():
-                if pf.exists():
-                    pf.unlink()
+                self._safe_unlink(pf, "multipart part file")
             return False
 
         # 合并分片
@@ -1811,8 +1846,9 @@ class AudioDownloader:
                     with part_file.open("rb") as infile:
                         outfile.write(infile.read())
 
-                    # 删除分片文件
-                    part_file.unlink()
+                    # 删除分片文件（内容已合并进 target_path，删除失败不
+                    # 影响合并结果，尽力而为即可）
+                    self._safe_unlink(part_file, "multipart part file")
 
             # 校验文件大小
             final_size = target_path.stat().st_size
@@ -1831,12 +1867,10 @@ class AudioDownloader:
 
         except Exception as e:
             logger.error(f"[{self.downloader_name}] Failed to merge chunks: {e}")
-            # 清理残留文件
-            if target_path.exists():
-                target_path.unlink()
+            # 清理残留文件（尽力而为）
+            self._safe_unlink(target_path, "multipart merged output file")
             for pf in part_files.values():
-                if pf.exists():
-                    pf.unlink()
+                self._safe_unlink(pf, "multipart part file")
             return False
 
     async def _download_with_curl_cffi(
