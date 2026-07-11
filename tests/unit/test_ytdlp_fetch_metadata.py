@@ -99,6 +99,45 @@ class TestGetVideoInfoErrorClassification:
         assert exc_info.value.error_code == ErrorCode.VIDEO_UNAVAILABLE
 
     @pytest.mark.asyncio
+    async def test_country_uploader_restriction_maps_to_region_blocked(
+        self, settings: Settings
+    ) -> None:
+        """
+        外部 review 第15轮问题1(P1)：yt-dlp 典型地区限制文案 "The uploader has
+        not made this video available in your country" 本身包含 "available"
+        字样，之前会先命中泛化的 "not available" 判断被误判为 VIDEO_UNAVAILABLE
+        （全局终态，precheck 直接 422 拒绝），与 REGION_BLOCKED 的 fail-open
+        语义矛盾——本地探测受限不代表 TikHub 等远端出口也下载不了同一视频。
+        """
+        from src.core.downloader import DownloadError, get_video_info
+
+        error = yt_dlp.utils.DownloadError(
+            "ERROR: [youtube] xxx: The uploader has not made this video "
+            "available in your country"
+        )
+        with _patch_extract_info(side_effect=error):
+            with pytest.raises(DownloadError) as exc_info:
+                await get_video_info(TEST_VIDEO_URL, settings)
+
+        assert exc_info.value.error_code == ErrorCode.VIDEO_REGION_BLOCKED
+
+    @pytest.mark.asyncio
+    async def test_country_not_available_variant_maps_to_region_blocked(
+        self, settings: Settings
+    ) -> None:
+        """同一地区限制场景的另一种常见 yt-dlp 文案变体，同样要分类为地区限制。"""
+        from src.core.downloader import DownloadError, get_video_info
+
+        error = yt_dlp.utils.DownloadError(
+            "ERROR: [youtube] xxx: This video is not available in your country"
+        )
+        with _patch_extract_info(side_effect=error):
+            with pytest.raises(DownloadError) as exc_info:
+                await get_video_info(TEST_VIDEO_URL, settings)
+
+        assert exc_info.value.error_code == ErrorCode.VIDEO_REGION_BLOCKED
+
+    @pytest.mark.asyncio
     async def test_network_error_keeps_network_error_code(self, settings: Settings) -> None:
         """非内容级错误（网络问题）应维持原有分类，不应被误判为内容级错误。"""
         from src.core.downloader import DownloadError, get_video_info

@@ -171,6 +171,30 @@ class TestPrecheckEndToEndWithRealDownloaderChain:
         assert exc_info.value.error_code == ErrorCode.VIDEO_PRIVATE
 
     @pytest.mark.asyncio
+    async def test_country_blocked_video_fails_open_via_real_downloader_chain(
+        self, real_task_service: TaskService
+    ) -> None:
+        """
+        外部 review 第15轮问题1(P1) 端到端回归：yt-dlp 返回典型地区限制文案时，
+        precheck 必须分类为 VIDEO_REGION_BLOCKED 并 fail-open 正常建任务，而不是
+        误判为 VIDEO_UNAVAILABLE（全局终态，在 _PRECHECK_REJECT_ERROR_CODES 内）
+        触发 422 拒绝——本地探测到地区限制不代表 TikHub 等远端出口也下载不了
+        同一视频。这条文案修复前会先命中泛化的 "not available" 分支被误判为
+        VIDEO_UNAVAILABLE，从而在这里错误地抛出 VideoNotDownloadableError；
+        用它而不是不落入任何分支的变体，才能让本用例在修复前真正是红的。
+        """
+        error = yt_dlp.utils.DownloadError(
+            "ERROR: [youtube] xxx: This video is not available in your country"
+        )
+        request = CreateTaskRequest(video_url=TEST_VIDEO_URL)
+
+        with _patch_extract_info(side_effect=error):
+            response = await real_task_service.create_task(request)
+
+        assert response is not None
+        assert response.task_id is not None
+
+    @pytest.mark.asyncio
     async def test_normal_video_not_rejected_via_real_downloader_chain(
         self, real_task_service: TaskService
     ) -> None:

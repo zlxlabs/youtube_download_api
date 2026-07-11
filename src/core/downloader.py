@@ -994,6 +994,20 @@ class YouTubeDownloader:
         if "private video" in error_msg:
             return ErrorCode.VIDEO_PRIVATE, "Video is private", None
 
+        # 地区限制判断必须在下面泛化的 "not available"/"video unavailable" 判断
+        # 之前。yt-dlp 真实的地区限制文案（如 "The uploader has not made this
+        # video available in your country"、"This video is not available in
+        # your country"）本身就带有 "available" 字样，如果先走泛化分支会被误判
+        # 成 VIDEO_UNAVAILABLE——这是全局终态错误码，precheck 会直接 422 拒绝，
+        # 但地区限制只是本地出口位置相关的错误，TikHub 等远端出口可能仍下得动，
+        # 与 VIDEO_REGION_BLOCKED 的 fail-open 语义直接矛盾（外部 review 第15轮
+        # 问题1）。这里用 "country" + ("blocked" 或 "available") 兼容新旧文案，
+        # 同时不会误伤真正的 "Video unavailable"（不含 "country"）。
+        if "country" in error_msg and (
+            "blocked" in error_msg or "available" in error_msg
+        ):
+            return ErrorCode.VIDEO_REGION_BLOCKED, "Video is blocked in this region", None
+
         if "video unavailable" in error_msg or "not available" in error_msg:
             return ErrorCode.VIDEO_UNAVAILABLE, "Video is unavailable", None
 
@@ -1003,9 +1017,6 @@ class YouTubeDownloader:
                 "Video is age-restricted, cookie required",
                 None,
             )
-
-        if "blocked" in error_msg and "country" in error_msg:
-            return ErrorCode.VIDEO_REGION_BLOCKED, "Video is blocked in this region", None
 
         if "is a livestream" in error_msg or "live event" in error_msg:
             return ErrorCode.VIDEO_LIVE_STREAM, "Live streams are not supported", None
