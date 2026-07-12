@@ -401,7 +401,8 @@ class CDPDownloader(BaseDownloader):
                     )
 
                 # 4. 快速获取数据（创建新 Page，获取 cookie + headers）
-                page, cookie_file, headers, video_duration = await self._behavior_simulator.quick_fetch_data(
+                # captured_cookies 用于 curl_cffi 403 阶段级重试（见 audio_downloader.download_audio）
+                page, cookie_file, headers, video_duration, captured_cookies = await self._behavior_simulator.quick_fetch_data(
                     context, video_url, video_id, task_id
                 )
 
@@ -446,6 +447,7 @@ class CDPDownloader(BaseDownloader):
                             task_id=task_id,
                             output_dir=output_dir,
                             headers=headers,
+                            cookies=captured_cookies,
                         )
                         logger.info(
                             f"[cdp] Audio downloaded: {audio_path.name} "

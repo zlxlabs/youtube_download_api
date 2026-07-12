@@ -128,6 +128,55 @@ class TestIPBanCircuitBreaker:
         expected = datetime.now() + timedelta(seconds=3600)
         assert abs((recovery_time - expected).total_seconds()) < 10
 
+    def test_get_estimated_recovery_time_with_min_wait_override(self):
+        """
+        min_wait_override 应该覆盖构造时传入的默认 MIN_WAIT_BEFORE_RETRY。
+
+        对应 worker.py 全局熔断（FULLY_BANNED）分支的用法：should_allow_attempt()
+        用 min_wait_override 判定是否放行，get_estimated_recovery_time()/
+        get_remaining_time() 必须支持同一个覆盖值，否则两者口径不一致。
+        """
+        breaker = IPBanCircuitBreaker(min_wait_before_retry=3600)
+
+        breaker.current_level = IPBanLevel.FULLY_BANNED
+        breaker.banned_at = datetime.now()
+
+        # 不传 override 时仍然使用构造时的默认值
+        default_recovery = breaker.get_estimated_recovery_time()
+        expected_default = datetime.now() + timedelta(seconds=3600)
+        assert default_recovery is not None
+        assert abs((default_recovery - expected_default).total_seconds()) < 10
+
+        # 传入 override（模拟音频任务用 2 倍等待时间）应该覆盖默认值
+        override_recovery = breaker.get_estimated_recovery_time(min_wait_override=7200)
+        expected_override = datetime.now() + timedelta(seconds=7200)
+        assert override_recovery is not None
+        assert abs((override_recovery - expected_override).total_seconds()) < 10
+
+    def test_get_remaining_time_with_min_wait_override_matches_should_allow_attempt(self):
+        """
+        get_remaining_time(min_wait_override=X) 的口径必须和
+        should_allow_attempt(task_type, min_wait_override=X) 一致：只要后者判定
+        不允许，前者算出的剩余时间就应该大于 0；不能出现 get_remaining_time()
+        因为用了默认 min_wait（而非 override）提前算出 0 或更短的剩余时间。
+        """
+        breaker = IPBanCircuitBreaker(min_wait_before_retry=600)  # 默认值远小于 override
+
+        breaker.current_level = IPBanLevel.FULLY_BANNED
+        breaker.banned_at = datetime.now() - timedelta(seconds=7100)
+
+        override_min_wait = 7200  # 模拟全局熔断下音频任务的 2 倍等待时间
+
+        allowed, _ = breaker.should_allow_attempt(
+            "audio", min_wait_override=override_min_wait
+        )
+        assert not allowed
+
+        remaining = breaker.get_remaining_time(min_wait_override=override_min_wait)
+        # 还差 100s 左右到 7200s 窗口，remaining 应该落在这个量级，而不是 0
+        # （用默认 min_wait=600 计算会得到 0，因为已经等了 7100s 远超 600s）
+        assert 0 < remaining <= 110
+
 
 class TestPartialSuccess:
     """测试部分成功功能"""

@@ -5,7 +5,7 @@ Provides type-safe validation for all API endpoints.
 """
 
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator
 
@@ -269,12 +269,59 @@ class ErrorResponse(BaseModel):
     error_code: Optional[str] = None
 
 
+class VideoNotDownloadableResponse(BaseModel):
+    """
+    Response body returned when a video is rejected by the pre-creation
+    availability check (precheck).
+
+    Returned with HTTP 422 when the video is known to be undownloadable
+    before any download task is created — e.g. it is currently live,
+    an upcoming premiere, unavailable, private, or region blocked.
+    """
+
+    error_code: ErrorCode = Field(
+        ..., description="Machine-readable error code, e.g. VIDEO_LIVE_STREAM"
+    )
+    message: str = Field(..., description="Human-readable explanation")
+    video_id: str = Field(..., description="YouTube video ID that was rejected")
+
+
 class ValidationErrorDetail(BaseModel):
-    """Validation error detail."""
+    """
+    FastAPI/pydantic 请求体（或查询参数）校验失败时，detail 数组里每一项的结构。
+
+    这是 FastAPI 的标准 RequestValidationError 契约，非本项目自定义。
+    """
 
     loc: list[Any]
     msg: str
     type: str
+
+
+class VideoNotDownloadableErrorResponse(BaseModel):
+    """
+    POST /tasks 422 响应体的实际契约（业务拒绝 与 FastAPI 校验错误的并集）。
+
+    同一个 422 状态码在这个端点上有两个互不相关的触发源，body 形态完全不同：
+    1. 前置检查（precheck）判定视频不可下载：实现里
+       ``raise HTTPException(422, detail={...})``，FastAPI 会把 detail 包一层，
+       实际响应体是 ``{"detail": {error_code, message, video_id}}``——即
+       VideoNotDownloadableResponse。
+    2. 请求体本身未通过 pydantic 校验（如 video_url 缺失、include_audio 与
+       include_transcript 同时为 False）：FastAPI 自动抛出
+       RequestValidationError，响应体是 ``{"detail": [{loc, msg, type}, ...]}``
+       ——即 ValidationErrorDetail 列表。这条路径不经过上面的业务异常分支，
+       运行时行为本身不受本模型影响。
+
+    detail 字段用 Union（渲染为 OpenAPI anyOf）同时声明两种形态，避免生成的
+    客户端代码只按其中一种反序列化、遇到另一种直接报错。仅用于 OpenAPI
+    responses 声明，不改变任何实际返回内容。
+    """
+
+    detail: Union[VideoNotDownloadableResponse, list[ValidationErrorDetail]] = Field(
+        ...,
+        description="业务拒绝详情对象（precheck 拦截），或 FastAPI 请求体校验失败的错误详情数组",
+    )
 
 
 class ValidationErrorResponse(BaseModel):
@@ -367,3 +414,52 @@ class VideoInfoDetailResponse(BaseModel):
         description="Metadata source: cached / youtube_data_api / ytdlp / tikhub"
     )
     fetched_at: datetime = Field(..., description="Metadata fetch/update timestamp")
+
+
+# ==================== Download Stats Schemas ====================
+
+
+class FailureSplitStats(BaseModel):
+    """失败归因拆分：内容级（视频本身问题）vs 系统级（下载器/网络/风控等）。"""
+
+    content_level: int = Field(..., description="内容级失败数（error_code 以 VIDEO_ 开头）")
+    system_level: int = Field(..., description="系统级失败数（其余 error_code）")
+    content_level_ratio: float = Field(..., description="内容级失败占比（0-1）")
+    system_level_ratio: float = Field(..., description="系统级失败占比（0-1）")
+
+
+class DownloaderDistribution(BaseModel):
+    """音频/字幕下载器归属分布，NULL 归为 'unknown'（未知/历史数据/复用缓存未下载）。"""
+
+    audio_downloader: dict[str, int] = Field(..., description="音频下载器名称 -> 任务数")
+    transcript_downloader: dict[str, int] = Field(..., description="字幕下载器名称 -> 任务数")
+
+
+class WeeklyTrendItem(BaseModel):
+    """单个自然周（%Y-%W，非严格 ISO 8601 周）的完成/失败趋势。"""
+
+    week: str = Field(
+        ...,
+        description=(
+            "周标识，如 '2026-W28'（公历年 + 周一起始的年内周序，"
+            "非严格 ISO 8601 周，年末/年初边界可能有 1 周误差）"
+        ),
+    )
+    completed: int = Field(..., description="该周完成任务数")
+    failed: int = Field(..., description="该周失败任务数")
+
+
+class DownloadStatsResponse(BaseModel):
+    """下载失败归因统计响应（GET /api/v1/stats/downloads）。"""
+
+    days: int = Field(..., description="统计时间窗口（天数）")
+    total: int = Field(..., description="窗口内任务总数")
+    by_status: dict[str, int] = Field(..., description="任务状态 -> 计数")
+    failures_by_error_code: dict[str, int] = Field(
+        ..., description="失败任务 error_code -> 计数"
+    )
+    failure_split: FailureSplitStats = Field(..., description="内容级/系统级失败拆分")
+    by_downloader: DownloaderDistribution = Field(..., description="下载器归属分布")
+    weekly_trend: list[WeeklyTrendItem] = Field(
+        ..., description="按自然周（非严格 ISO 周）的完成/失败趋势"
+    )

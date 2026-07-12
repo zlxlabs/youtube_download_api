@@ -63,6 +63,44 @@ class ErrorCode(str, Enum):
     TASK_TIMEOUT = "TASK_TIMEOUT"  # Task-level timeout (safety net)
 
 
+# 元数据/资源获取阶段的"内容级终态错误"：由视频自身客观状态导致、与具体下载器
+# 实现/出口位置无关的错误码（视频不存在/私有/直播/年龄限制）——不管用哪个下载器、
+# 从哪台机器发起请求，结果都一样，因此可以作为全局终态立即终止降级链；也是
+# get_download_stats() 里 failure_split 字段区分 content_level / system_level
+# 失败归因的唯一事实来源。
+#
+# 各下载器的 fetch_metadata() 遇到这些错误时必须抛出 DownloaderError（而非吞掉
+# 返回 None），供 DownloaderManager.get_metadata(raise_content_errors=True) 感知
+# 并终止降级链——这是 TaskService precheck 422 拦截依赖的唯一信号源。
+#
+# 注意：VIDEO_REGION_BLOCKED（地区限制）不在这个集合里。地区限制是"下载器/出口
+# 位置相关"的错误，不是视频的客观状态——本地部署的 ytdlp 被某个地区封锁，不代表
+# 其他下载器（如远端服务 TikHub）也下载不了同一个视频。若把它当全局终态处理，
+# 会出现"本地 ytdlp 探测到地区限制 -> 丢弃前面已经成功的 TikHub 结果 -> precheck
+# 422 拒绝一个实际可下载的视频"这种误判（外部 review 第13轮问题2）；同理，
+# failure_split 若用 error_code 前缀（VIDEO_*）而非这个集合来判定内容级失败，
+# 会把地区限制误计入 content_level，在遇到地区限制的部署里让比率失真（外部
+# review 第14轮问题1）。因此地区限制不终止降级链、不触发 precheck 422、也不算
+# failure_split 的内容级失败；只有 UNAVAILABLE/PRIVATE/LIVE/AGE_RESTRICTED 这类
+# 视频客观状态才算。
+#
+# 定义放在这个无下游依赖的叶子模块（而非 src.downloaders.models 或 manager.py），
+# 是因为 ErrorCode 本身就定义在这里，且 src.db.database（数据库聚合层）也需要
+# 引用这个集合——db 层不应反向依赖 downloaders 层。src.downloaders.models 从这里
+# 导入并保留同名属性，manager.py 又从 downloaders.models 导入并保留同名模块
+# 属性，因此 `from src.downloaders.manager import CONTENT_LEVEL_ERROR_CODES` /
+# `from src.downloaders.models import CONTENT_LEVEL_ERROR_CODES` 的旧引用均不受
+# 影响。
+CONTENT_LEVEL_ERROR_CODES = frozenset(
+    {
+        ErrorCode.VIDEO_UNAVAILABLE,
+        ErrorCode.VIDEO_PRIVATE,
+        ErrorCode.VIDEO_LIVE_STREAM,
+        ErrorCode.VIDEO_AGE_RESTRICTED,
+    }
+)
+
+
 class CallbackStatus(str, Enum):
     """Callback status enumeration."""
 
@@ -257,6 +295,10 @@ class Task:
     # Reuse flags (for statistics/debugging)
     reused_audio: bool = False  # Whether audio file was reused
     reused_transcript: bool = False  # Whether transcript file was reused
+
+    # Downloader attribution（哪个下载器最终产出了该文件；NULL=未知/历史数据/复用缓存未下载）
+    audio_downloader: Optional[str] = None  # 产出音频文件的下载器名称，如 "cdp" / "ytdlp" / "tikhub"
+    transcript_downloader: Optional[str] = None  # 产出字幕文件的下载器名称
 
     # Callback configuration
     callback_url: Optional[str] = None

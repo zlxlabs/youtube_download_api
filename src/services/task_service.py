@@ -27,15 +27,53 @@ from src.config import Settings
 from src.db.database import Database
 from src.db.models import (
     CallbackStatus,
+    ErrorCode,
     FileType,
     Task,
     TaskStatus,
     TaskPriority,
     calculate_queue_priority,
 )
+from src.downloaders.exceptions import DownloaderError
+from src.downloaders.manager import DownloaderManager
 from src.services.file_service import FileService
 from src.utils.helpers import extract_video_id
+from src.utils.keyed_lock import KeyedLockManager
 from src.utils.logger import logger
+
+
+# 前置检查中，元数据获取抛出 DownloaderError 时，哪些错误码代表视频已明确不可下载，
+# 应该拒绝创建任务。不在此集合内的错误码（如网络错误、限流等）一律 fail-open。
+#
+# VIDEO_REGION_BLOCKED 不在此列：地区限制是下载器/出口位置相关的错误（本地部署
+# 探测到的地区限制不代表其他下载器/远端服务也下载不了），不是视频的客观终态，
+# 详见 src.downloaders.models.CONTENT_LEVEL_ERROR_CODES 的注释。与该集合保持
+# 语义一致，避免同一个错误码在两处出现不同判定。
+_PRECHECK_REJECT_ERROR_CODES = frozenset(
+    {
+        ErrorCode.VIDEO_UNAVAILABLE,
+        ErrorCode.VIDEO_PRIVATE,
+        ErrorCode.VIDEO_LIVE_STREAM,
+    }
+)
+
+
+class VideoNotDownloadableError(Exception):
+    """
+    视频不可下载错误。
+
+    在 create_task 的前置检查阶段，一旦通过元数据探测明确判定视频不可下载
+    （直播中/预约首播/已被删除/私享等，见 _PRECHECK_REJECT_ERROR_CODES）时抛出。
+    地区限制（VIDEO_REGION_BLOCKED）不在此列——它是下载器/出口位置相关的错误，
+    不是视频客观状态，不会触发本异常，详见 _PRECHECK_REJECT_ERROR_CODES 的注释。
+    API 层捕获后返回 HTTP 422，避免下游客户端异步等待到下载阶段才收到失败反馈。
+    """
+
+    def __init__(self, video_id: str, error_code: ErrorCode, message: str):
+        self.video_id = video_id
+        self.error_code = error_code
+        self.message = message
+        super().__init__(message)
 
 
 class TaskService:
@@ -46,7 +84,13 @@ class TaskService:
     before creating download tasks. Files are shared across tasks for the same video.
     """
 
-    def __init__(self, db: Database, settings: Settings, file_service: FileService):
+    def __init__(
+        self,
+        db: Database,
+        settings: Settings,
+        file_service: FileService,
+        downloader_manager: Optional[DownloaderManager] = None,
+    ):
         """
         Initialize task service.
 
@@ -54,15 +98,37 @@ class TaskService:
             db: Database instance.
             settings: Application settings.
             file_service: File service for resource management.
+            downloader_manager: Optional downloader manager, used for the
+                pre-creation availability check (precheck). When None (default)
+                or when ``settings.precheck_enabled`` is False, precheck is
+                fully skipped so existing callers/tests are unaffected.
         """
         self.db = db
         self.settings = settings
         self.file_service = file_service
+        self.downloader_manager = downloader_manager
         # Task queue for worker to consume
         # 使用优先级队列：(priority, task_id)
         # priority=0: 新任务（高优先级）
         # priority=1: 重试任务（低优先级）
         self._task_queue: asyncio.PriorityQueue[tuple[int, str]] = asyncio.PriorityQueue()
+
+        # 按 video_id 的进程内互斥锁：串行化 create_task 里"文件缓存检查 ->
+        # 活跃任务检查 -> precheck -> 建任务"整段临界区，防止同一视频并发 POST 时
+        # 两个请求都通过活跃任务检查、各自 await precheck（最长 precheck_timeout）
+        # 后重复插入任务。
+        #
+        # 使用引用计数的 KeyedLockManager（而非"超过阈值按 locked() 判断清理"），
+        # 原因见 Codex 第10轮问题2：asyncio.Lock 在"持有者 release() 之后、排队
+        # waiter 尚未被事件循环恢复"的窗口里 locked() 返回 False，按阈值清理会把
+        # 仍有 waiter 排队的条目误删，导致后来者创建一把全新的锁绕开排队并发穿过
+        # 临界区，锁失去互斥意义。引用计数从根本上避免了这个问题，字典大小天然
+        # 有界于"当前正在使用中的 video_id 数量"，不再需要显式上限/清理逻辑。
+        #
+        # 注：DownloaderManager._metadata_locks（见 downloaders/manager.py）目前
+        # 仍是同款按阈值 + locked() 清理的旧策略，本轮未同步修复——它的竞态后果
+        # 只是重复拉一次元数据（幂等、无害），不影响正确性，留待后续按需处理。
+        self._video_locks = KeyedLockManager()
 
     @property
     def task_queue(self) -> asyncio.PriorityQueue[tuple[int, str]]:
@@ -79,6 +145,11 @@ class TaskService:
         3. If some files missing -> create task to download missing files
         4. If active task exists for same video -> return existing task
 
+        并发安全：整个方法体（文件缓存检查/活跃任务检查/precheck/建任务）都在
+        video 级锁内执行（见 self._video_locks，KeyedLockManager），串行化同一
+        视频的并发请求，避免 TOCTOU 窗口内重复建任务。不同视频使用不同的锁实例，
+        互不阻塞。
+
         Args:
             request: Task creation request.
 
@@ -89,6 +160,25 @@ class TaskService:
         if not video_id:
             raise ValueError("Invalid YouTube URL")
 
+        async with self._video_locks.acquire(video_id):
+            return await self._create_task_locked(video_id, request)
+
+    async def _create_task_locked(
+        self, video_id: str, request: CreateTaskRequest
+    ) -> TaskResponse:
+        """
+        create_task 的实际逻辑，调用方必须已持有该 video_id 的锁。
+
+        拆成独立方法只是为了让 create_task 的锁作用域一目了然；这里不重复
+        获取锁，也不做任何仅靠锁本身无法保证的额外校验。
+
+        Args:
+            video_id: 已从 request.video_url 解析出的视频 ID。
+            request: Task creation request.
+
+        Returns:
+            TaskResponse with task details or cached resources.
+        """
         # Check existing resources for this video
         existing_files = await self.file_service.get_all_files_for_video(video_id)
         existing_audio = existing_files.get("audio")
@@ -136,13 +226,39 @@ class TaskService:
                 transcript_file=existing_transcript,
             )
 
-        # Check for active (pending/downloading) task for same video
-        active_task = await self.db.get_active_task_by_video(video_id)
-        if active_task:
-            logger.info(f"Found active task for video {video_id}: {active_task.id}")
-            response = await self._build_task_response(active_task)
-            response.message = "Task already in progress"
-            return response
+        # Check for active (pending/downloading) tasks for same video.
+        # 同一视频允许同时存在多条活跃任务（如旧的 audio-only 任务仍在跑，又来了
+        # 一个 transcript-only 请求）。取全部活跃任务而非只取最新一条，避免只看
+        # 最新一条时漏掉更早的、恰好覆盖本次请求的任务，造成重复创建。
+        active_tasks = await self.db.get_active_tasks_by_video(video_id)
+        if active_tasks:
+            # 需求覆盖校验：任意一条活跃任务只要涵盖本次请求"剩余需要"的资源即可复用。
+            # 注意这里对照的是 need_audio/need_transcript（剩余需求），而不是
+            # request.include_audio/include_transcript（原始请求）——文件级缓存
+            # 已命中的部分不需要任何任务提供，不应计入覆盖判断。
+            # 例：音频已缓存（need_audio=False）+ 字幕未缓存（need_transcript=True），
+            # 一条只请求了字幕的活跃任务已经能覆盖剩余需求，即使它 include_audio=False，
+            # 也应当被复用，而不是因为"没请求音频"被误判为不覆盖。
+            # 全部活跃任务都覆盖不足时才创建新任务（文件级缓存会让重复部分开销很小）。
+            for active_task in active_tasks:
+                covers_audio = (not need_audio) or active_task.include_audio
+                covers_transcript = (not need_transcript) or active_task.include_transcript
+                if covers_audio and covers_transcript:
+                    logger.info(f"Found active task for video {video_id}: {active_task.id}")
+                    response = await self._build_task_response(active_task)
+                    response.message = "Task already in progress"
+                    return response
+
+            logger.info(
+                f"{len(active_tasks)} active task(s) for video {video_id} do not cover remaining "
+                f"need (need_audio={need_audio}/need_transcript={need_transcript}); "
+                f"creating a new task instead of reusing any of them"
+            )
+
+        # 前置检查：在真正创建任务前，拦截已知不可下载的视频（直播/预约首播/不可用等）。
+        # 位置刻意放在文件缓存命中检查、活跃任务去重之后——缓存命中和复用路径不应因此增加延迟。
+        # 检查本身严格 fail-open：只有明确判定不可下载时才拒绝，其余一律放行。
+        await self._precheck_video_downloadable(video_id, request)
 
         # Ensure video resource exists
         await self.db.get_or_create_video_resource(video_id)
@@ -189,6 +305,143 @@ class TaskService:
         # Build response
         response = await self._build_task_response(task)
         return response
+
+    async def _precheck_video_downloadable(
+        self, video_id: str, request: CreateTaskRequest
+    ) -> None:
+        """
+        创建任务前的前置校验：探测视频是否已知不可下载。
+
+        复用 DownloaderManager.get_metadata()（先查 DB 永久缓存，未命中再按
+        METADATA_PRIORITY 降级调用下载器）快速判断视频是否为直播/预约首播/
+        已被删除/私享，从而在任务创建前就能给下游明确的失败反馈，而不必等到
+        异步下载流程跑到元数据阶段才暴露。地区限制不在拦截范围内（详见
+        _PRECHECK_REJECT_ERROR_CODES 的注释），fail-open 交给 worker 的完整
+        下载降级链判定。
+
+        缓存陈旧问题：get_metadata() 命中的 DB 缓存永久有效，若曾经探测到
+        live/upcoming 并落库，直播结束变成可下载录像之后，缓存不会自动刷新——
+        重新提交同一视频会永远读到过期的 live/upcoming 状态被拒。因此第一次
+        读到缓存的 live/upcoming 时不直接拒绝，而是再强制刷新一次拿新鲜数据
+        （_fetch_precheck_metadata），只有新鲜数据仍是 live/upcoming 才真正拒绝；
+        刷新失败/超时同样 fail-open。已知的非 live/upcoming 状态（如 "none"）
+        不会触发第二次调用（成本守护）。
+
+        未知状态（Codex 第10轮问题1）：live_broadcast_content 也可能是 None——
+        历史数据落库时字段缺失，或 tikhub 这类下载链路本身判定不了直播状态，
+        None 不代表"确认非直播"。DownloaderManager.download_with_fallback 对
+        None 本来就会强制刷新一次再判断（manager.py 438-450 行），precheck 必须
+        对齐同一语义：把 None 和 live/upcoming 一样纳入触发二次确认的条件，
+        否则缓存了未知状态的直播视频会被 precheck 直接放行。刷新后仍是 None
+        （链上所有下载器都判定不了）同样 fail-open，交给 worker 侧兜底。
+
+        Fail-open 设计：只有明确判定为不可下载时才拒绝；探测超时、下载器全部
+        失败、或任何意外异常都视为“探测本身不可用”，直接放行，绝不能因为前置
+        检查故障而降低服务可用性。整个探测过程（含可能的刷新）共用一个
+        precheck_timeout 总预算，不会因为多了一次调用而翻倍。
+
+        Args:
+            video_id: YouTube 视频 ID。
+            request: 原始建任务请求（用于取 video_url）。
+
+        Raises:
+            VideoNotDownloadableError: 视频被明确判定为不可下载。
+        """
+        if self.downloader_manager is None or not self.settings.precheck_enabled:
+            return
+
+        async def _fetch_precheck_metadata() -> Optional[dict]:
+            """
+            探测视频状态：默认走 DB 缓存；若缓存显示 live/upcoming，强制刷新一次
+            拿新鲜数据再确认，避免"曾经直播过的视频永远 422"。与外层共用同一个
+            wait_for 超时预算，不单独设超时。
+            """
+            assert self.downloader_manager is not None  # 上面已判空，narrow 类型
+            metadata = await self.downloader_manager.get_metadata(
+                video_url=request.video_url,
+                video_id=video_id,
+                # 内容级终态错误（VIDEO_UNAVAILABLE/VIDEO_PRIVATE/...）必须让
+                # get_metadata 向上抛出，否则默认行为会把异常吞掉、返回 None，
+                # 下面的 except DownloaderError 分支永远走不到，422 拦截失效。
+                raise_content_errors=True,
+            )
+            if not metadata:
+                return metadata
+
+            live_status = metadata.get("live_broadcast_content")
+            # 已知的非 live/upcoming 状态（如 "none"）直接放行，不触发第二次调用。
+            # live/upcoming（疑似直播）或 None（未知，历史数据/判定不了的下载链路）
+            # 都需要强制刷新一次拿新鲜数据再确认。
+            if live_status is not None and live_status not in ("upcoming", "live"):
+                return metadata
+
+            logger.info(
+                f"Precheck cache shows {'live/upcoming' if live_status else 'unknown (None)'} "
+                f"live status for video {video_id} (status={live_status!r}), forcing refresh "
+                f"to confirm current status before proceeding"
+            )
+            return await self.downloader_manager.get_metadata(
+                video_url=request.video_url,
+                video_id=video_id,
+                force_refresh=True,
+                raise_content_errors=True,
+            )
+
+        try:
+            metadata = await asyncio.wait_for(
+                _fetch_precheck_metadata(),
+                timeout=self.settings.precheck_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"Precheck timed out for video {video_id} after "
+                f"{self.settings.precheck_timeout}s, proceeding to create task (fail-open)"
+            )
+            return
+        except DownloaderError as e:
+            if e.error_code in _PRECHECK_REJECT_ERROR_CODES:
+                logger.warning(
+                    f"Precheck rejected video {video_id}: {e.error_code.value} - {e.message}"
+                )
+                raise VideoNotDownloadableError(
+                    video_id=video_id, error_code=e.error_code, message=e.message
+                ) from e
+            logger.warning(
+                f"Precheck metadata fetch raised non-blocking DownloaderError for video "
+                f"{video_id}: {e.error_code.value} - {e.message}, proceeding to create task "
+                f"(fail-open)"
+            )
+            return
+        except Exception as e:
+            # 包含 AllDownloadersFailed 之外的一切意外异常：网络错误、下载器内部 bug 等。
+            # 前置检查的可用性绝不能拖累任务创建，一律 fail-open。
+            logger.warning(
+                f"Precheck metadata fetch failed unexpectedly for video {video_id}: "
+                f"{type(e).__name__}: {e}, proceeding to create task (fail-open)"
+            )
+            return
+
+        if not metadata:
+            # 所有下载器都获取失败（get_metadata 内部已吞掉各下载器异常，返回 None）
+            logger.warning(
+                f"Precheck could not fetch metadata for video {video_id} "
+                f"(all downloaders failed), proceeding to create task (fail-open)"
+            )
+            return
+
+        live_status = metadata.get("live_broadcast_content")
+        if live_status in ("upcoming", "live"):
+            logger.warning(
+                f"Precheck rejected video {video_id}: live broadcast (status={live_status})"
+            )
+            raise VideoNotDownloadableError(
+                video_id=video_id,
+                error_code=ErrorCode.VIDEO_LIVE_STREAM,
+                message=(
+                    f"Video is a live broadcast (status: {live_status}), "
+                    "not available for download"
+                ),
+            )
 
     async def _build_cached_response(
         self,
@@ -411,25 +664,48 @@ class TaskService:
         except asyncio.TimeoutError:
             return None
 
+    # 恢复 pending 任务时每批拉取的数量。
+    # 历史 bug：曾经硬编码 get_pending_tasks(limit=100) 单次拉取，堆积超过
+    # 100 条时超出部分永远恢复不到队列里，导致任务静默卡死。现在改为以此
+    # 批大小循环分页拉取，直到取完全部 pending 任务为止，不再有隐藏上限。
+    _RESTORE_BATCH_SIZE = 100
+
     async def restore_pending_tasks(self) -> int:
         """
         Restore pending tasks to queue after restart.
 
+        分批循环拉取全部 pending 任务（而非一次性限量拉取），保持
+        get_pending_tasks 现有的排序语义（created_at ASC），确保堆积
+        再多任务也能被完整恢复入队，不会有任务被静默遗漏。
+
         Returns:
             Number of tasks restored.
         """
-        tasks = await self.db.get_pending_tasks(limit=100)
         count = 0
+        offset = 0
 
-        for task in tasks:
-            # 启动时恢复的任务，重新计算队列优先级
-            queue_priority = calculate_queue_priority(
-                user_priority=task.priority,
-                include_audio=task.include_audio,
-                include_transcript=task.include_transcript,
+        while True:
+            tasks = await self.db.get_pending_tasks(
+                limit=self._RESTORE_BATCH_SIZE, offset=offset
             )
-            await self._task_queue.put((queue_priority, task.id))
-            count += 1
+            if not tasks:
+                break
+
+            for task in tasks:
+                # 启动时恢复的任务，重新计算队列优先级
+                queue_priority = calculate_queue_priority(
+                    user_priority=task.priority,
+                    include_audio=task.include_audio,
+                    include_transcript=task.include_transcript,
+                )
+                await self._task_queue.put((queue_priority, task.id))
+                count += 1
+
+            offset += len(tasks)
+
+            # 本批数量小于批大小，说明已经是最后一批，无需再查询
+            if len(tasks) < self._RESTORE_BATCH_SIZE:
+                break
 
         if count > 0:
             logger.info(f"Restored {count} pending tasks to queue")

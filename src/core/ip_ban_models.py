@@ -85,3 +85,42 @@ class IPBanState:
                 else None
             ),
         }
+
+
+@dataclass
+class IPBanStateChangeContext:
+    """
+    熔断器状态变更事件上下文。
+
+    IPBanCircuitBreaker 在每次状态发生变更（触发/升级/降级/恢复/从持久化
+    恢复/延长/记录失败尝试）时，通过 on_state_change 回调把该上下文传递给
+    外部持久化层（见 src/core/worker.py 中的回调注入），由外部决定如何写库。
+    breaker 本身不感知数据库，保持纯内存、可独立单测。
+    """
+
+    event_type: str
+    """
+    事件类型，取值：
+    - triggered: 触发熔断（NORMAL -> AUDIO_BANNED/FULLY_BANNED）
+    - upgraded: 音频熔断升级为全局熔断
+    - downgraded: 全局熔断降级为音频熔断
+    - recovered: 恢复正常状态
+    - restored: 服务启动时从持久化存储恢复状态
+    - extended: 熔断时间被延长（级别不变，仅 banned_at 推后）
+    - failed_attempt: 记录一次失败的探测尝试
+    """
+
+    old_level: IPBanLevel
+    """变更前的熔断级别"""
+
+    new_level: IPBanLevel
+    """变更后的熔断级别"""
+
+    old_state: IPBanState
+    """变更前的完整状态快照（用于计算持续时长等，例如 recovered 事件里的原始 banned_at）"""
+
+    new_state: IPBanState
+    """变更后的完整状态快照"""
+
+    reason: Optional[str] = None
+    """触发原因（可选，通常来自触发熔断时传入的 reason 参数）"""

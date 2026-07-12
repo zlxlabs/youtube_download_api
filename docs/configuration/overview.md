@@ -8,6 +8,7 @@
 - [环境变量列表](#环境变量列表)
 - [核心配置](#核心配置)
 - [存储配置](#存储配置)
+- [任务前置检查配置](#任务前置检查配置)
 - [下载器配置](#下载器配置)
 - [熔断器配置](#熔断器配置)
 - [通知配置](#通知配置)
@@ -86,6 +87,8 @@ cp .env.example .env
 | **存储配置** | `DATA_DIR` | 数据存储目录 |
 | | `FILE_RETENTION_DAYS` | 文件保留天数 |
 | | `TZ` | 时区配置 |
+| **任务前置检查** | `PRECHECK_ENABLED` | 是否启用创建任务前的可用性预检查 |
+| | `PRECHECK_TIMEOUT` | 前置探测超时时间 |
 | **TikHub API** | `TIKHUB_API_KEY` | TikHub API 密钥 |
 | | `TIKHUB_CACHE_TTL_HOURS` | TikHub 缓存时间 |
 | **PO Token** | `POT_SERVER_URL` | PO Token 服务地址 |
@@ -100,8 +103,8 @@ cp .env.example .env
 | **熔断器** | `CIRCUIT_BREAKER_ENABLED` | 启用熔断器 |
 | | `CIRCUIT_BREAKER_THRESHOLD` | 熔断器失败阈值 |
 | | `CIRCUIT_BREAKER_TIMEOUT` | 熔断器超时时间 |
-| **IP 熔断器** | `MIN_WAIT_BEFORE_RETRY` | 最小等待时间 |
-| | `MAX_RETRY_INTERVAL` | 重试间隔 |
+| **IP 熔断器** | `IP_BAN_MIN_WAIT_BEFORE_RETRY` | 熔断触发后允许下一次被动探测尝试的最小等待时间 |
+| | `IP_BAN_MAX_RETRY_INTERVAL` | 两次被动探测尝试之间的最小间隔 |
 | **间隔策略** | `TRANSCRIPT_INTERVAL_MIN` | 字幕任务最小间隔 |
 | | `TRANSCRIPT_INTERVAL_MAX` | 字幕任务最大间隔 |
 | | `AUDIO_INTERVAL_MIN` | 音频任务最小间隔 |
@@ -305,6 +308,55 @@ TZ=America/New_York
 
 ---
 
+## 任务前置检查配置
+
+创建任务前的前置校验（precheck）：在真正创建下载任务前先做一次元数据探测，提前拦截直播中/预约首播/视频不可用等已知不可下载的场景，避免下游客户端异步等待到下载阶段才收到失败反馈。探测失败（超时/下载器全部失败/其他异常）一律 fail-open，绝不会因为前置检查故障而阻塞任务创建。
+
+完整的 422 响应说明和示例见 [API 参考文档 - 创建下载任务](../api-reference.md#创建下载任务)。
+
+### PRECHECK_ENABLED
+
+是否启用创建任务前的元数据可用性预检查（拦截直播/预约首播/视频不可用等场景）。
+
+**类型**：boolean
+**必填**：否
+**默认值**：`true`
+
+**配置示例**：
+```bash
+# 启用前置检查（默认）
+PRECHECK_ENABLED=true
+
+# 禁用前置检查（不推荐，视频不可下载会等到下载阶段才失败）
+PRECHECK_ENABLED=false
+```
+
+---
+
+### PRECHECK_TIMEOUT
+
+前置探测的超时时间（秒）。超时按 fail-open 处理，照常创建任务。
+
+**类型**：float
+**必填**：否
+**默认值**：`8.0`
+**取值范围**：`> 0`
+
+**配置示例**：
+```bash
+# 默认超时
+PRECHECK_TIMEOUT=8.0
+
+# 缩短超时，降低对创建任务接口延迟的影响
+PRECHECK_TIMEOUT=5.0
+```
+
+**说明**：
+- 探测复用 `DownloaderManager.get_metadata()`（先查数据库永久缓存，未命中再按下载器优先级降级探测）
+- 探测失败一律 fail-open，绝不因为前置检查本身故障而拒绝合法请求
+
+---
+
 ## 下载器配置
 
 ### CDP_ENABLED
@@ -380,6 +432,8 @@ CIRCUIT_BREAKER_ENABLED=false
 ```
 
 **详细配置**：[熔断器配置](./circuit-breakers.md)
+
+除下载器熔断器外，系统还有一套独立的 IP 熔断器（被动探测型，`IP_BAN_MIN_WAIT_BEFORE_RETRY` / `IP_BAN_MAX_RETRY_INTERVAL` 控制等待与重试间隔，状态持久化），详见 [熔断器配置](./circuit-breakers.md)。
 
 ---
 

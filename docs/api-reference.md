@@ -11,6 +11,7 @@
 - [人工上传接口](#人工上传接口)
 - [视频资源接口](#视频资源接口)
 - [视频元数据接口](#视频元数据接口)
+- [统计接口](#统计接口)
 - [设置接口](#设置接口)
 - [管理接口](#管理接口)
 - [错误码说明](#错误码说明)
@@ -35,7 +36,7 @@
 | 方法 | 路径 | 说明 | 鉴权 |
 |------|------|------|------|
 | **任务管理** ||||
-| POST | `/api/v1/tasks` | 创建下载任务 | 需要 |
+| POST | `/api/v1/tasks` | 创建下载任务（视频不可下载时返回 422） | 需要 |
 | GET | `/api/v1/tasks` | 列出任务 | 需要 |
 | GET | `/api/v1/tasks/{task_id}` | 查询任务详情 | 需要 |
 | DELETE | `/api/v1/tasks/{task_id}` | 取消任务 | 需要 |
@@ -52,6 +53,8 @@
 | DELETE | `/api/v1/video-resources/{video_id}` | 删除视频资源 | 需要 |
 | **视频元数据** ||||
 | GET | `/api/v1/videos/{video_id}/info` | 查询视频元数据 | 需要 |
+| **统计** ||||
+| GET | `/api/v1/stats/downloads` | 下载失败归因统计 | 需要 |
 | **设置** ||||
 | GET | `/api/v1/settings/config` | 获取系统配置 | 公开 |
 | GET | `/api/v1/settings/cookie` | 获取 Cookie 信息 | 需要 |
@@ -196,6 +199,37 @@ curl -X POST http://localhost:8000/api/v1/tasks \
   "message": "Resources retrieved from cache"
 }
 ```
+
+**响应示例 - 422 视频不可下载（前置拦截）**：
+
+创建任务前，系统会同步做一次元数据前置检查（precheck），提前拦截直播中/预约首播/已删除/私有/地区限制等已知不可下载的视频，避免客户端异步等待到下载阶段才收到失败反馈。检查本身严格 fail-open：探测超时或所有下载器探测失败时一律放行、照常建任务，只有明确判定不可下载时才返回 422。
+
+```bash
+curl -X POST http://localhost:8000/api/v1/tasks \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-api-key" \
+  -d '{
+    "video_url": "https://www.youtube.com/watch?v=LIVE_VIDEO_ID",
+    "include_audio": true,
+    "include_transcript": true
+  }'
+```
+
+```json
+{
+  "detail": {
+    "error_code": "VIDEO_LIVE_STREAM",
+    "message": "Video is a live broadcast (status: live), not available for download",
+    "video_id": "LIVE_VIDEO_ID"
+  }
+}
+```
+
+拦截信息位于 `detail` 字段内（FastAPI 标准错误包装），包含 `error_code` / `message` / `video_id` 三个字段。可能返回的 `error_code`：`VIDEO_UNAVAILABLE` / `VIDEO_PRIVATE` / `VIDEO_LIVE_STREAM`（直播中或预约首播）。注意：`VIDEO_REGION_BLOCKED`（地区限制）不会触发本前置拦截——地区限制是下载器/出口位置相关的错误而非视频客观状态，本地探测到地区限制不代表其他下载器也下载不了，因此交给完整的下载降级链自行判定，不在此处 fail-closed。
+
+注意：同一个 422 状态码还会在请求体本身未通过校验时返回（如 `video_url` 缺失、`include_audio` 与 `include_transcript` 同时为 `false`）。这种情况下 `detail` 是数组而非对象，形如 `{"detail": [{"loc": [...], "msg": "...", "type": "..."}]}`（FastAPI 标准校验错误结构）。调用方需要区分这两种 `detail` 形态。
+
+**前置检查配置**：默认启用，可通过 `PRECHECK_ENABLED` / `PRECHECK_TIMEOUT` 调整，详见 [配置总览 - 任务前置检查配置](./configuration/overview.md#任务前置检查配置)。
 
 ### 任务优先级说明
 
@@ -425,6 +459,8 @@ curl -X DELETE -H "X-API-Key: your-api-key" \
 | `reused_transcript` | 字幕是否来自缓存 |
 | `partial_success` | 是否为部分成功 |
 | `failure_details` | 详细的成功/失败信息（部分成功时） |
+
+**同视频活跃任务的复用规则**：若同一 `video_id` 已存在活跃任务（`pending`/`downloading`），系统只有在该活跃任务的 `include_audio`/`include_transcript` 已经覆盖本次新请求所需资源时才会直接复用返回该任务；若覆盖不足（例如活跃任务只请求了音频，新请求还需要字幕），则不复用，照常创建一个新任务（重叠部分仍会命中文件级缓存，开销很小）。
 
 ---
 
@@ -666,6 +702,103 @@ curl -H "X-API-Key: your-api-key" \
 | `cached` | boolean | `true` = 从数据库缓存读取，`false` = 实时获取 |
 | `metadata_source` | string | 元数据来源：`cached` / `youtube_data_api` / `ytdlp` / `tikhub` |
 | `fetched_at` | datetime | 元数据获取/更新时间 |
+
+---
+
+## 统计接口
+
+### 下载失败归因统计
+
+聚合最近 N 天的任务数据，回答"下载器成功率是多少""失败主要卡在哪个 error_code"这类运营问题，避免依赖翻查日志逐条统计。全部通过 SQL `GROUP BY` 聚合查询完成，不在应用层遍历全表。
+
+**接口**：`GET /api/v1/stats/downloads`
+
+**查询参数**：
+
+| 参数 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| `days` | integer | 否 | `30` | 统计时间窗口（天数），取值范围 1-365 |
+
+**请求示例**：
+```bash
+curl -H "X-API-Key: your-api-key" \
+  "http://localhost:8000/api/v1/stats/downloads?days=7"
+```
+
+**响应示例**：
+```json
+{
+  "days": 7,
+  "total": 520,
+  "by_status": {
+    "completed": 460,
+    "failed": 42,
+    "pending": 10,
+    "downloading": 5,
+    "cancelled": 3
+  },
+  "failures_by_error_code": {
+    "VIDEO_UNAVAILABLE": 12,
+    "VIDEO_PRIVATE": 3,
+    "RATE_LIMITED": 15,
+    "NETWORK_ERROR": 8,
+    "POT_TOKEN_FAILED": 4
+  },
+  "failure_split": {
+    "content_level": 15,
+    "system_level": 27,
+    "content_level_ratio": 0.357,
+    "system_level_ratio": 0.643
+  },
+  "by_downloader": {
+    "audio_downloader": {
+      "cdp": 380,
+      "ytdlp": 60,
+      "tikhub": 15,
+      "unknown": 5
+    },
+    "transcript_downloader": {
+      "cdp": 350,
+      "tikhub": 90,
+      "unknown": 20
+    }
+  },
+  "weekly_trend": [
+    {"week": "2026-W27", "completed": 210, "failed": 18},
+    {"week": "2026-W28", "completed": 250, "failed": 24}
+  ]
+}
+```
+
+**响应字段说明**：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `days` | integer | 统计时间窗口（天数） |
+| `total` | integer | 窗口内任务总数 |
+| `by_status` | object | 任务状态 -> 计数 |
+| `failures_by_error_code` | object | 失败任务 error_code -> 计数（`error_code` 为 `NULL` 的失败任务归入 `"unknown"` 桶，不会被丢弃） |
+| `failure_split.content_level` | integer | 内容级失败数（视频客观状态导致：不存在/私有/直播/年龄限制，重试/换下载器解决不了；判定依据是 `CONTENT_LEVEL_ERROR_CODES` 集合，而非 `error_code` 前缀——`VIDEO_REGION_BLOCKED` 虽以 `VIDEO_` 开头但属于系统级，见下） |
+| `failure_split.system_level` | integer | 系统级失败数（其余 error_code，含 `"unknown"` 与 `VIDEO_REGION_BLOCKED`，理论上可通过技术手段改善；地区限制是下载器/出口位置相关问题而非视频客观状态，换一个出口/下载器可能就能成功） |
+| `failure_split.content_level_ratio` | float | 内容级失败占比（0-1） |
+| `failure_split.system_level_ratio` | float | 系统级失败占比（0-1） |
+| `by_downloader.audio_downloader` | object | 音频下载器名称 -> 任务数 |
+| `by_downloader.transcript_downloader` | object | 字幕下载器名称 -> 任务数 |
+| `weekly_trend` | array | 按周的完成/失败趋势，每项含 `week` / `completed` / `failed` |
+
+**说明**：
+- `by_downloader` 中下载器为 `NULL`（未实际下载，例如命中文件级缓存复用）统一归为字符串 `"unknown"`，同时也覆盖历史遗留数据。
+- `failures_by_error_code` 中 `error_code` 为 `NULL` 的失败任务（例如任务级超时兜底路径等未及写入 error_code 就落库的失败）同样统一归为字符串 `"unknown"`，并计入 `failure_split.system_level`，保证 `failure_split.content_level + failure_split.system_level` 始终等于 `by_status` 中 `failed` 的计数，不会因为过滤掉 NULL 而丢数。
+- `weekly_trend` 的 `week` 格式形如 `"2026-W28"`，使用 SQLite `strftime('%Y', ...) || '-W' || strftime('%W', ...)` 拼接（公历年 + 周一起始的年内周序 00-53），**不是**严格 ISO 8601 周号（`%G-%V`）。这是为兼容旧版本 SQLite（3.46 以下不支持 `%G`/`%V`）做的折衷，年末/年初边界的周标签可能与真正的 ISO 周号有 1 周误差。
+
+**错误响应**：
+
+| 状态码 | 说明 |
+|--------|------|
+| 401 / 403 | 鉴权失败 |
+| 422 | `days` 超出 1-365 范围 |
+| 503 | 数据库错误 |
+| 500 | 其他意外错误 |
 
 ---
 

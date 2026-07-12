@@ -113,7 +113,7 @@ async def test_video_pause_control():
 
                 # 快速获取数据（会获取视频时长）
                 logger.info(f"\n📊 获取视频数据...")
-                page, cookie_file, headers, video_duration = await behavior_simulator.quick_fetch_data(
+                page, cookie_file, headers, video_duration, _cookies = await behavior_simulator.quick_fetch_data(
                     context, video['url'], video['id'], task_id
                 )
 

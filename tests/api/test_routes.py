@@ -25,7 +25,8 @@ from src.api.schemas import (
     TaskListResponse,
     TaskResponse,
 )
-from src.db.models import FileRecord, FileType, TaskPriority, TaskStatus
+from src.db.models import ErrorCode, FileRecord, FileType, TaskPriority, TaskStatus
+from src.services.task_service import VideoNotDownloadableError
 
 
 # -- Constants --
@@ -345,6 +346,93 @@ class TestCreateTask:
         )
         assert response.status_code == status.HTTP_400_BAD_REQUEST
         assert "bad input" in response.json()["detail"]
+
+    def test_create_task_video_not_downloadable_returns_422(
+        self, client: TestClient, mock_task_service: AsyncMock
+    ) -> None:
+        """
+        视频被前置检查判定为不可下载（如直播中）时，应返回 422，
+        body 中包含 error_code / message / video_id 三个字段。
+        """
+        mock_task_service.create_task.side_effect = VideoNotDownloadableError(
+            video_id=TEST_VIDEO_ID,
+            error_code=ErrorCode.VIDEO_LIVE_STREAM,
+            message="Video is a live broadcast (status: live), not available for download",
+        )
+        response = client.post(
+            "/api/v1/tasks",
+            json={"video_url": TEST_VIDEO_URL},
+            headers=_auth_headers(),
+        )
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        body = response.json()["detail"]
+        assert body["error_code"] == ErrorCode.VIDEO_LIVE_STREAM.value
+        assert body["video_id"] == TEST_VIDEO_ID
+        assert "live" in body["message"].lower()
+
+    def test_create_task_video_unavailable_returns_422(
+        self, client: TestClient, mock_task_service: AsyncMock
+    ) -> None:
+        """视频不可用（已删除等）同样应返回 422，error_code 对应透传。"""
+        mock_task_service.create_task.side_effect = VideoNotDownloadableError(
+            video_id=TEST_VIDEO_ID,
+            error_code=ErrorCode.VIDEO_UNAVAILABLE,
+            message="Video not found",
+        )
+        response = client.post(
+            "/api/v1/tasks",
+            json={"video_url": TEST_VIDEO_URL},
+            headers=_auth_headers(),
+        )
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        body = response.json()["detail"]
+        assert body["error_code"] == ErrorCode.VIDEO_UNAVAILABLE.value
+        assert body["video_id"] == TEST_VIDEO_ID
+
+    def test_create_task_422_openapi_schema_matches_actual_response_shape(
+        self, client: TestClient
+    ) -> None:
+        """
+        422 响应的 OpenAPI 声明必须覆盖两种实际会发生的响应体形态。
+
+        POST /tasks 的 422 有两个互不相关的触发源：
+        1. precheck 判定视频不可下载：``raise HTTPException(422, detail={...})``，
+           实际响应体是 ``{"detail": {error_code, message, video_id}}``
+           （FastAPI HTTPException 的 detail 包裹惯例，上面两个用例已验证）。
+        2. 请求体本身未通过 FastAPI/pydantic 校验：响应体是
+           ``{"detail": [{loc, msg, type}, ...]}``（标准 RequestValidationError
+           结构，见上面 test_create_task_missing_url_returns_422 等用例）。
+
+        因此 OpenAPI responses 声明必须是两者的并集（anyOf），而不是只声明
+        其中一种——否则据此生成的客户端代码在遇到另一种响应体时会反序列化失败。
+        """
+        schema = client.app.openapi()  # type: ignore[union-attr]
+        responses = schema["paths"]["/api/v1/tasks"]["post"]["responses"]
+        ref = responses["422"]["content"]["application/json"]["schema"]["$ref"]
+        model_name = ref.rsplit("/", 1)[-1]
+
+        assert model_name == "VideoNotDownloadableErrorResponse"
+
+        wrapper_schema = schema["components"]["schemas"][model_name]
+        assert "detail" in wrapper_schema["properties"]
+
+        detail_schema = wrapper_schema["properties"]["detail"]
+        any_of = detail_schema["anyOf"]
+        assert len(any_of) == 2
+
+        # 变体一：业务拒绝详情对象（VideoNotDownloadableResponse）
+        object_variant = next(v for v in any_of if "$ref" in v)
+        object_model_name = object_variant["$ref"].rsplit("/", 1)[-1]
+        assert object_model_name == "VideoNotDownloadableResponse"
+        object_schema = schema["components"]["schemas"][object_model_name]
+        assert set(object_schema["properties"]) == {"error_code", "message", "video_id"}
+
+        # 变体二：FastAPI 请求体校验错误详情数组（ValidationErrorDetail 列表）
+        array_variant = next(v for v in any_of if v.get("type") == "array")
+        array_item_model_name = array_variant["items"]["$ref"].rsplit("/", 1)[-1]
+        assert array_item_model_name == "ValidationErrorDetail"
+        array_item_schema = schema["components"]["schemas"][array_item_model_name]
+        assert set(array_item_schema["properties"]) == {"loc", "msg", "type"}
 
     def test_create_task_unexpected_error_returns_500(
         self, client: TestClient, mock_task_service: AsyncMock

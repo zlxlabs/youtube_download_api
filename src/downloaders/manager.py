@@ -12,15 +12,21 @@ from typing import Any, Dict, List, Optional
 from src.config import Settings
 from src.core.downloader import DownloadCancelledError
 from src.db.database import Database
+from src.db.models import ErrorCode
 from src.downloaders.base import BaseDownloader
 from src.downloaders.cdp import CDPDownloader
 from src.downloaders.circuit_breaker import CircuitBreaker, CircuitBreakerOpen
-from src.downloaders.exceptions import AllDownloadersFailed, DownloaderError
-from src.downloaders.models import DownloaderResult, VideoMetadata
+from src.downloaders.exceptions import AllDownloadersFailed, DownloaderAttempt, DownloaderError
+from src.downloaders.models import CONTENT_LEVEL_ERROR_CODES, DownloaderResult, VideoMetadata
 from src.downloaders.tikhub_downloader import TikHubDownloader
 from src.downloaders.youtube_data_api_downloader import YoutubeDataApiDownloader
 from src.downloaders.ytdlp_downloader import YtdlpDownloader
 from src.utils.logger import logger
+
+# CONTENT_LEVEL_ERROR_CODES 的定义位于 src.db.models（被 src.downloaders.models
+# 再导入并保留同名属性，见该模块内注释；避免 manager.py 与各下载器实现模块之间的
+# 循环导入）。这里通过 import 保留同名模块属性，`from src.downloaders.manager
+# import CONTENT_LEVEL_ERROR_CODES` 的旧引用不受影响。
 
 
 class DownloaderStats:
@@ -276,6 +282,38 @@ class DownloaderManager:
             ),
         )
 
+    def _merge_probe_metadata(self, base: dict, probe: dict) -> dict:
+        """
+        合并 get_metadata 降级链中"直播状态补全探测"的结果。
+
+        背景：部分下载器（如 TikHub）的 API 没有直播状态字段，fetch_metadata
+        对 live_broadcast_content 恒定返回 None（"未知"）。当链上第一个成功
+        结果的 live 状态未知时，get_metadata 会继续向后探测，本方法负责把
+        探测结果合并回主体。
+
+        合并规则：
+        - 以 base（链上第一个成功结果）为主体，保留其所有已有的非空字段
+        - live_broadcast_content 用 probe（后续探测结果）的值覆盖——这是发起
+          补全探测的唯一目的
+        - probe 中 base 缺失（None/空）的其他字段可以顺带补充，但不覆盖 base
+          已有的非空字段
+
+        Args:
+            base: 链上第一个成功返回非空元数据的下载器结果
+            probe: 后续补全探测的下载器结果
+
+        Returns:
+            合并后的元数据字典（不修改入参，返回新字典）
+        """
+        merged = dict(base)
+        for key, value in probe.items():
+            if key == "live_broadcast_content":
+                merged[key] = value
+                continue
+            if not merged.get(key) and value:
+                merged[key] = value
+        return merged
+
     def _get_prioritized_downloaders(
         self,
         include_audio: bool,
@@ -381,6 +419,9 @@ class DownloaderManager:
             DownloadCancelledError: 下载被取消
         """
         errors: List[str] = []
+        # 结构化的每次下载器尝试记录（下载器名/错误码/消息），随 errors 同步收集，
+        # 失败时一并传给 AllDownloadersFailed，供 worker 序列化写入 failure_details。
+        attempts: List[DownloaderAttempt] = []
         last_error: Optional[Exception] = None
 
         # 1. 先获取完整的视频元数据（使用 metadata_priority）
@@ -509,6 +550,13 @@ class DownloaderManager:
                     f"✗ {downloader.name} [orchestration] circuit breaker open: {e.message}"
                 )
                 errors.append(f"{downloader.name}: Circuit breaker open")
+                attempts.append(
+                    DownloaderAttempt(
+                        downloader=downloader.name,
+                        error_code="CIRCUIT_BREAKER_OPEN",
+                        message="Circuit breaker open",
+                    )
+                )
                 continue
 
             except DownloadCancelledError:
@@ -522,6 +570,13 @@ class DownloaderManager:
                     f"✗ {downloader.name} failed after retries: {e.error_code.value} - {e.message}"
                 )
                 errors.append(f"{downloader.name}: {e.message}")
+                attempts.append(
+                    DownloaderAttempt(
+                        downloader=downloader.name,
+                        error_code=e.error_code.value,
+                        message=e.message,
+                    )
+                )
                 last_error = e
 
                 # 记录统计
@@ -552,7 +607,9 @@ class DownloaderManager:
                     )
                     # 直接抛出异常，不再尝试其他下载器
                     # 保留原始错误码（如 VIDEO_LIVE_STREAM），避免降级为 DOWNLOAD_FAILED
-                    raise AllDownloadersFailed(errors, error_code=e.error_code)
+                    raise AllDownloadersFailed(
+                        errors, error_code=e.error_code, attempts=attempts
+                    )
 
                 # 继续尝试下一个下载器（降级）
                 # 注意：此时已经过了下载器内部的重试（最多3次）
@@ -563,6 +620,13 @@ class DownloaderManager:
                 # 未预期的错误
                 logger.error(f"✗ {downloader.name} unexpected error: {e}")
                 errors.append(f"{downloader.name}: {e}")
+                attempts.append(
+                    DownloaderAttempt(
+                        downloader=downloader.name,
+                        error_code="UNKNOWN_ERROR",
+                        message=str(e),
+                    )
+                )
                 last_error = e
 
                 # 记录统计
@@ -586,7 +650,7 @@ class DownloaderManager:
             and last_error.error_code != ErrorCode.DOWNLOAD_FAILED
             else ErrorCode.DOWNLOAD_FAILED
         )
-        raise AllDownloadersFailed(errors, error_code=final_error_code)
+        raise AllDownloadersFailed(errors, error_code=final_error_code, attempts=attempts)
 
     def _get_max_retries_for_error(self, error: DownloaderError) -> int:
         """
@@ -782,6 +846,7 @@ class DownloaderManager:
         video_id: str,
         priority: Optional[str] = None,
         force_refresh: bool = False,
+        raise_content_errors: bool = False,
     ) -> Optional[dict]:
         """
         获取视频元数据（仅元数据，不下载资源）。
@@ -790,6 +855,13 @@ class DownloaderManager:
         1. 优先从数据库读取（永久有效，除非手动删除）
         2. 数据库未命中，按优先级调用下载器
         3. 成功后写入数据库
+
+        直播状态补全探测：链上第一个成功返回非空元数据的下载器，若其
+        live_broadcast_content 为 None（下载器本身不支持判定直播状态，如
+        TikHub），且链上还有后续下载器，会继续调用后续下载器补全该字段并
+        与主体合并（见 _merge_probe_metadata）；一旦拿到非 None 的判定结果
+        立即停止（成本守护，不多打无谓请求），全链仍判定不了则维持 None。
+        落库的是合并后的最终结果。
 
         并发控制：
         - 使用视频级别的锁，防止同一视频重复 API 调用
@@ -800,9 +872,22 @@ class DownloaderManager:
             video_id: YouTube 视频 ID
             priority: 自定义优先级（如 "ytdlp,tikhub"），默认使用 metadata_priority
             force_refresh: 强制刷新（跳过数据库缓存）
+            raise_content_errors: 为 True 时，若降级链中某个下载器抛出内容级终态错误
+                （见模块级 CONTENT_LEVEL_ERROR_CODES：VIDEO_UNAVAILABLE/VIDEO_PRIVATE/
+                VIDEO_LIVE_STREAM/VIDEO_AGE_RESTRICTED），立即将该 DownloaderError
+                向上抛出，不再尝试链上其余下载器。注意 VIDEO_REGION_BLOCKED 不在此列
+                （地区限制是下载器/出口位置相关的错误，不是视频客观状态，不应终止
+                降级链，详见 CONTENT_LEVEL_ERROR_CODES 的注释），遇到时按普通失败处理，
+                照常尝试链上下一个下载器。默认为 False，行为与此前完全一致（吞掉所有
+                下载器异常，全部失败时返回 None），因此除显式传参的调用点外，其余
+                调用点零影响。
 
         Returns:
-            视频元数据字典，失败返回 None
+            视频元数据字典，失败返回 None（force_refresh 命中数据库缓存的路径不受
+            raise_content_errors 影响——缓存不是错误来源）
+
+        Raises:
+            DownloaderError: 仅当 raise_content_errors=True 且遇到内容级终态错误时抛出。
 
         Example:
             # 使用默认优先级
@@ -813,6 +898,9 @@ class DownloaderManager:
 
             # 强制刷新
             metadata = await manager.get_metadata(url, video_id, force_refresh=True)
+
+            # 前置检查场景：内容级错误需要立即感知，不能被吞掉
+            metadata = await manager.get_metadata(url, video_id, raise_content_errors=True)
         """
         async with self._get_metadata_lock(video_id):
             # 1. 检查数据库缓存（双重检查）
@@ -853,6 +941,15 @@ class DownloaderManager:
 
             errors: List[str] = []
 
+            # 链上第一个成功返回非空元数据的下载器结果，作为最终返回的主体。
+            # 部分下载器（如 TikHub）没有直播状态字段，fetch_metadata 恒定把
+            # live_broadcast_content 标记为 None（"未知"，而非"确认非直播"）。
+            # 若第一个成功结果的 live 状态未知，且链上还有后续下载器，继续向后
+            # 探测以补全 live 状态（precheck 的 422 判定依赖这个字段），拿到能
+            # 判定的结果后与主体合并；全链都判定不了则维持 None 返回，语义与
+            # 探测前一致（fail-open）。
+            accumulated: Optional[dict] = None
+
             for name in downloader_names:
                 # 查找下载器
                 downloader = next((d for d in self.downloaders if d.name == name), None)
@@ -861,21 +958,50 @@ class DownloaderManager:
                     continue
 
                 # 使用重试逻辑调用下载器
+                # 注意：_fetch_metadata_with_retry 在 raise_content_errors=True 且
+                # 命中内容级终态错误时会直接向上 raise（不吞异常），此处不捕获，
+                # 让异常自然传播出 get_metadata（连带释放上面的视频级锁）。这在
+                # 补全探测阶段同样适用：后续下载器抛出的内容级错误本身就是有效的
+                # 终态信号，不因为已经拿到过一次成功结果就被吞掉。
                 metadata = await self._fetch_metadata_with_retry(
-                    downloader, video_url, video_id, errors
+                    downloader, video_url, video_id, errors,
+                    raise_content_errors=raise_content_errors,
                 )
 
-                if metadata:
-                    # 写入数据库（永久保存）
-                    if self.db:
-                        try:
-                            # 确保 metadata 是字典
-                            metadata_dict = metadata if isinstance(metadata, dict) else metadata.__dict__
-                            await self._save_metadata_to_db(video_id, metadata_dict)
-                        except Exception as e:
-                            logger.warning(f"Failed to save metadata to database: {e}")
+                if not metadata:
+                    # 该下载器未拿到数据，继续尝试链上下一个（原有降级语义不变）
+                    continue
 
-                    return metadata
+                if accumulated is None:
+                    accumulated = metadata
+                else:
+                    logger.info(
+                        f"[{downloader.name}] Probing for live status completion: "
+                        f"live_broadcast_content={metadata.get('live_broadcast_content')!r}"
+                    )
+                    accumulated = self._merge_probe_metadata(accumulated, metadata)
+
+                if accumulated.get("live_broadcast_content") is not None:
+                    # live 状态已判定（"live"/"upcoming"/"none"）：成本守护，
+                    # 立即停止，不再多打一次请求
+                    break
+
+                # live 状态仍未知，若链上还有后续下载器，for 循环自然继续探测；
+                # 若已是最后一个，循环正常结束，accumulated 维持 live=None
+
+            if accumulated:
+                # 写入数据库（永久保存），落库的是合并后的最终结果
+                if self.db:
+                    try:
+                        # 确保 metadata 是字典
+                        metadata_dict = (
+                            accumulated if isinstance(accumulated, dict) else accumulated.__dict__
+                        )
+                        await self._save_metadata_to_db(video_id, metadata_dict)
+                    except Exception as e:
+                        logger.warning(f"Failed to save metadata to database: {e}")
+
+                return accumulated
 
             # 所有下载器都失败
             logger.error(f"All downloaders failed to fetch metadata for {video_id}")
@@ -890,6 +1016,7 @@ class DownloaderManager:
         video_url: str,
         video_id: str,
         errors: List[str],
+        raise_content_errors: bool = False,
     ) -> Optional[dict]:
         """
         使用指定下载器获取元数据，带有重试和指数退避。
@@ -898,15 +1025,22 @@ class DownloaderManager:
         - 临时性网络错误（SSL、超时）：最多重试 2 次
         - API 限流、配额超限：不重试（直接降级）
         - 指数退避：1s, 2s
+        - 内容级终态错误（见 CONTENT_LEVEL_ERROR_CODES）：不重试，且当
+          raise_content_errors=True 时立即向上抛出（视频状态客观存在，
+          重试或换下载器都不会改变结果）
 
         Args:
             downloader: 下载器实例
             video_url: 视频 URL
             video_id: 视频 ID
             errors: 错误列表（用于记录失败信息）
+            raise_content_errors: 遇到内容级终态错误时是否向上抛出（而非吞掉返回 None）
 
         Returns:
             视频元数据字典，失败返回 None
+
+        Raises:
+            DownloaderError: 仅当 raise_content_errors=True 且遇到内容级终态错误时抛出。
         """
         # 默认最大重试次数
         max_retries = 2
@@ -929,6 +1063,17 @@ class DownloaderManager:
                     return metadata
 
             except DownloaderError as e:
+                # 内容级终态错误：视频状态客观存在，与下载器实现无关，拿到即可判定，
+                # 不必等重试或整条降级链跑完。放在 should_retry 判断之前，
+                # 确保即使某个下载器把它标记为"可重试"也不会白白重试。
+                if raise_content_errors and e.error_code in CONTENT_LEVEL_ERROR_CODES:
+                    logger.warning(
+                        f"[{downloader.name}] Content-level terminal error: "
+                        f"{e.error_code.value} - {e.message}, raising immediately "
+                        f"(raise_content_errors=True)"
+                    )
+                    raise
+
                 # 判断是否应该重试
                 should_retry = downloader.should_retry(e)
                 is_last_attempt = attempt == max_retries
@@ -1012,10 +1157,22 @@ class DownloaderManager:
                 # 创建新记录
                 from src.db.models import VideoResource
 
+                # has_native_transcript 必须写 None（未知），不能写 False。
+                # 这里走的是 get_metadata() 缓存未命中路径（含 precheck 触发的元数据
+                # 探测），只抓取了标题/时长等基础元数据，根本没有检查过字幕可用性——
+                # 写 False 等于对"没测过"的事情断言"确认没有"，会让 task_service.py
+                # 里的音频兜底逻辑（has_native_transcript is False）在字幕其实存在的
+                # 视频上被误触发。真实的字幕探测结果只应由 worker 真正下载/尝试下载后
+                # 通过 update_video_resource(has_native_transcript=...) 写入。
+                #
+                # 已知限制：本修复只保证新写入路径语义正确；此前被本方法错误写成
+                # False 的历史存量记录无法回溯区分"precheck 误写"还是"worker 真实
+                # 探测出无字幕"，不做历史数据回填——这些视频下次被 worker 真实下载时
+                # 会被真实探测结果自然覆盖。
                 resource = VideoResource(
                     video_id=video_id,
                     video_info=video_info,
-                    has_native_transcript=False,  # 暂时未知
+                    has_native_transcript=None,
                 )
                 await self.db.create_video_resource(resource)
                 logger.debug(f"Saved metadata to database: {video_id}")

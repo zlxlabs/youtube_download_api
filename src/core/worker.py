@@ -6,6 +6,7 @@ Only downloads what's needed - reuses existing files when available.
 """
 
 import asyncio
+import json
 import random
 import tempfile
 import traceback
@@ -17,10 +18,10 @@ from src.config import Settings
 from src.core.downloader import (
     DownloadCancelledError,
 )
-from src.core.ip_ban_breaker import IPBanCircuitBreaker
-from src.core.ip_ban_models import ExecutionDecision, IPBanLevel
+from src.core.ip_ban_breaker import IPBanCircuitBreaker, calculate_ban_recovery_time
+from src.core.ip_ban_models import ExecutionDecision, IPBanLevel, IPBanStateChangeContext
 from src.db.database import Database
-from src.downloaders.exceptions import AllDownloadersFailed, DownloaderError
+from src.downloaders.exceptions import AllDownloadersFailed, DownloaderAttempt, DownloaderError
 from src.downloaders.manager import DownloaderManager
 from src.downloaders.models import DownloaderResult
 from src.db.models import (
@@ -41,6 +42,21 @@ from src.services.notify import NotificationService
 from src.services.task_service import TaskService
 from src.utils.logger import logger
 
+# 全局熔断（FULLY_BANNED）下，音频/混合任务的最小等待时间相对字幕任务的倍数。
+# 全局熔断意味着连字幕请求都被 YouTube 拒绝，说明风控比仅音频熔断
+# （AUDIO_BANNED）更严格，此时音频探测需要比字幕探测更保守地多等一段时间，
+# 避免刚触发全局熔断就用音频请求去试探，加重封禁。默认配置
+# （IP_BAN_MIN_WAIT_BEFORE_RETRY=3600）下等价于原先硬编码的 3600s/7200s，
+# 行为不变。
+FULL_BAN_AUDIO_MIN_WAIT_MULTIPLIER = 2
+
+# FULLY_BANNED 分支延迟重试的最小下限（秒）。get_remaining_time() 和
+# should_allow_attempt() 是两次独立调用，中间隔着几毫秒的执行耗时，边界情况下
+# remaining 可能已经被算成 0，但 should_allow_attempt() 仍判定为不允许——如果
+# 直接把 0 当作 delay_seconds 返回，任务会被立刻重新入队，下一次调度又落入
+# 同样的边界判断，形成没有实际退避的紧循环。
+MIN_DELAY_SECONDS_FLOOR = 60
+
 
 class DownloadWorker:
     """
@@ -58,6 +74,7 @@ class DownloadWorker:
         callback_service: CallbackService,
         notify_service: NotificationService,
         metrics_collector: Optional[MetricsCollector] = None,
+        downloader_manager: Optional[DownloaderManager] = None,
     ):
         """
         Initialize download worker.
@@ -70,6 +87,11 @@ class DownloadWorker:
             callback_service: Callback service.
             notify_service: Notification service.
             metrics_collector: Prometheus metrics collector (optional).
+            downloader_manager: 共享的下载器管理器实例（可选）。生产环境应
+                由 main.py 统一创建并注入，确保 API 路由层与 Worker 执行层
+                共用同一份熔断器状态和统计数据，避免出现两套互相独立的
+                下载器健康视图。未传入时（如单元测试直接构造 Worker）回退
+                为自建一份独立实例，保持向后兼容。
         """
         self.db = db
         self.settings = settings
@@ -80,14 +102,29 @@ class DownloadWorker:
         self.metrics_collector = metrics_collector
 
         # 使用下载器管理器（支持多下载器降级 + 元数据缓存）
-        self.downloader_manager = DownloaderManager(settings, db)
+        self.downloader_manager = downloader_manager or DownloaderManager(settings, db)
         self._running = False
         self._current_task: Optional[Task] = None
 
+        # 幂等保护：确保启动恢复动作（restore_persisted_state）只真正执行
+        # 一次。main.py 的 lifespan 会在 asyncio.create_task(self.start())
+        # 之前显式 await 调用一次，start() 内部又保留了兜底调用，两处调用
+        # 若都真正执行会导致 IPBanCircuitBreaker.restore_state() 重复触发
+        # "restored" 状态变更事件，在 ip_ban_history 表里写入重复记录。
+        self._ip_ban_state_restored: bool = False
+
         # IP 熔断器（被动探测型）
+        # 等待参数来自 settings（IP_BAN_MIN_WAIT_BEFORE_RETRY / IP_BAN_MAX_RETRY_INTERVAL），
+        # 与项目其余熔断器保持一致的"全部可配置"风格。
+        # on_state_change 回调把每次状态变更持久化到数据库（ip_ban_status/
+        # ip_ban_history），使熔断状态在服务重启（如 D3 自动部署触发的容器
+        # 重启）后可以恢复，避免误判为 NORMAL 全速请求 YouTube 加重封禁。
+        # 熔断器本身不直接依赖 Database，保持纯内存、可独立单测；回调失败
+        # fail-open，只记录日志，不影响熔断器本身的运行。
         self.ip_ban_breaker = IPBanCircuitBreaker(
-            min_wait_before_retry=3600,  # 60 分钟
-            max_retry_interval=1800,  # 30 分钟
+            min_wait_before_retry=settings.ip_ban_min_wait_before_retry,
+            max_retry_interval=settings.ip_ban_max_retry_interval,
+            on_state_change=self._handle_ip_ban_state_change,
         )
 
         # 自适应间隔控制
@@ -102,6 +139,23 @@ class DownloadWorker:
     async def start(self) -> None:
         """Start the worker loop."""
         self._running = True
+
+        # 启动时先尝试从数据库恢复上次的 IP 熔断状态，避免容器重启（如 D3
+        # 自动部署触发的重启）后误判为 NORMAL 全速请求 YouTube 加重封禁。
+        #
+        # 这里调用的是幂等的 restore_persisted_state()，而不是直接调用
+        # _restore_ip_ban_state()：正常生产路径下，main.py 的 lifespan 已经
+        # 在 asyncio.create_task(self.start()) 之前显式 await 过一次
+        # restore_persisted_state()（这是修复"startup 通知读到恢复前状态"
+        # 这个 bug 的关键——start() 是异步调度的，它与紧随其后的
+        # notify_startup() 之间如果没有任何真正让出事件循环的 await 点，
+        # start() 内部的恢复动作根本没机会先跑完）。这里保留调用只是作为
+        # 兜底：万一 worker 脱离 main.py 编排被单独启动（例如单测直接构造
+        # DownloadWorker 后调用 start()），仍然能自我恢复。幂等保护
+        # （self._ip_ban_state_restored）确保两处调用不会导致
+        # ip_ban_history 表重复写入 "restored" 记录。
+        await self.restore_persisted_state()
+
         logger.info("Download worker started")
 
         while self._running:
@@ -146,6 +200,216 @@ class DownloadWorker:
                 )
             except asyncio.TimeoutError:
                 logger.warning("Timed out waiting for pending callbacks during shutdown")
+
+    # 需要写入 ip_ban_history 的事件类型（触发/升级/降级/恢复正常/启动恢复）。
+    # extended（延长熔断）/failed_attempt（记录失败探测）只更新 ip_ban_status，
+    # 不追加历史，避免高频次要事件淹没历史表。
+    _IP_BAN_HISTORY_EVENT_TYPES = frozenset(
+        {"triggered", "upgraded", "downgraded", "recovered", "restored"}
+    )
+
+    async def _handle_ip_ban_state_change(
+        self, context: IPBanStateChangeContext
+    ) -> None:
+        """
+        IP 熔断器状态变更回调：持久化到数据库。
+
+        注入给 IPBanCircuitBreaker 的 on_state_change（见 __init__），在熔断器
+        每次状态变更（触发/升级/降级/恢复/延长/启动恢复/记录失败尝试）后被调用。
+
+        Note:
+            IPBanCircuitBreaker._emit_state_change 已经用 try/except 包裹了
+            回调调用本身（fail-open，异常只记录日志不上抛）。这里对数据库写入
+            再加一层 try/except，是为了在持久化失败时打印更贴合本层语义的日志
+            （明确是"持久化失败"而不是笼统的"回调失败"），双重保险确保数据库
+            异常绝不会影响熔断器状态转换本身。
+
+        Args:
+            context: 状态变更上下文（新旧级别、状态快照、事件类型、原因）
+        """
+        try:
+            await self.db.save_ip_ban_state(
+                current_level=context.new_level,
+                banned_at=context.new_state.banned_at,
+                last_attempt_at=context.new_state.last_attempt_at,
+                failed_attempts=context.new_state.failed_attempts,
+            )
+
+            if context.event_type not in self._IP_BAN_HISTORY_EVENT_TYPES:
+                return
+
+            if context.event_type == "recovered":
+                # 恢复事件：banned_at 取变更前（清空前）的原始触发时间，
+                # 并记录本次熔断的持续时长，供历史审计使用。
+                await self.db.append_ip_ban_history(
+                    event_type=context.event_type,
+                    ban_level=context.new_level.value,
+                    trigger_error=context.reason,
+                    banned_at=context.old_state.banned_at,
+                    recovered_at=datetime.now(timezone.utc),
+                    duration_seconds=context.old_state.time_since_ban,
+                    recovery_method="auto_probe",
+                )
+            else:
+                await self.db.append_ip_ban_history(
+                    event_type=context.event_type,
+                    ban_level=context.new_level.value,
+                    trigger_error=context.reason,
+                    banned_at=context.new_state.banned_at,
+                    recovery_method="restored" if context.event_type == "restored" else None,
+                )
+        except Exception as e:
+            logger.error(
+                f"Failed to persist IP ban state change (event={context.event_type}): {e}"
+            )
+
+    async def restore_persisted_state(self) -> None:
+        """
+        对外暴露的启动恢复入口（幂等）。
+
+        背景：_restore_ip_ban_state() 原来只在 start() 内部触发。start()
+        是通过 asyncio.create_task() 异步调度的，如果调用方（main.py 的
+        lifespan）在 create_task 之后、读取熔断器状态（如发送 startup 通知）
+        之前没有任何真正让出事件循环的 await 点，start() 内部的恢复动作
+        根本没机会先跑完——导致读到的永远是 IPBanCircuitBreaker.__init__
+        的初始值 NORMAL，而不是持久化恢复后的真实状态。这是一个确定性
+        bug，不是偶发竞态。
+
+        修复方式：把恢复逻辑拆成这个公开、幂等的方法，由 main.py 在
+        asyncio.create_task(download_worker.start()) 之前显式 await 调用，
+        确保恢复动作严格发生在 worker 后台循环启动、以及后续读取熔断器
+        状态之前，不再依赖脆弱的事件循环调度细节。
+
+        幂等保护：用 self._ip_ban_state_restored 标志位确保恢复动作只
+        真正执行一次。IPBanCircuitBreaker.restore_state() 无条件触发
+        "restored" 状态变更事件（不像 reset_to_normal 那样有 old_level
+        守卫），重复调用会在 ip_ban_history 表里写入重复的 restored 记录；
+        start() 内部仍保留对本方法的兜底调用（应对 worker 脱离 main.py
+        编排、被单独启动的场景），因此这里的幂等保护是必须的。
+
+        flag 置位时机（P2 修复，2026-07-11）：必须等 _restore_ip_ban_state()
+        确认数据库真正读取成功后才置位，不能在调用前就置位。原实现在调用前
+        无条件置位——如果 lifespan 首次调用时 load_ip_ban_state() 遇到瞬时
+        数据库错误，_restore_ip_ban_state() 内部 fail-open 捕获异常后直接
+        返回，但 flag 已经变成 True，导致 start() 内部的兜底恢复调用被幂等
+        保护挡成 no-op，进程整个生命周期停留在 NORMAL，恰好在存在持久化
+        熔断时失去保护。现在 _restore_ip_ban_state() 返回一个布尔值区分
+        "读取成功"（哪怕读到 None/NORMAL，即确认无需恢复）与"读取失败"，
+        只有前者才置位 flag，后者保留重试机会给下一次调用（通常是 start()
+        的兜底调用）。注意：main.py 是先 await 完 restore_persisted_state()
+        再 create_task(start())，两次调用之间不存在真正的并发重入，因此
+        这里用一个简单的布尔标志位即可，不需要引入锁。
+        """
+        if self._ip_ban_state_restored:
+            logger.debug(
+                "IP ban state already restored on this worker instance, "
+                "skipping duplicate restore"
+            )
+            return
+
+        if await self._restore_ip_ban_state():
+            self._ip_ban_state_restored = True
+        else:
+            logger.warning(
+                "IP ban state restore failed due to a database read error; "
+                "idempotent flag left unset so a later call (e.g. start()'s "
+                "fallback) can retry"
+            )
+
+    async def _restore_ip_ban_state(self) -> bool:
+        """
+        启动时从数据库恢复上次的 IP 熔断状态。
+
+        背景：IPBanCircuitBreaker 状态完全在内存，D3 自动部署每次 push 到
+        main 都会重启容器 —— 如果重启时正处于熔断中，服务醒来会误判为
+        NORMAL 全速请求 YouTube，加重封禁。这里在 worker 启动的第一时间尝试
+        从数据库恢复，是本次持久化功能修复该问题的关键路径。
+
+        恢复判定：只要持久化状态处于熔断中（非 NORMAL）就无条件恢复，不做
+        "是否已过 recovery_time" 的过期判断。
+
+        这个熔断器（见 ip_ban_breaker.py）是被动探测型的：recovery_time
+        只表示"从这一刻起 should_allow_attempt() 会放行一个探测任务"，
+        并不代表 IP 已经恢复——真正的降级/恢复要等探测任务执行成功才会
+        发生（见 _analyze_result_and_update_ban）。如果启动时因为
+        recovery_time 已过就把持久化的熔断状态当成"过期"直接忽略，会导致
+        服务重启后（FULLY_BANNED 场景下这个窗口可达小时级，而 D3 又是每次
+        push 就重启）所有排队任务全速放行、完全跳过探测分析，持久化保护
+        形同虚设。
+
+        恢复之后，被动探测机制天然自洽：如果 recovery_time 已经过了，
+        第一个匹配的任务就会被 should_allow_attempt() 当作探测放行，
+        探测成功即自愈（reset_to_normal / downgrade_to_audio_ban），
+        不需要在这里额外处理"已过期"的情况。
+
+        数据库读取失败（如首次启动尚未建表的极端情况）fail-open：记录错误
+        日志后放弃恢复，不阻塞 worker 启动。
+
+        Returns:
+            bool: 数据库是否被成功读取（即使读到 None 或 NORMAL、或数据不
+            一致而放弃恢复，只要 load_ip_ban_state() 本身没有抛异常，都算
+            成功，返回 True）。只有 load_ip_ban_state() 抛异常（读取失败）
+            才返回 False。调用方 restore_persisted_state() 依据这个返回值
+            决定是否置位幂等标志位——"确认无需恢复"和"读取失败留待重试"
+            必须严格区分，否则一次瞬时数据库错误就会让幂等保护误伤后续的
+            兜底恢复调用（P2 bug，见 restore_persisted_state 的 docstring）。
+        """
+        try:
+            saved = await self.db.load_ip_ban_state()
+        except Exception as e:
+            logger.error(f"Failed to load persisted IP ban state, skip restore: {e}")
+            return False
+
+        if saved is None or saved["current_level"] == IPBanLevel.NORMAL:
+            logger.info("No active IP ban state to restore on startup")
+            return True
+
+        banned_at = saved["banned_at"]
+        if banned_at is None:
+            # 数据不一致：非 NORMAL 却缺少触发时间，无法计算探测窗口，保守起见
+            # 不恢复。但这属于"读取成功、数据本身有问题"，不是"读取失败"——
+            # 重试并不会让数据自愈，因此仍然算成功，让幂等 flag 正常置位。
+            logger.warning(
+                f"Persisted IP ban state ({saved['current_level'].value}) has no "
+                f"banned_at timestamp, skip restore"
+            )
+            return True
+
+        # 无条件恢复：不判定是否过期（理由见上方 docstring）。
+        await self.ip_ban_breaker.restore_state(
+            level=saved["current_level"],
+            banned_at=banned_at,
+            last_attempt_at=saved["last_attempt_at"],
+            failed_attempts=saved["failed_attempts"],
+        )
+
+        # 探测窗口是否已到只影响下面的日志措辞，不影响上面已经做出的恢复决策
+        # 本身（P2 修复，2026-07-11：这段日志曾被一个提前 return True 挡成
+        # 不可达死代码，见 git blame，这里必须放在 return 之前才能真正执行到）。
+        recovery_time = calculate_ban_recovery_time(
+            banned_at,
+            saved["last_attempt_at"],
+            self.settings.ip_ban_min_wait_before_retry,
+            self.settings.ip_ban_max_retry_interval,
+        )
+
+        if datetime.now() >= recovery_time:
+            logger.warning(
+                f"Restored IP ban state on startup: {saved['current_level'].value} "
+                f"(banned_at={banned_at}) -- probe already eligible, the next matching "
+                f"task will be treated as a recovery probe instead of full-speed traffic."
+            )
+        else:
+            remaining = int((recovery_time - datetime.now()).total_seconds())
+            logger.warning(
+                f"Restored IP ban state on startup: {saved['current_level'].value} "
+                f"(banned_at={banned_at}, next probe eligible at {recovery_time} "
+                f"in {remaining}s) -- this prevents the service from resuming "
+                f"full-speed requests to YouTube right after a container restart "
+                f"while still IP-banned."
+            )
+
+        return True
 
     def _send_callback_background(self, task: Task) -> None:
         """
@@ -352,11 +616,22 @@ class DownloadWorker:
                 )
 
             # 如果是探测尝试，分析结果并更新熔断状态
+            #
+            # P1 修复（2026-07-11，Codex 第 16 轮）：修复前 _execute_task /
+            # _execute_download_with_manager 返回的成功结果 dict 从不携带
+            # "downloader_result" 键，导致这里的 isinstance 检查恒为 False——
+            # 探测任务成功执行也从来不会触发熔断降级/解除，持久化恢复出来的
+            # 熔断状态因此会永久卡在熔断态（"熔断永生"）。现在
+            # _execute_download_with_manager 在成功路径上会显式写入
+            # downloader_result（以及 audio_requested/transcript_requested，
+            # 用于区分"真正探测到仍失败"与"任务本不需要/走了缓存复用"）。
             if is_probe and isinstance(result.get("downloader_result"), DownloaderResult):
                 await self._analyze_result_and_update_ban(
                     result["downloader_result"],
                     was_probe=True,
                     ban_level_before=ban_level_before,
+                    audio_requested=result.get("audio_requested", True),
+                    transcript_requested=result.get("transcript_requested", True),
                 )
 
             # Update task completion with retry logic
@@ -572,6 +847,9 @@ class DownloadWorker:
                 # Process audio file
                 audio_file_id = existing_audio.id if existing_audio else None
                 reused_audio = existing_audio is not None
+                # 下载器归属：仅在本次真正新下载时记录，复用缓存时保持 None
+                # （reused_audio 标志已表达来源，不写占位值）
+                audio_downloader: Optional[str] = None
 
                 # 修复：audio_fallback 场景下也需要保存音频
                 if (need_audio or audio_fallback) and result.audio_path and result.audio_path.exists():
@@ -584,11 +862,13 @@ class DownloadWorker:
                     )
                     audio_file_id = audio_file.id
                     reused_audio = False
+                    audio_downloader = result.downloader
 
                 # Process transcript file
                 # 优化：无论用户是否请求字幕，只要下载器返回了字幕就保存
                 transcript_file_id = existing_transcript.id if existing_transcript else None
                 reused_transcript = existing_transcript is not None
+                transcript_downloader: Optional[str] = None
 
                 if result.transcript_path and result.transcript_path.exists():
                     if existing_transcript is None:
@@ -603,6 +883,7 @@ class DownloadWorker:
                         )
                         transcript_file_id = transcript_file.id
                         reused_transcript = False
+                        transcript_downloader = result.downloader
                         logger.info(
                             f"Task {task.id}: Saved transcript (requested={need_transcript})"
                         )
@@ -614,6 +895,20 @@ class DownloadWorker:
                     "reused_transcript": reused_transcript,
                     "audio_fallback": audio_fallback,  # 标记是否触发了音频降级
                     "downloader": result.downloader,  # 下载器名称
+                    "audio_downloader": audio_downloader,  # 产出音频文件的下载器（未下载则为 None）
+                    "transcript_downloader": transcript_downloader,  # 产出字幕文件的下载器（未下载则为 None）
+                    # 被动探测熔断分析用（见 _process_next_task -> _analyze_result_and_update_ban）。
+                    # 故意使用 first_result 而不是上面可能被 audio_fallback 二次下载覆盖的
+                    # result：audio_fallback 的二次下载只请求音频（include_transcript=False），
+                    # 如果直接用最终 result，会把首次字幕探测的真实结果（成功/失败）抹掉，
+                    # 让熔断分析看到一个"transcript_path=None"的假象，误判为字幕仍不可用。
+                    "downloader_result": first_result,
+                    # 本次是否真正向下载器请求了对应资源。区分"没请求"（任务本不需要，
+                    # 或已有缓存复用）与"请求了但失败"——前者 first_result 对应字段恒为
+                    # None，不能被熔断分析当作"探测到仍然失败"，否则会把纯粹的缓存命中
+                    # 误判成风控故障，错误延长甚至升级熔断级别。
+                    "audio_requested": need_audio,
+                    "transcript_requested": need_transcript,
                 }
 
         except (DownloaderError, AllDownloadersFailed) as e:
@@ -673,6 +968,49 @@ class DownloadWorker:
             has_native_transcript=has_native_transcript,
         )
         logger.debug(f"Updated video resource: {video_id}")
+
+    # 单条失败详情 message 的截断长度，避免超长日志片段撑爆 failure_details 列
+    _FAILURE_MESSAGE_MAX_LEN = 200
+
+    def _build_failure_details(self, error: DownloaderError) -> str:
+        """
+        构建失败归因 JSON 字符串，写入 tasks.failure_details 列。
+
+        - AllDownloadersFailed 且携带结构化 attempts：使用 attempts 列表，
+          每个下载器一条记录（下载器名/error_code/message），完整还原整条
+          降级链的尝试结果。
+        - 其他情况（普通 DownloaderError，如任务级超时、未预期异常转换后的
+          单次错误，或 AllDownloadersFailed 未携带 attempts 的旧路径）：
+          退化为单条记录。
+
+        Args:
+            error: 失败异常（DownloaderError 或其子类 AllDownloadersFailed）。
+
+        Returns:
+            JSON 字符串，形如
+            '[{"downloader": "cdp", "error_code": "CDP_NO_COOKIES", "message": "..."}]'
+        """
+        attempts: list[DownloaderAttempt]
+        if isinstance(error, AllDownloadersFailed) and error.attempts:
+            attempts = error.attempts
+        else:
+            attempts = [
+                DownloaderAttempt(
+                    downloader=error.downloader or "unknown",
+                    error_code=error.error_code.value,
+                    message=error.message,
+                )
+            ]
+
+        records = [
+            {
+                "downloader": a.downloader,
+                "error_code": a.error_code,
+                "message": a.message[: self._FAILURE_MESSAGE_MAX_LEN],
+            }
+            for a in attempts
+        ]
+        return json.dumps(records, ensure_ascii=False)
 
     async def _handle_download_error(self, task: Task, error: DownloaderError) -> None:
         """
@@ -751,6 +1089,7 @@ class DownloadWorker:
             status=TaskStatus.FAILED,
             error_code=error.error_code,
             error_message=error.message,
+            failure_details=self._build_failure_details(error),
         )
 
         # Record metrics: task failed
@@ -808,6 +1147,8 @@ class DownloadWorker:
                     f"using cached file"
                 )
                 # 直接使用缓存的字幕完成任务
+                # 归属列保持 None：reused_transcript=True 已表达"来自缓存"，
+                # 不写占位值（如 'cache'）
                 await self.db.update_task_completed(
                     task_id=task.id,
                     audio_file_id=None,
@@ -893,6 +1234,7 @@ class DownloadWorker:
                         transcript_file_id=transcript_file.id,
                         reused_audio=False,
                         reused_transcript=False,
+                        transcript_downloader=result.downloader,
                     )
 
                     # 发送完成通知
@@ -968,6 +1310,10 @@ class DownloadWorker:
                     transcript_file_id=result["transcript_file_id"],
                     reused_audio=result["reused_audio"],
                     reused_transcript=result["reused_transcript"],
+                    # "全部复用/无需下载"的早退路径不携带这两个 key，用 .get()
+                    # 兜底为 None，与 reused=True 场景的语义保持一致
+                    audio_downloader=result.get("audio_downloader"),
+                    transcript_downloader=result.get("transcript_downloader"),
                 )
                 return  # 成功，直接返回
             except Exception as e:
@@ -1086,19 +1432,40 @@ class DownloadWorker:
 
         # 全局熔断状态
         elif ban_level == IPBanLevel.FULLY_BANNED:
-            # 全局熔断更严格
-            min_wait = 3600 if task_type == "transcript_only" else 7200
+            # 全局熔断更严格：字幕任务用配置的基础等待时间，音频/混合任务用其
+            # FULL_BAN_AUDIO_MIN_WAIT_MULTIPLIER 倍。两者都来自
+            # settings.ip_ban_min_wait_before_retry，运维调
+            # IP_BAN_MIN_WAIT_BEFORE_RETRY 现在能同时影响这两个分支。
+            base_min_wait = self.settings.ip_ban_min_wait_before_retry
+            min_wait = (
+                base_min_wait
+                if task_type == "transcript_only"
+                else base_min_wait * FULL_BAN_AUDIO_MIN_WAIT_MULTIPLIER
+            )
 
             allowed, reason = self.ip_ban_breaker.should_allow_attempt(
                 task_type, min_wait_override=min_wait
             )
 
             if not allowed:
-                remaining = self.ip_ban_breaker.get_remaining_time()
+                # remaining 必须用与上面放行判定完全相同的 min_wait 口径计算，
+                # 否则会出现 get_remaining_time() 按熔断器默认 min_wait（可能小于
+                # 音频任务实际使用的 2 倍值）算出剩余时间，与真正决定"是否放行"
+                # 的 min_wait_override 互相错位——旧代码曾用
+                # max(remaining, min_wait) 掩盖这个错位，代价是哪怕探测窗口只剩
+                # 几分钟，也会把任务硬推迟整整一个 min_wait 窗口。这里改为把同一个
+                # min_wait 传给 get_remaining_time()，remaining 与放行判定共享
+                # 同一套时间基准，不再需要 max() 补丁。
+                remaining = self.ip_ban_breaker.get_remaining_time(
+                    min_wait_override=min_wait
+                )
+                # 小下限防止 remaining 边界归零但仍被拒绝时形成紧循环，详见
+                # MIN_DELAY_SECONDS_FLOOR 定义处的说明。
+                delay_seconds = max(remaining, MIN_DELAY_SECONDS_FLOOR)
                 return ExecutionDecision(
                     action="delay",
                     reason=f"Full IP ban active: {reason}",
-                    delay_seconds=max(remaining, min_wait),
+                    delay_seconds=delay_seconds,
                 )
 
             # 允许尝试
@@ -1115,25 +1482,55 @@ class DownloadWorker:
         return None
 
     async def _analyze_result_and_update_ban(
-        self, result: DownloaderResult, was_probe: bool, ban_level_before: IPBanLevel
+        self,
+        result: DownloaderResult,
+        was_probe: bool,
+        ban_level_before: IPBanLevel,
+        audio_requested: bool = True,
+        transcript_requested: bool = True,
     ) -> None:
         """
         分析下载结果，更新熔断状态（被动探测核心）。
 
         Args:
-            result: 下载结果
+            result: 下载结果（探测任务本次真正请求资源后拿到的首次结果，
+                见 _execute_download_with_manager 的 downloader_result 字段说明——
+                必须是"本次原始请求"的结果，不能是被 audio_fallback 二次下载覆盖后
+                的结果，否则会误判字幕探测状态）
             was_probe: 是否是探测尝试
             ban_level_before: 执行前的熔断级别
+            audio_requested: 本次是否真正向下载器请求了音频。False 表示任务本就
+                不需要音频，或音频已有缓存直接复用——这两种情况 result.audio_path
+                恒为 None，不代表"探测到音频仍然失败"，必须跳过音频熔断分析，
+                否则会把纯缓存命中误判为风控故障。
+            transcript_requested: 本次是否真正向下载器请求了字幕，语义同上，
+                用于全局熔断分析。
         """
         if ban_level_before == IPBanLevel.NORMAL or not was_probe:
             # 不是探测，或本来就是正常状态，无需分析
             return
 
+        # 注意：audio_success 不存在和 transcript_success 对称的"成功但无资源"
+        # 场景，不需要同样的修正。字幕是可选内容（视频可以没有原生字幕），三个
+        # 下载器（ytdlp/tikhub/cdp）在字幕缺失时都会成功返回 has_transcript=
+        # False 而不抛异常；音频则是必选内容，各下载器要么真正拿到 audio_path，
+        # 要么直接抛 DownloaderError（例如 tikhub_downloader.py 找不到音频直链
+        # 时的 raise），没有"请求成功但没有音频资源"的中间态，因此
+        # audio_path is not None 已经是准确的探测成功判定，不需要改动。
         audio_success = result.audio_path is not None
         transcript_success = result.transcript_path is not None
 
         # 音频熔断期间的探测
         if ban_level_before == IPBanLevel.AUDIO_BANNED:
+            if not audio_requested:
+                # 本次任务没有真正向下载器请求音频（缓存复用或任务本不需要），
+                # 无法据此判断音频熔断是否恢复，跳过分析（既不延长也不解除）。
+                logger.debug(
+                    "Probe task did not actually request audio this run "
+                    "(cache reuse or not needed), skipping audio-ban analysis"
+                )
+                return
+
             if audio_success:
                 # 音频恢复！
                 logger.info("🎉 Audio recovery detected! Lifting audio ban.")
@@ -1142,8 +1539,18 @@ class DownloadWorker:
                     "IP recovered: Audio downloads are now available"
                 )
 
-            elif result.partial_success and transcript_success:
-                # 字幕成功但音频仍失败
+            elif result.partial_success and (
+                transcript_success or result.has_transcript is False
+            ):
+                # 字幕请求成功但音频仍失败。和下面 FULLY_BANNED 分支的判定同理
+                # （P2 同类缺陷收尾，2026-07-11）：字幕"成功"不能只看
+                # transcript_path 是否非空——视频本身没有原生字幕时，ytdlp 的
+                # _download_with_partial_success 走"音频失败 -> 字幕降级成功"
+                # 路径，会成功返回 partial_success=True / transcript_path=None /
+                # has_transcript=False（不抛异常；音频字幕双失败路径必然抛
+                # DownloaderError，根本到不了这里）。字幕请求本身成功即证明
+                # 字幕侧没被封禁，只应维持/延长音频熔断，绝不能被误判为
+                # "音频字幕双失败"而错误升级到全局熔断。
                 logger.info("Transcript OK but audio still banned, continuing audio ban")
                 await self.ip_ban_breaker.extend_audio_ban()
 
@@ -1154,7 +1561,39 @@ class DownloadWorker:
 
         # 全局熔断期间的探测
         elif ban_level_before == IPBanLevel.FULLY_BANNED:
-            if transcript_success:
+            if not transcript_requested:
+                # 本次任务没有真正向下载器请求字幕（缓存复用或任务本不需要），
+                # 无法据此判断全局熔断是否恢复，跳过分析。
+                #
+                # 取舍说明（P2 修复顺带评估，2026-07-11）：如果这是一个纯音频
+                # 探测任务（transcript_requested=False），即使 audio_success 为
+                # True，这里也不会做任何降级——ip_ban_breaker 没有"FULLY_BANNED
+                # 期间音频探测成功"对应的干净降级路径（现有分级语义里，
+                # FULLY_BANNED 只能通过字幕探测成功降级到 AUDIO_BANNED，见
+                # downgrade_to_audio_ban；音频和字幕是两条独立探测的资源，音频
+                # 恢复不能反推字幕也已解封，硬造一个"音频探测成功直接降级"的
+                # 路径会破坏这套语义）。保守起见维持现状：不处理，等待字幕探测
+                # 覆盖这个视频。下面对 transcript_success 的判定修复后，字幕探测
+                # 的成功率已经修正回真实值，这条恢复通路不再被"无字幕视频"误判
+                # 堵死，因此没有为音频探测单独新增路径的必要。
+                logger.debug(
+                    "Probe task did not actually request transcript this run "
+                    "(cache reuse or not needed), skipping full-ban analysis"
+                )
+                return
+
+            # 探测"成功"不能只看 transcript_path 是否非空：视频本身没有原生
+            # 字幕时，下载器会成功返回 transcript_path=None、has_transcript=
+            # False（不抛异常，见 ytdlp_downloader.py 的
+            # _download_simple/_download_with_partial_success 以及
+            # tikhub_downloader.py 的同等分支）——这同样证明本次请求没有被
+            # 封禁，是和"真正拿到字幕"同等有效的恢复信号。如果仍然只按
+            # transcript_success 判定，无字幕视频（真实流量中很常见）每命中一次
+            # 就会被误判为"探测仍失败"，把 banned_at 重置延长一小时，导致 IP
+            # 早已恢复也走不出熔断（P2，独立 gate 审查复现）。
+            transcript_probe_succeeded = transcript_success or result.has_transcript is False
+
+            if transcript_probe_succeeded:
                 # 字幕恢复，降级到音频熔断
                 logger.info("📉 Transcript recovered, downgrading to audio ban")
                 await self.ip_ban_breaker.downgrade_to_audio_ban()

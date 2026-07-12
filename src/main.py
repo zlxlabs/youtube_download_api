@@ -27,6 +27,7 @@ from src.api.manual_upload_routes import set_manual_upload_service
 from src.api.video_resource_routes import router as video_resource_router
 from src.api.video_resource_routes import set_file_service as set_vr_file_service
 from src.api.settings_routes import router as settings_router
+from src.api.stats_routes import router as stats_router
 from src.api.video_info_routes import router as video_info_router
 from src.api.video_info_routes import set_services as set_video_info_services
 from src.api.schemas import ComponentStatus, HealthResponse, QueueStatus
@@ -130,12 +131,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Initialize services with error handling
     try:
         file_service = FileService(db, settings)
-        task_service = TaskService(db, settings, file_service)
-        callback_service = CallbackService(db, file_service)
-        notify_service = NotificationService(settings, db)
-
-        # 初始化下载器管理器（用于元数据获取和下载）
+        # 全局唯一的下载器管理器实例（用于元数据获取和下载）。
+        # 必须在此处创建一次，后续统一注入给 Worker、通知服务、视频信息
+        # 路由、人工上传服务，避免出现多份互相独立的熔断器/统计状态；
+        # TaskService 的前置检查（precheck）也复用这同一条带缓存的元数据获取路径。
         downloader_manager = DownloaderManager(settings, db)
+        notify_service = NotificationService(settings, db, downloader_manager)
+
+        task_service = TaskService(
+            db, settings, file_service, downloader_manager=downloader_manager
+        )
+        callback_service = CallbackService(db, file_service)
 
         if settings.manual_upload_enabled:
             transcode_service = TranscodeService()
@@ -159,6 +165,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         set_manual_upload_service(manual_upload_service)
 
     # Initialize download worker
+    # 注入全局唯一的 downloader_manager，确保 Worker 实际下载所用的熔断器/
+    # 统计状态与 API 路由、通知服务看到的完全一致（不再各自持有一份）。
     download_worker = DownloadWorker(
         db=db,
         settings=settings,
@@ -167,10 +175,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         callback_service=callback_service,
         notify_service=notify_service,
         metrics_collector=metrics_collector,
+        downloader_manager=downloader_manager,
     )
-
-    # Link downloader manager to notification service (for stats in notifications)
-    notify_service.downloader_manager = download_worker.downloader_manager
 
     # Restore pending tasks to queue
     await task_service.restore_pending_tasks()
@@ -183,6 +189,23 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     #     for _ in range(settings.download_concurrency)
     # ]
     # 注意：多 worker 需要共享同一个 task_queue，并考虑风控风险
+    # 在启动 worker 后台循环之前，先同步完成一次 IP 熔断状态恢复。
+    #
+    # 背景：download_worker.start() 是通过 asyncio.create_task() 异步调度
+    # 的；它与下面的 await notify_service.notify_startup(...) 之间没有任何
+    # 真正让出事件循环的 await 点（scheduler.start() 是同步调用，
+    # notify_startup 内部也全是同步操作）——如果恢复逻辑仍然只在 start()
+    # 内部触发，start() 的任务循环根本没机会先跑完恢复动作，
+    # notify_startup 读到的会是 IPBanCircuitBreaker.__init__ 的初始值
+    # NORMAL，而不是持久化恢复后的真实状态。这是确定性 bug，不是偶发竞态。
+    #
+    # 这里显式 await 调用幂等的 restore_persisted_state()，确保恢复动作
+    # 严格发生在 worker 循环启动、以及下面读取熔断器状态发送 startup 通知
+    # 之前；start() 内部保留的兜底调用因为幂等保护，不会重复触发
+    # ip_ban_history 表里的 "restored" 记录。
+    if download_worker:
+        await download_worker.restore_persisted_state()
+
     worker_task = asyncio.create_task(download_worker.start())
 
     # Setup scheduler for periodic tasks
@@ -333,6 +356,7 @@ app.include_router(api_router)
 app.include_router(video_resource_router)
 app.include_router(video_info_router)
 app.include_router(settings_router)
+app.include_router(stats_router)
 
 # Include manual upload routes and admin UI when enabled
 if get_settings().manual_upload_enabled:

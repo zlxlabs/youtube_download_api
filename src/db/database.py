@@ -8,13 +8,15 @@ Architecture: Video -> Files <- Task (video owns files, tasks reference files)
 import json
 import sqlite3
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
 
 import aiosqlite
 
+from src.core.ip_ban_models import IPBanLevel
 from src.db.models import (
+    CONTENT_LEVEL_ERROR_CODES,
     CallbackStatus,
     ErrorCode,
     FileRecord,
@@ -200,6 +202,21 @@ class Database:
                 )
                 logger.info("Migration: Added 'failure_details' column to tasks table")
 
+            # Migration 4/5: Add downloader attribution columns
+            # 记录音频/字幕分别由哪个下载器最终产出，用于失败归因统计
+            # （此前只能翻日志才能回答"哪个下载器完成的下载"）。NULL 表示未知/历史数据。
+            if "audio_downloader" not in column_names:
+                await self.execute(
+                    "ALTER TABLE tasks ADD COLUMN audio_downloader TEXT"
+                )
+                logger.info("Migration: Added 'audio_downloader' column to tasks table")
+
+            if "transcript_downloader" not in column_names:
+                await self.execute(
+                    "ALTER TABLE tasks ADD COLUMN transcript_downloader TEXT"
+                )
+                logger.info("Migration: Added 'transcript_downloader' column to tasks table")
+
         # Check if files table exists for manual upload migrations
         cursor = await self.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='files'"
@@ -233,6 +250,29 @@ class Database:
                 """
             )
 
+        # Migration 4: Add event_type column to ip_ban_history (existing table
+        # created before IP ban persistence feature landed only had episode-style
+        # columns; event_type turns it into an append-only event log so
+        # append_ip_ban_history can distinguish triggered/upgraded/downgraded/
+        # recovered/restored events without overloading unrelated columns).
+        cursor = await self.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='ip_ban_history'"
+        )
+        ip_ban_history_exists = await cursor.fetchone()
+
+        if ip_ban_history_exists:
+            cursor = await self.execute("PRAGMA table_info(ip_ban_history)")
+            columns = await cursor.fetchall()
+            column_names = {col["name"] for col in columns}
+
+            if "event_type" not in column_names:
+                await self.execute(
+                    "ALTER TABLE ip_ban_history ADD COLUMN event_type TEXT NOT NULL DEFAULT 'triggered'"
+                )
+                logger.info(
+                    "Migration: Added 'event_type' column to ip_ban_history table"
+                )
+
         # Create IP ban tables if not exist
         await self._create_ip_ban_tables()
 
@@ -256,10 +296,12 @@ class Database:
             VALUES (1, 'normal')
         """)
 
-        # IP ban history table
+        # IP ban history table（追加写入的事件日志：每次触发/升级/降级/恢复/
+        # 启动恢复都插入一条新记录，而不是原地更新一条"熔断episode"记录）
         await self.execute("""
             CREATE TABLE IF NOT EXISTS ip_ban_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL DEFAULT 'triggered',
                 ban_level TEXT NOT NULL,
                 trigger_source TEXT,
                 trigger_task_id TEXT,
@@ -336,6 +378,8 @@ class Database:
                     transcript_file_id TEXT,
                     reused_audio INTEGER DEFAULT 0,
                     reused_transcript INTEGER DEFAULT 0,
+                    audio_downloader TEXT,
+                    transcript_downloader TEXT,
                     callback_url TEXT,
                     callback_secret TEXT,
                     callback_status TEXT,
@@ -343,6 +387,8 @@ class Database:
                     error_code TEXT,
                     error_message TEXT,
                     retry_count INTEGER DEFAULT 0,
+                    partial_success INTEGER DEFAULT 0,
+                    failure_details TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     started_at TIMESTAMP,
                     completed_at TIMESTAMP,
@@ -911,7 +957,11 @@ class Database:
 
     async def get_active_task_by_video(self, video_id: str) -> Optional[Task]:
         """
-        Find active (pending/downloading) task by video ID.
+        Find the most recent active (pending/downloading) task by video ID.
+
+        注意：同一视频允许存在多条活跃任务（如先建了一个 audio 任务，后来又建了一个
+        transcript 任务），本方法只返回最新一条。需要遍历全部活跃任务做覆盖判断的
+        场景（如 TaskService 的去重覆盖校验），请用 get_active_tasks_by_video。
 
         Args:
             video_id: YouTube video ID.
@@ -930,6 +980,32 @@ class Database:
         )
         row = await cursor.fetchone()
         return self._row_to_task(row) if row else None
+
+    async def get_active_tasks_by_video(self, video_id: str) -> list[Task]:
+        """
+        Find all active (pending/downloading) tasks by video ID.
+
+        与 get_active_task_by_video 的区别：后者只返回最新一条，可能漏掉更早创建、
+        仍在跑但请求范围不同的活跃任务（例如旧的 audio-only 任务 + 新的
+        transcript-only 任务同时活跃时，只看最新一条会让覆盖判断出现假阴性，
+        导致重复创建任务）。调用方需要遍历全部活跃任务做覆盖判断时应使用本方法。
+
+        Args:
+            video_id: YouTube video ID.
+
+        Returns:
+            按创建时间倒序排列的活跃任务列表，没有则返回空列表。
+        """
+        cursor = await self.execute(
+            """
+            SELECT * FROM tasks
+            WHERE video_id = ? AND status IN ('pending', 'downloading')
+            ORDER BY created_at DESC
+            """,
+            (video_id,),
+        )
+        rows = await cursor.fetchall()
+        return [self._row_to_task(row) for row in rows]
 
     async def list_tasks(
         self,
@@ -1006,12 +1082,18 @@ class Database:
         logger.debug(f"Listed {len(tasks)} tasks (total: {total}, filters: status={status}, search={search})")
         return tasks, total
 
-    async def get_pending_tasks(self, limit: int = 10) -> list[Task]:
+    async def get_pending_tasks(self, limit: int = 10, offset: int = 0) -> list[Task]:
         """
         Get pending tasks ordered by creation time.
 
+        offset 参数用于分批拉取（配合 TaskService.restore_pending_tasks 分页
+        恢复全部 pending 任务，避免单次查询硬编码上限导致堆积任务被静默丢弃）。
+        ORDER BY 追加 id 作为次级排序键，保证 created_at 相同时跨页结果依然
+        稳定、不重复、不遗漏。
+
         Args:
             limit: Maximum number of tasks to return.
+            offset: Number of tasks to skip（用于分页）。
 
         Returns:
             List of pending tasks.
@@ -1020,10 +1102,10 @@ class Database:
             """
             SELECT * FROM tasks
             WHERE status = 'pending'
-            ORDER BY created_at ASC
-            LIMIT ?
+            ORDER BY created_at ASC, id ASC
+            LIMIT ? OFFSET ?
             """,
-            (limit,),
+            (limit, offset),
         )
         rows = await cursor.fetchall()
         return [self._row_to_task(row) for row in rows]
@@ -1034,6 +1116,7 @@ class Database:
         status: TaskStatus,
         error_code: Optional[ErrorCode] = None,
         error_message: Optional[str] = None,
+        failure_details: Optional[str] = None,
     ) -> None:
         """
         Update task status.
@@ -1043,6 +1126,9 @@ class Database:
             status: New status.
             error_code: Error code if failed.
             error_message: Error message if failed.
+            failure_details: 失败归因详情（JSON 字符串），记录降级链中每个下载器的
+                尝试结果（下载器名/error_code/message）。仅在 status=FAILED 时写入，
+                其他状态传入会被忽略。
         """
         now = datetime.now(timezone.utc)
 
@@ -1061,13 +1147,15 @@ class Database:
                 await self.execute(
                     """
                     UPDATE tasks
-                    SET status = ?, error_code = ?, error_message = ?, completed_at = ?
+                    SET status = ?, error_code = ?, error_message = ?,
+                        failure_details = ?, completed_at = ?
                     WHERE id = ?
                     """,
                     (
                         status.value,
                         error_code.value if error_code else None,
                         error_message,
+                        failure_details,
                         now,
                         task_id,
                     ),
@@ -1087,6 +1175,8 @@ class Database:
         transcript_file_id: Optional[str] = None,
         reused_audio: bool = False,
         reused_transcript: bool = False,
+        audio_downloader: Optional[str] = None,
+        transcript_downloader: Optional[str] = None,
     ) -> None:
         """
         Update task as completed with file references.
@@ -1097,6 +1187,9 @@ class Database:
             transcript_file_id: Transcript file UUID (may be None).
             reused_audio: Whether audio file was reused.
             reused_transcript: Whether transcript file was reused.
+            audio_downloader: 产出音频文件的下载器名称（复用缓存时应为 None，
+                由 reused_audio 标志表达来源，不写占位值）。
+            transcript_downloader: 产出字幕文件的下载器名称（同上）。
         """
         now = datetime.now(timezone.utc)
 
@@ -1105,7 +1198,9 @@ class Database:
                 """
                 UPDATE tasks
                 SET status = ?, audio_file_id = ?, transcript_file_id = ?,
-                    reused_audio = ?, reused_transcript = ?, completed_at = ?
+                    reused_audio = ?, reused_transcript = ?,
+                    audio_downloader = ?, transcript_downloader = ?,
+                    completed_at = ?
                 WHERE id = ?
                 """,
                 (
@@ -1114,6 +1209,8 @@ class Database:
                     transcript_file_id,
                     1 if reused_audio else 0,
                     1 if reused_transcript else 0,
+                    audio_downloader,
+                    transcript_downloader,
                     now,
                     task_id,
                 ),
@@ -1343,6 +1440,395 @@ class Database:
 
         return stats
 
+    async def get_download_stats(self, days: int = 30) -> dict[str, Any]:
+        """
+        获取下载失败归因统计（供 GET /api/v1/stats/downloads 端点使用）。
+
+        聚合最近 N 天的任务数据：状态分布、失败 error_code 分布、
+        内容级（视频客观状态导致，见 CONTENT_LEVEL_ERROR_CODES）vs 系统级
+        失败拆分、音频/字幕下载器归属分布、按周（自然周，非严格 ISO 8601 周）
+        的完成/失败趋势。全部通过 SQL GROUP BY 聚合，不在 Python 中遍历全表，
+        避免任务量增长后端点变慢。
+
+        Args:
+            days: 统计时间窗口（天数）。
+
+        Returns:
+            聚合结果字典，字段：total / by_status / failures_by_error_code /
+            failure_split / by_downloader / weekly_trend。
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+
+        # 1. 状态分布 + 总数
+        status_cursor = await self.execute(
+            """
+            SELECT status, COUNT(*) as count
+            FROM tasks
+            WHERE created_at >= ?
+            GROUP BY status
+            """,
+            (cutoff,),
+        )
+        status_rows = await status_cursor.fetchall()
+        by_status: dict[str, int] = {row["status"]: row["count"] for row in status_rows}
+        total = sum(by_status.values())
+
+        # 2. 失败任务按 error_code 分布。
+        # error_code 为 NULL（如任务级超时兜底路径等未及写入 error_code 就落库的
+        # 失败任务）不能被过滤掉，否则 failures_by_error_code 总和会小于
+        # by_status["failed"]，下面的 failure_split 比率也会失真。用 COALESCE
+        # 统一归入 "unknown" 桶，与 by_downloader 对 NULL 的处理方式保持一致。
+        error_cursor = await self.execute(
+            """
+            SELECT COALESCE(error_code, 'unknown') as error_code, COUNT(*) as count
+            FROM tasks
+            WHERE created_at >= ? AND status = 'failed'
+            GROUP BY error_code
+            """,
+            (cutoff,),
+        )
+        error_rows = await error_cursor.fetchall()
+        failures_by_error_code: dict[str, int] = {
+            row["error_code"]: row["count"] for row in error_rows
+        }
+
+        # 3. 失败归因拆分：内容级（error_code 属于 CONTENT_LEVEL_ERROR_CODES，
+        #    由视频自身客观状态导致：不存在/私有/直播/年龄限制，无法通过重试/
+        #    换下载器解决）vs 系统级（其余 error_code，含下载器/网络/风控等，
+        #    理论上可通过技术手段改善）。
+        #
+        #    分类必须以 CONTENT_LEVEL_ERROR_CODES 这个集合为唯一事实来源，不能
+        #    用 error_code 是否以 "VIDEO_" 开头做字符串前缀判断——VIDEO_REGION_
+        #    BLOCKED（地区限制）虽是 VIDEO_ 前缀，但语义上是"下载器/出口位置相关"
+        #    错误而非视频客观状态，已被排除在 CONTENT_LEVEL_ERROR_CODES 之外
+        #    （见该常量定义处注释、外部 review 第14轮问题1）；若仍按前缀判断，会把
+        #    地区限制误计入 content_level，在遇到地区限制的部署里让比率失真。
+        #
+        #    "unknown"（原 error_code 为 NULL）不在 CONTENT_LEVEL_ERROR_CODES 中，
+        #    归入系统级——这保证了不变式
+        #    content_level + system_level == by_status["failed"]。
+        #
+        #    这里 code 是 SQL 侧 COALESCE 出来的纯字符串（如 "VIDEO_PRIVATE"），
+        #    CONTENT_LEVEL_ERROR_CODES 是 ErrorCode（str 混入的 Enum）成员的
+        #    frozenset；str 混入 Enum 的哈希/相等性与其字符串值一致，因此
+        #    `code in CONTENT_LEVEL_ERROR_CODES` 无需先转换成 .value 即可正确
+        #    比较，不引入循环导入（该常量定义于 src.db.models，与本文件同层）。
+        content_level = sum(
+            count
+            for code, count in failures_by_error_code.items()
+            if code in CONTENT_LEVEL_ERROR_CODES
+        )
+        system_level = sum(
+            count
+            for code, count in failures_by_error_code.items()
+            if code not in CONTENT_LEVEL_ERROR_CODES
+        )
+        total_failures = content_level + system_level
+        failure_split = {
+            "content_level": content_level,
+            "system_level": system_level,
+            "content_level_ratio": (content_level / total_failures) if total_failures else 0.0,
+            "system_level_ratio": (system_level / total_failures) if total_failures else 0.0,
+        }
+
+        # 4. 音频/字幕下载器归属分布（NULL 归为 'unknown'：未知/历史数据/复用缓存未下载）
+        audio_downloader_cursor = await self.execute(
+            """
+            SELECT COALESCE(audio_downloader, 'unknown') as downloader, COUNT(*) as count
+            FROM tasks
+            WHERE created_at >= ?
+            GROUP BY downloader
+            """,
+            (cutoff,),
+        )
+        audio_downloader_rows = await audio_downloader_cursor.fetchall()
+        audio_downloader_dist: dict[str, int] = {
+            row["downloader"]: row["count"] for row in audio_downloader_rows
+        }
+
+        transcript_downloader_cursor = await self.execute(
+            """
+            SELECT COALESCE(transcript_downloader, 'unknown') as downloader, COUNT(*) as count
+            FROM tasks
+            WHERE created_at >= ?
+            GROUP BY downloader
+            """,
+            (cutoff,),
+        )
+        transcript_downloader_rows = await transcript_downloader_cursor.fetchall()
+        transcript_downloader_dist: dict[str, int] = {
+            row["downloader"]: row["count"] for row in transcript_downloader_rows
+        }
+
+        by_downloader = {
+            "audio_downloader": audio_downloader_dist,
+            "transcript_downloader": transcript_downloader_dist,
+        }
+
+        # 5. 按周统计完成/失败趋势
+        # 用 %Y-W%W（公历年 + 周一起始的年内周序，00-53）拼出周标签，如 "2026-W27"。
+        # 不用 strftime('%G-W%V', ...)（ISO 8601 年份+周号）：%G/%V 是 SQLite
+        # 3.46.0（2024-05）才加入的，本地/生产环境的 SQLite（含 Debian bookworm
+        # 上 python:3.11-slim 自带的 3.40.1）都更旧，遇到不支持的格式码
+        # strftime 直接返回 NULL，GROUP BY 会把所有行并成一个 {None: ...} 桶，
+        # 统计整体失真。%Y/%W 是 SQLite 从最早版本就支持的格式码，牺牲的是
+        # 严格 ISO 周语义：年末/年初几天可能出现"日期属于上一/下一个 ISO 周"
+        # 但这里仍按公历年份分桶的情况，跨年边界的周标签可能与真正的 ISO
+        # 8601 周号不完全一致，属已知折衷（换取版本兼容性）。
+        weekly_cursor = await self.execute(
+            """
+            SELECT strftime('%Y', created_at) || '-W' || strftime('%W', created_at)
+                   as week,
+                   status, COUNT(*) as count
+            FROM tasks
+            WHERE created_at >= ? AND status IN ('completed', 'failed')
+            GROUP BY week, status
+            ORDER BY week
+            """,
+            (cutoff,),
+        )
+        weekly_rows = await weekly_cursor.fetchall()
+        weekly_map: dict[str, dict[str, int]] = {}
+        for row in weekly_rows:
+            week = row["week"]
+            weekly_map.setdefault(week, {"completed": 0, "failed": 0})
+            weekly_map[week][row["status"]] = row["count"]
+
+        weekly_trend = [
+            {"week": week, "completed": counts["completed"], "failed": counts["failed"]}
+            for week, counts in sorted(weekly_map.items())
+        ]
+
+        return {
+            "total": total,
+            "by_status": by_status,
+            "failures_by_error_code": failures_by_error_code,
+            "failure_split": failure_split,
+            "by_downloader": by_downloader,
+            "weekly_trend": weekly_trend,
+        }
+
+    # ==================== IP Ban Persistence Operations ====================
+    # 为 IPBanCircuitBreaker（src/core/ip_ban_breaker.py，被动探测型三级熔断器）
+    # 提供状态持久化。背景：熔断器状态完全在内存，D3 自动部署每次 push 到 main
+    # 都会重启容器，重启后如果不恢复，服务会误判为 NORMAL 全速请求 YouTube，
+    # 加重封禁。这里的方法只负责读写，何时调用由 worker.py 的回调/启动恢复
+    # 流程决定，Database 本身不感知熔断器的业务语义。
+
+    # -------------------- naive 本地时间 <-> aware UTC 转换 --------------------
+    # 收敛点：IPBanCircuitBreaker 内部全程使用 naive 本地时间（不带时区的
+    # datetime.now()）做时间运算，这是熔断器既有约定，本次修复不改动 breaker
+    # 内部实现。但本文件顶部注册的全局 sqlite3 datetime 适配器
+    # _adapt_datetime_iso 会把任何"没有时区信息的 naive datetime"一律当作
+    # UTC 直接写入——如果把 breaker 的 naive 本地时间原样传给 execute()，
+    # 生产环境 TZ=Asia/Shanghai 下，18:00 本地触发的熔断会被误存成 18:00Z
+    # （实际应为 10:00Z），ip_ban_status/ip_ban_history 的绝对时间全部偏
+    # 8 小时；一旦部署时区变化，历史数据的偏移量还会跟着漂移、无法订正。
+    # 下面这对私有辅助函数把"breaker 的 naive-local 约定"与"全局适配器的
+    # naive-视为-UTC 约定"之间的转换收敛到一处，save_ip_ban_state /
+    # append_ip_ban_history（写入路径）与 load_ip_ban_state（读取路径）
+    # 分别调用，其余落库逻辑不需要感知这个历史背景。
+
+    @staticmethod
+    def _local_naive_to_utc(dt: Optional[datetime]) -> Optional[datetime]:
+        """
+        把 breaker 产出的 naive 本地 datetime 转换成 aware UTC datetime。
+
+        Python 的 datetime.astimezone() 对 naive 输入有特殊处理：会先把它
+        当作"系统本地时区"表达的时间来解释，再转换到目标时区（见官方
+        文档），因此 dt.astimezone(timezone.utc) 一步就能正确完成
+        "naive 本地 -> aware UTC" 的转换；对已经带时区的 aware 输入，同一行
+        代码也能正确转换到 UTC（不会重复按本地时区解释一次），因此不需要
+        区分 naive/aware 两种分支。
+
+        Args:
+            dt: breaker 产出的 naive 本地 datetime（或已是 aware 的
+                datetime），None 原样返回
+
+        Returns:
+            aware UTC datetime，None 原样返回
+        """
+        if dt is None:
+            return None
+        return dt.astimezone(timezone.utc)
+
+    @staticmethod
+    def _utc_to_local_naive(dt: Optional[datetime]) -> Optional[datetime]:
+        """
+        把数据库读出的 aware UTC datetime 转换成 breaker 期望的 naive 本地
+        时间，与 _local_naive_to_utc 互为逆操作。
+
+        dt.astimezone()（不传参数）把 aware datetime 转换到当前进程的
+        系统本地时区，随后 replace(tzinfo=None) 去掉时区信息还原成 naive，
+        使其能与 breaker 内部的 datetime.now() 直接做减法等运算，而不会
+        因为 naive/aware 混用抛异常。
+
+        Args:
+            dt: 数据库读出的 aware UTC datetime（全局 TIMESTAMP 转换器
+                _convert_timestamp 保证返回 aware UTC），None 原样返回
+
+        Returns:
+            naive 本地 datetime，None 原样返回
+        """
+        if dt is None:
+            return None
+        return dt.astimezone().replace(tzinfo=None)
+
+    async def save_ip_ban_state(
+        self,
+        current_level: IPBanLevel,
+        banned_at: Optional[datetime],
+        last_attempt_at: Optional[datetime],
+        failed_attempts: int,
+    ) -> None:
+        """
+        持久化 IP 熔断器当前状态（upsert 单行表 ip_ban_status，id 恒为 1）。
+
+        通常由 IPBanCircuitBreaker 的 on_state_change 回调驱动，在每次状态
+        变更（触发/升级/降级/恢复/延长/启动恢复）后调用。
+
+        Note:
+            banned_at / last_attempt_at 应传入 IPBanCircuitBreaker 内部使用的
+            naive datetime（datetime.now()，代表系统本地时间）。本方法在写入
+            前会先用 _local_naive_to_utc 转换成真正的 aware UTC datetime 再落库
+            （外部 review 第13轮问题3：不能让 naive 值被全局适配器误当 UTC
+            直接写入，否则非 UTC 时区部署下存储的绝对时间会整体偏移），
+            读取时 load_ip_ban_state 用 _utc_to_local_naive 转换回 naive，
+            与 breaker 内部的时间运算保持兼容。
+
+        Args:
+            current_level: 当前熔断级别
+            banned_at: 熔断触发时间（NORMAL 时为 None）
+            last_attempt_at: 最近一次（被动探测）尝试时间
+            failed_attempts: 熔断期间失败尝试次数
+        """
+        now = datetime.now(timezone.utc)
+
+        async with self.transaction():
+            await self.execute(
+                """
+                INSERT INTO ip_ban_status (
+                    id, current_level, banned_at, last_attempt_at,
+                    failed_attempts, updated_at
+                ) VALUES (1, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    current_level = excluded.current_level,
+                    banned_at = excluded.banned_at,
+                    last_attempt_at = excluded.last_attempt_at,
+                    failed_attempts = excluded.failed_attempts,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    current_level.value,
+                    self._local_naive_to_utc(banned_at),
+                    self._local_naive_to_utc(last_attempt_at),
+                    failed_attempts,
+                    now,
+                ),
+            )
+
+        logger.debug(
+            f"IP ban state persisted: level={current_level.value}, "
+            f"failed_attempts={failed_attempts}"
+        )
+
+    async def load_ip_ban_state(self) -> Optional[dict[str, Any]]:
+        """
+        读取持久化的 IP 熔断器状态（服务启动时调用，用于恢复熔断状态）。
+
+        Returns:
+            字典，包含：
+            - current_level (IPBanLevel): 当前熔断级别
+            - banned_at (Optional[datetime]): 熔断触发时间（naive 本地时间，
+              见 _utc_to_local_naive）
+            - last_attempt_at (Optional[datetime]): 最近一次尝试时间（同上）
+            - failed_attempts (int): 熔断期间失败尝试次数
+
+            单行表记录不存在时返回 None（正常情况下建表逻辑会预置一条
+            current_level='normal' 的种子行，只有该行被手动删除等异常场景
+            才会出现 None；调用方对 None 与 NORMAL 应做相同处理：不恢复）。
+        """
+        cursor = await self.execute(
+            "SELECT current_level, banned_at, last_attempt_at, failed_attempts "
+            "FROM ip_ban_status WHERE id = 1"
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+
+        return {
+            "current_level": IPBanLevel(row["current_level"]),
+            "banned_at": self._utc_to_local_naive(row["banned_at"]),
+            "last_attempt_at": self._utc_to_local_naive(row["last_attempt_at"]),
+            "failed_attempts": row["failed_attempts"] or 0,
+        }
+
+    async def append_ip_ban_history(
+        self,
+        event_type: str,
+        ban_level: str,
+        trigger_source: Optional[str] = None,
+        trigger_task_id: Optional[str] = None,
+        trigger_downloader: Optional[str] = None,
+        trigger_error: Optional[str] = None,
+        banned_at: Optional[datetime] = None,
+        recovered_at: Optional[datetime] = None,
+        duration_seconds: Optional[int] = None,
+        probe_count: int = 0,
+        recovery_method: Optional[str] = None,
+    ) -> None:
+        """
+        追加一条 IP 熔断历史事件记录（append-only 事件日志，不更新已有记录）。
+
+        Args:
+            event_type: 事件类型 -- triggered(触发) | upgraded(升级) |
+                downgraded(降级) | recovered(恢复正常) | restored(启动时从
+                持久化恢复)
+            ban_level: 事件发生后的熔断级别（IPBanLevel.value）
+            trigger_source: 触发来源（如 'audio' | 'transcript' | 'mixed'），可选
+            trigger_task_id: 触发事件的任务 ID，可选
+            trigger_downloader: 触发事件的下载器名称，可选
+            trigger_error: 触发原因/错误描述，可选
+            banned_at: 本次事件对应的熔断开始时间（IPBanCircuitBreaker 产出的
+                naive 本地时间）；未提供时使用当前时间（已是 aware UTC）
+            recovered_at: 恢复时间（通常仅 recovered 事件填写；调用方可能传入
+                naive 本地时间，也可能已经是 aware UTC——见 _local_naive_to_utc
+                对两种输入的统一处理）
+            duration_seconds: 本次熔断持续时长（秒），可选
+            probe_count: 探测次数，默认 0
+            recovery_method: 恢复方式（如 'auto_probe' | 'restored'），可选
+        """
+        now = datetime.now(timezone.utc)
+
+        # banned_at/recovered_at 可能来自 IPBanCircuitBreaker 的 naive 本地
+        # datetime（既有约定），落库前统一转换成 aware UTC（外部 review
+        # 第13轮问题3），避免被全局适配器误当 UTC 直接写入。
+        async with self.transaction():
+            await self.execute(
+                """
+                INSERT INTO ip_ban_history (
+                    event_type, ban_level, trigger_source, trigger_task_id,
+                    trigger_downloader, trigger_error, banned_at, recovered_at,
+                    duration_seconds, probe_count, recovery_method
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event_type,
+                    ban_level,
+                    trigger_source,
+                    trigger_task_id,
+                    trigger_downloader,
+                    trigger_error,
+                    self._local_naive_to_utc(banned_at) or now,
+                    self._local_naive_to_utc(recovered_at),
+                    duration_seconds,
+                    probe_count,
+                    recovery_method,
+                ),
+            )
+
+        logger.info(f"IP ban history recorded: event={event_type}, level={ban_level}")
+
     # ==================== Helper Methods ====================
 
     def _row_to_video_resource(self, row: aiosqlite.Row) -> VideoResource:
@@ -1378,6 +1864,8 @@ class Database:
             transcript_file_id=row["transcript_file_id"],
             reused_audio=bool(row["reused_audio"]),
             reused_transcript=bool(row["reused_transcript"]),
+            audio_downloader=row["audio_downloader"],
+            transcript_downloader=row["transcript_downloader"],
             callback_url=row["callback_url"],
             callback_secret=row["callback_secret"],
             callback_status=CallbackStatus(row["callback_status"])
@@ -1387,6 +1875,8 @@ class Database:
             error_code=ErrorCode(row["error_code"]) if row["error_code"] else None,
             error_message=row["error_message"],
             retry_count=row["retry_count"] or 0,
+            partial_success=bool(row["partial_success"]),
+            failure_details=row["failure_details"],
             created_at=row["created_at"],
             started_at=row["started_at"],
             completed_at=row["completed_at"],

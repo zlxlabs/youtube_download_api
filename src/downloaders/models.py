@@ -9,6 +9,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 
+from src.db.models import CONTENT_LEVEL_ERROR_CODES, ErrorCode
+
 
 class DownloaderType(str, Enum):
     """下载器类型枚举。"""
@@ -17,6 +19,15 @@ class DownloaderType(str, Enum):
     YTDLP = "ytdlp"
     TIKHUB = "tikhub"
     YOUTUBE_DATA_API = "youtube_data_api"
+
+
+# CONTENT_LEVEL_ERROR_CODES 的定义现位于 src.db.models（ErrorCode 枚举本身所在的
+# 无下游依赖叶子模块），因为 src.db.database（数据库聚合层，failure_split 字段的
+# 分类逻辑）也需要引用同一个集合，而 db 层不应反向依赖 downloaders 层。这里通过
+# import 保留同名模块属性，`from src.downloaders.models import
+# CONTENT_LEVEL_ERROR_CODES` 的既有引用（manager.py、各下载器实现、测试等）不受
+# 影响。完整的语义注释（内容级终态错误的定义、VIDEO_REGION_BLOCKED 为何排除在外）
+# 见 src.db.models.CONTENT_LEVEL_ERROR_CODES 的定义处。
 
 
 @dataclass

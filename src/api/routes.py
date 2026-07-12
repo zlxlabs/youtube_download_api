@@ -19,10 +19,11 @@ from src.api.schemas import (
     ErrorResponse,
     TaskListResponse,
     TaskResponse,
+    VideoNotDownloadableErrorResponse,
 )
 from src.db.models import TaskStatus
 from src.services.file_service import FileService, FileOperationError
-from src.services.task_service import TaskService
+from src.services.task_service import TaskService, VideoNotDownloadableError
 from src.utils.helpers import sanitize_filename
 from src.utils.logger import logger
 
@@ -79,6 +80,18 @@ FileServiceDep = Annotated[FileService, Depends(get_file_service)]
         400: {"model": ErrorResponse, "description": "Invalid request"},
         401: {"model": ErrorResponse, "description": "Unauthorized"},
         403: {"model": ErrorResponse, "description": "Forbidden"},
+        422: {
+            # 422 在这个端点有两个互不相关的触发源，body 形态不同：
+            # 1. precheck 判定视频不可下载：{"detail": {error_code, message, video_id}}
+            # 2. 请求体本身未通过 FastAPI/pydantic 校验：{"detail": [{loc, msg, type}, ...]}
+            # VideoNotDownloadableErrorResponse.detail 已声明为两者的 Union
+            # （渲染成 OpenAPI anyOf），使生成的文档/客户端代码覆盖两种实际
+            # 可能收到的响应体，而不是只按其中一种反序列化。
+            "model": VideoNotDownloadableErrorResponse,
+            "description": "Video is not downloadable (live stream, upcoming premiere, "
+            "unavailable, private, or region blocked), or the request body failed "
+            "validation",
+        },
     },
     summary="Create download task",
     description="Create a new YouTube audio download task or return existing one.",
@@ -108,6 +121,20 @@ async def create_task(
 
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except VideoNotDownloadableError as e:
+        # 前置检查明确判定视频不可下载（直播/预约首播/不可用/私享/地区限制）
+        logger.warning(
+            f"Task creation rejected by precheck for video {e.video_id}: "
+            f"{e.error_code.value} - {e.message}"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error_code": e.error_code.value,
+                "message": e.message,
+                "video_id": e.video_id,
+            },
+        )
     except asyncio.TimeoutError:
         logger.error("Task creation timed out")
         raise HTTPException(

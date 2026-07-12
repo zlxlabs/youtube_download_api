@@ -9,9 +9,12 @@ Covers all core database operations including:
 - Edge cases and data integrity
 """
 
+import json
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
+import aiosqlite
 import pytest
 
 from src.db.database import Database
@@ -804,6 +807,41 @@ class TestTaskQueries:
         result = await test_db.get_active_task_by_video("nonexistent_vid")
         assert result is None
 
+    async def test_get_active_tasks_by_video_returns_all_active(self, test_db: Database):
+        """多条活跃任务（pending/downloading）都应被返回，按创建时间倒序。"""
+        older = make_task(
+            video_id="vid_multi_active", task_id="multi_older", include_transcript=False
+        )
+        older.created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        await test_db.create_task(older)
+
+        newer = make_task(
+            video_id="vid_multi_active", task_id="multi_newer", include_audio=False
+        )
+        newer.created_at = datetime(2026, 1, 2, tzinfo=timezone.utc)
+        await test_db.create_task(newer)
+
+        result = await test_db.get_active_tasks_by_video("vid_multi_active")
+
+        assert [t.id for t in result] == ["multi_newer", "multi_older"]
+
+    async def test_get_active_tasks_by_video_excludes_terminal_status(self, test_db: Database):
+        """已完成/已取消的任务不应出现在活跃任务列表中。"""
+        active = make_task(video_id="vid_multi_active_02", task_id="multi_active")
+        await test_db.create_task(active)
+        completed = make_task(video_id="vid_multi_active_02", task_id="multi_completed")
+        await test_db.create_task(completed)
+        await test_db.update_task_status("multi_completed", TaskStatus.COMPLETED)
+
+        result = await test_db.get_active_tasks_by_video("vid_multi_active_02")
+
+        assert [t.id for t in result] == ["multi_active"]
+
+    async def test_get_active_tasks_by_video_none(self, test_db: Database):
+        """没有活跃任务时应返回空列表。"""
+        result = await test_db.get_active_tasks_by_video("nonexistent_vid_multi")
+        assert result == []
+
     async def test_get_pending_tasks(self, test_db: Database):
         """Get pending tasks ordered by creation time."""
         for i in range(3):
@@ -825,6 +863,21 @@ class TestTaskQueries:
 
         pending = await test_db.get_pending_tasks(limit=2)
         assert len(pending) == 2
+
+    async def test_get_pending_tasks_offset(self, test_db: Database):
+        """get_pending_tasks 应支持 offset 分页，用于批量恢复超过单批次上限的任务。"""
+        for i in range(5):
+            task = make_task(video_id=f"vid_pend_off_{i}", task_id=f"pend_off_{i}")
+            await test_db.create_task(task)
+
+        first_page = await test_db.get_pending_tasks(limit=2, offset=0)
+        second_page = await test_db.get_pending_tasks(limit=2, offset=2)
+        third_page = await test_db.get_pending_tasks(limit=2, offset=4)
+
+        # 分页之间既不遗漏也不重复，且顺序与全量查询一致（created_at ASC）
+        assert [t.id for t in first_page] == ["pend_off_0", "pend_off_1"]
+        assert [t.id for t in second_page] == ["pend_off_2", "pend_off_3"]
+        assert [t.id for t in third_page] == ["pend_off_4"]
 
     async def test_get_pending_tasks_excludes_other_statuses(self, test_db: Database):
         """get_pending_tasks should only return pending tasks."""
@@ -1180,6 +1233,12 @@ class TestDataIntegrity:
         assert result.error_code is None
         assert result.error_message is None
         assert result.retry_count == 0
+        # 下载器归属列：未完成的任务应为 NULL（未知）
+        assert result.audio_downloader is None
+        assert result.transcript_downloader is None
+        # partial_success/failure_details：新建任务默认值
+        assert result.partial_success is False
+        assert result.failure_details is None
 
     async def test_video_info_full_roundtrip(self, test_db: Database):
         """All VideoInfo fields should survive a round-trip."""
@@ -1305,3 +1364,405 @@ class TestDataIntegrity:
         )
         task_ids = {t.id for t in tasks}
         assert "combined_01" in task_ids
+
+
+# ==================== Downloader Attribution Tests ====================
+
+
+class TestDownloaderAttribution:
+    """
+    测试下载器归属列（audio_downloader / transcript_downloader）与
+    failure_details 失败归因列的迁移、写入与行转换。
+
+    背景：生产环境只能翻日志才能回答"哪个下载器完成的下载"，
+    本组测试锁定持久化闭环：迁移建列 -> 写入 -> 读回。
+    """
+
+    async def test_new_database_has_attribution_columns(self, test_db: Database):
+        """全新数据库建表后应直接包含归属列（不依赖后续 ALTER 迁移）。"""
+        cursor = await test_db.execute("PRAGMA table_info(tasks)")
+        columns = {row["name"] for row in await cursor.fetchall()}
+        assert "audio_downloader" in columns
+        assert "transcript_downloader" in columns
+        # 顺带验证 partial_success/failure_details 也在新库中直接存在
+        # （历史 bug：这两列此前只在 ALTER 迁移里补，CREATE TABLE 字面量里没有，
+        # 导致全新数据库反而缺列，迁移永远不会补上——一并修正）。
+        assert "partial_success" in columns
+        assert "failure_details" in columns
+
+    async def test_migration_idempotent_on_legacy_table(self, temp_dir: Path):
+        """
+        对已存在但缺少新列的旧版 tasks 表重复跑迁移：
+        应能补齐新列且不报错（幂等）。
+        """
+        db_path = temp_dir / "legacy.sqlite"
+
+        # 手工建一张缺少归属列/partial_success/failure_details 的旧版 tasks 表，
+        # 模拟生产环境跑了 7 个月的历史库结构。
+        async with aiosqlite.connect(db_path) as conn:
+            await conn.execute(
+                """
+                CREATE TABLE tasks (
+                    id TEXT PRIMARY KEY,
+                    video_id TEXT NOT NULL,
+                    video_url TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    priority TEXT NOT NULL DEFAULT 'normal',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            await conn.commit()
+
+        db = Database(db_path)
+        await db.connect()
+        try:
+            cursor = await db.execute("PRAGMA table_info(tasks)")
+            columns = {row["name"] for row in await cursor.fetchall()}
+            assert "audio_downloader" in columns
+            assert "transcript_downloader" in columns
+            assert "partial_success" in columns
+            assert "failure_details" in columns
+        finally:
+            await db.disconnect()
+
+        # 重新连接（模拟服务重启再次跑迁移），不应抛出 duplicate column 等错误
+        db2 = Database(db_path)
+        await db2.connect()
+        cursor = await db2.execute("PRAGMA table_info(tasks)")
+        columns2 = {row["name"] for row in await cursor.fetchall()}
+        assert "audio_downloader" in columns2
+        await db2.disconnect()
+
+    async def test_update_task_completed_writes_downloader_attribution(
+        self, test_db: Database
+    ):
+        """完成任务时应能写入音频/字幕各自的下载器归属。"""
+        task = make_task(video_id="vid_attr_01", task_id="attr_01")
+        await test_db.create_task(task)
+
+        await test_db.update_task_completed(
+            "attr_01",
+            audio_file_id="audio_1",
+            transcript_file_id="trans_1",
+            reused_audio=False,
+            reused_transcript=False,
+            audio_downloader="cdp",
+            transcript_downloader="ytdlp",
+        )
+
+        result = await test_db.get_task("attr_01")
+        assert result is not None
+        assert result.audio_downloader == "cdp"
+        assert result.transcript_downloader == "ytdlp"
+
+    async def test_update_task_completed_attribution_defaults_to_none(
+        self, test_db: Database
+    ):
+        """
+        缓存复用场景（reused=True）未传归属参数时，归属列应保持 NULL，
+        而不是写入类似 'cache' 的占位值（reused 标志已经表达了来源）。
+        """
+        task = make_task(video_id="vid_attr_02", task_id="attr_02")
+        await test_db.create_task(task)
+
+        await test_db.update_task_completed(
+            "attr_02",
+            audio_file_id="audio_2",
+            reused_audio=True,
+        )
+
+        result = await test_db.get_task("attr_02")
+        assert result is not None
+        assert result.audio_downloader is None
+        assert result.transcript_downloader is None
+
+    async def test_update_task_status_failed_writes_failure_details(
+        self, test_db: Database
+    ):
+        """任务失败时写入的 failure_details JSON 应可完整读回并反序列化。"""
+        task = make_task(video_id="vid_fd_01", task_id="fd_01")
+        await test_db.create_task(task)
+
+        details = [
+            {"downloader": "cdp", "error_code": "CDP_NO_COOKIES", "message": "no cookies exported"},
+            {"downloader": "ytdlp", "error_code": "CDP_NSIG_FAILED", "message": "nsig challenge failed"},
+        ]
+        details_json = json.dumps(details, ensure_ascii=False)
+
+        await test_db.update_task_status(
+            "fd_01",
+            TaskStatus.FAILED,
+            error_code=ErrorCode.DOWNLOAD_FAILED,
+            error_message="all downloaders failed",
+            failure_details=details_json,
+        )
+
+        result = await test_db.get_task("fd_01")
+        assert result is not None
+        assert result.status == TaskStatus.FAILED
+        assert result.failure_details is not None
+        parsed = json.loads(result.failure_details)
+        assert parsed[0]["downloader"] == "cdp"
+        assert parsed[0]["error_code"] == "CDP_NO_COOKIES"
+        assert parsed[1]["downloader"] == "ytdlp"
+
+    async def test_update_task_status_non_failed_ignores_failure_details(
+        self, test_db: Database
+    ):
+        """非 FAILED 状态传入 failure_details 应被忽略（该字段只在失败路径写入）。"""
+        task = make_task(video_id="vid_fd_02", task_id="fd_02")
+        await test_db.create_task(task)
+
+        await test_db.update_task_status(
+            "fd_02",
+            TaskStatus.COMPLETED,
+            failure_details='[{"downloader": "cdp"}]',
+        )
+
+        result = await test_db.get_task("fd_02")
+        assert result is not None
+        assert result.failure_details is None
+
+
+# ==================== Download Stats Aggregation Tests ====================
+
+
+class TestDownloadStatsAggregation:
+    """
+    测试 get_download_stats 聚合查询（失败归因统计端点的数据来源）。
+
+    全部通过 SQL GROUP BY 完成聚合，不在 Python 里遍历全表。
+    """
+
+    async def _seed_task(
+        self,
+        test_db: Database,
+        *,
+        task_id: str,
+        video_id: str,
+        status: TaskStatus,
+        error_code: ErrorCode | None = None,
+        audio_downloader: str | None = None,
+        transcript_downloader: str | None = None,
+        created_at: datetime | None = None,
+    ) -> None:
+        """构造并写入一条种子任务数据，用于统计聚合断言。"""
+        task = make_task(video_id=video_id, task_id=task_id)
+        await test_db.create_task(task)
+
+        if status == TaskStatus.COMPLETED:
+            await test_db.update_task_completed(
+                task_id,
+                audio_file_id="af" if audio_downloader else None,
+                transcript_file_id="tf" if transcript_downloader else None,
+                audio_downloader=audio_downloader,
+                transcript_downloader=transcript_downloader,
+            )
+        elif status == TaskStatus.FAILED:
+            await test_db.update_task_status(
+                task_id, TaskStatus.FAILED, error_code=error_code
+            )
+        else:
+            await test_db.update_task_status(task_id, status)
+
+        # create_task/update_task_status 内部用 CURRENT_TIMESTAMP/now() 写入 created_at，
+        # 这里按需改写为测试指定的时间点，用于模拟不同时间窗口/不同自然周的历史数据。
+        # 使用公开的 transaction() API 提交，不直接碰内部连接属性。
+        if created_at is not None:
+            async with test_db.transaction() as conn:
+                await conn.execute(
+                    "UPDATE tasks SET created_at = ? WHERE id = ?",
+                    (created_at, task_id),
+                )
+
+    async def test_get_download_stats_total_and_by_status(self, test_db: Database):
+        """test_db 每个测试函数独立建库，因此可以直接用精确值断言。"""
+        now = datetime.now(timezone.utc)
+        await self._seed_task(
+            test_db, task_id="ds_01", video_id="ds_v01",
+            status=TaskStatus.COMPLETED, audio_downloader="cdp", created_at=now,
+        )
+        await self._seed_task(
+            test_db, task_id="ds_02", video_id="ds_v02",
+            status=TaskStatus.FAILED, error_code=ErrorCode.CDP_NO_COOKIES, created_at=now,
+        )
+        await self._seed_task(
+            test_db, task_id="ds_03", video_id="ds_v03",
+            status=TaskStatus.PENDING, created_at=now,
+        )
+
+        stats = await test_db.get_download_stats(days=30)
+
+        assert stats["total"] == 3
+        assert stats["by_status"]["completed"] == 1
+        assert stats["by_status"]["failed"] == 1
+        assert stats["by_status"]["pending"] == 1
+
+    async def test_get_download_stats_failures_by_error_code_and_split(
+        self, test_db: Database
+    ):
+        now = datetime.now(timezone.utc)
+        # 内容级失败（VIDEO_ 前缀）
+        await self._seed_task(
+            test_db, task_id="ds_10", video_id="ds_v10",
+            status=TaskStatus.FAILED, error_code=ErrorCode.VIDEO_PRIVATE, created_at=now,
+        )
+        # 系统级失败
+        await self._seed_task(
+            test_db, task_id="ds_11", video_id="ds_v11",
+            status=TaskStatus.FAILED, error_code=ErrorCode.CDP_NO_COOKIES, created_at=now,
+        )
+        await self._seed_task(
+            test_db, task_id="ds_12", video_id="ds_v12",
+            status=TaskStatus.FAILED, error_code=ErrorCode.CDP_NO_COOKIES, created_at=now,
+        )
+
+        stats = await test_db.get_download_stats(days=30)
+
+        assert stats["failures_by_error_code"]["VIDEO_PRIVATE"] == 1
+        assert stats["failures_by_error_code"]["CDP_NO_COOKIES"] == 2
+        assert stats["failure_split"]["content_level"] == 1
+        assert stats["failure_split"]["system_level"] == 2
+        assert stats["failure_split"]["content_level_ratio"] == pytest.approx(1 / 3)
+        assert stats["failure_split"]["system_level_ratio"] == pytest.approx(2 / 3)
+
+    async def test_get_download_stats_null_error_code_counted_as_unknown(
+        self, test_db: Database
+    ):
+        """
+        error_code 为 NULL 的失败任务不应被过滤掉，应归入 failures_by_error_code
+        的 "unknown" 桶，并计入 failure_split.system_level——否则
+        content_level + system_level 会小于 by_status["failed"]，比率失真。
+        """
+        now = datetime.now(timezone.utc)
+        # 内容级失败
+        await self._seed_task(
+            test_db, task_id="ds_50", video_id="ds_v50",
+            status=TaskStatus.FAILED, error_code=ErrorCode.VIDEO_PRIVATE, created_at=now,
+        )
+        # 系统级失败（有 error_code）
+        await self._seed_task(
+            test_db, task_id="ds_51", video_id="ds_v51",
+            status=TaskStatus.FAILED, error_code=ErrorCode.CDP_NO_COOKIES, created_at=now,
+        )
+        # error_code 为 NULL 的失败任务（例如任务级超时兜底路径未来得及写 error_code）
+        await self._seed_task(
+            test_db, task_id="ds_52", video_id="ds_v52",
+            status=TaskStatus.FAILED, error_code=None, created_at=now,
+        )
+        await self._seed_task(
+            test_db, task_id="ds_53", video_id="ds_v53",
+            status=TaskStatus.FAILED, error_code=None, created_at=now,
+        )
+
+        stats = await test_db.get_download_stats(days=30)
+
+        assert stats["by_status"]["failed"] == 4
+        assert stats["failures_by_error_code"]["unknown"] == 2
+        assert stats["failures_by_error_code"]["VIDEO_PRIVATE"] == 1
+        assert stats["failures_by_error_code"]["CDP_NO_COOKIES"] == 1
+
+        # 不变式：content_level + system_level 必须等于 by_status 里 failed 的总数
+        split = stats["failure_split"]
+        assert split["content_level"] == 1
+        assert split["system_level"] == 3  # CDP_NO_COOKIES(1) + unknown(2)
+        assert split["content_level"] + split["system_level"] == stats["by_status"]["failed"]
+
+    async def test_get_download_stats_region_blocked_is_system_level(
+        self, test_db: Database
+    ):
+        """
+        VIDEO_REGION_BLOCKED 虽是 VIDEO_ 前缀，但已从 CONTENT_LEVEL_ERROR_CODES
+        中移除（下载器/出口位置相关错误，非视频客观状态，见
+        src.db.models.CONTENT_LEVEL_ERROR_CODES 的注释）。failure_split 的分类
+        必须以该常量为唯一事实来源，不能再用字符串前缀判断，否则地区限制会被
+        误计入 content_level，在遇到地区限制的部署里让比率失真。
+        """
+        now = datetime.now(timezone.utc)
+        # 地区限制：应归入 system_level（尽管 error_code 以 VIDEO_ 开头）
+        await self._seed_task(
+            test_db, task_id="ds_60", video_id="ds_v60",
+            status=TaskStatus.FAILED, error_code=ErrorCode.VIDEO_REGION_BLOCKED, created_at=now,
+        )
+        # 真正的内容级失败：应归入 content_level
+        await self._seed_task(
+            test_db, task_id="ds_61", video_id="ds_v61",
+            status=TaskStatus.FAILED, error_code=ErrorCode.VIDEO_PRIVATE, created_at=now,
+        )
+
+        stats = await test_db.get_download_stats(days=30)
+
+        split = stats["failure_split"]
+        assert split["content_level"] == 1  # 仅 VIDEO_PRIVATE
+        assert split["system_level"] == 1  # VIDEO_REGION_BLOCKED
+        # 不变式：content_level + system_level 必须等于 by_status 里 failed 的总数
+        assert split["content_level"] + split["system_level"] == stats["by_status"]["failed"]
+
+    async def test_get_download_stats_by_downloader_unknown_bucket(
+        self, test_db: Database
+    ):
+        now = datetime.now(timezone.utc)
+        await self._seed_task(
+            test_db, task_id="ds_20", video_id="ds_v20",
+            status=TaskStatus.COMPLETED, audio_downloader="cdp",
+            transcript_downloader="ytdlp", created_at=now,
+        )
+        # 未写归属（历史数据/未知）应归为 unknown
+        await self._seed_task(
+            test_db, task_id="ds_21", video_id="ds_v21",
+            status=TaskStatus.COMPLETED, created_at=now,
+        )
+
+        stats = await test_db.get_download_stats(days=30)
+
+        assert stats["by_downloader"]["audio_downloader"]["cdp"] == 1
+        assert stats["by_downloader"]["transcript_downloader"]["ytdlp"] == 1
+        assert stats["by_downloader"]["audio_downloader"]["unknown"] == 1
+        assert stats["by_downloader"]["transcript_downloader"]["unknown"] == 1
+
+    async def test_get_download_stats_weekly_trend(self, test_db: Database):
+        """
+        weekly_trend 的周标签规则是 %Y-W%W（公历年 + 周一起始年内周序），
+        不是 %G-W%V（ISO 8601 年份+周号）——后者要求 SQLite 3.46.0+，本地/
+        生产环境的 SQLite 版本都更旧，用它会让 strftime 返回 NULL。这里的
+        期望值必须用同一套规则在 Python 侧算，否则测试只在恰好装了新版
+        SQLite 的机器上偶然通过。
+        """
+        now = datetime.now(timezone.utc)
+        await self._seed_task(
+            test_db, task_id="ds_30", video_id="ds_v30",
+            status=TaskStatus.COMPLETED, created_at=now,
+        )
+        await self._seed_task(
+            test_db, task_id="ds_31", video_id="ds_v31",
+            status=TaskStatus.FAILED, error_code=ErrorCode.DOWNLOAD_FAILED, created_at=now,
+        )
+
+        stats = await test_db.get_download_stats(days=30)
+
+        current_week = f"{now.strftime('%Y')}-W{now.strftime('%W')}"
+        weeks = {item["week"]: item for item in stats["weekly_trend"]}
+        assert None not in weeks, "week 键不应为 None（strftime 格式码在当前 SQLite 版本上不受支持）"
+        assert current_week in weeks
+        assert weeks[current_week]["completed"] == 1
+        assert weeks[current_week]["failed"] == 1
+
+    async def test_get_download_stats_respects_days_window(self, test_db: Database):
+        """超出时间窗口的任务不应计入统计（仅落在窗口内的任务计数）。"""
+        old_time = datetime.now(timezone.utc) - timedelta(days=100)
+        now = datetime.now(timezone.utc)
+        await self._seed_task(
+            test_db, task_id="ds_40", video_id="ds_v40",
+            status=TaskStatus.COMPLETED, created_at=old_time,
+        )
+        await self._seed_task(
+            test_db, task_id="ds_41", video_id="ds_v41",
+            status=TaskStatus.COMPLETED, created_at=now,
+        )
+
+        stats = await test_db.get_download_stats(days=30)
+
+        # 100 天前的任务被排除在 30 天窗口外，total 只统计到窗口内的 1 条
+        assert stats["total"] == 1
+        assert stats["by_status"]["completed"] == 1

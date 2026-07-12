@@ -41,6 +41,7 @@ def _build_app() -> FastAPI:
         manual_upload_routes,
         routes,
         settings_routes,
+        stats_routes,
         video_info_routes,
         video_resource_routes,
     )
@@ -58,6 +59,7 @@ def _build_app() -> FastAPI:
     app.include_router(video_resource_routes.router)
     app.include_router(video_info_routes.router)
     app.include_router(settings_routes.router)
+    app.include_router(stats_routes.router)
     app.include_router(manual_upload_routes.router)
 
     app.dependency_overrides[get_settings] = lambda: test_settings

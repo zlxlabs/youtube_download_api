@@ -95,6 +95,21 @@ class Settings(BaseSettings):
         default=300, ge=60, le=3600, description="Task-level timeout in seconds (safety net)"
     )
 
+    # ============ Task Precheck Configuration ============
+    # 创建任务前的前置校验：在真正创建下载任务前先做一次元数据探测，
+    # 提前拦截直播/预约首播/视频不可用等已知不可下载的场景，避免下游客户端
+    # 异步等待到下载阶段才收到失败反馈。
+    # 探测失败（超时/下载器全部失败/其他异常）一律 fail-open，绝不阻塞任务创建。
+    precheck_enabled: bool = Field(
+        default=True,
+        description="Enable pre-creation video availability check (live stream / unavailable detection)",
+    )
+    precheck_timeout: float = Field(
+        default=8.0,
+        gt=0,
+        description="Timeout in seconds for the pre-creation metadata check (fail-open on timeout)",
+    )
+
     # ============ Storage Configuration ============
     data_dir: Path = Field(default=Path("./data"), description="Data storage directory")
     file_retention_days: int = Field(
@@ -401,6 +416,25 @@ class Settings(BaseSettings):
         default=3,
         ge=1,
         description="Maximum calls allowed in half-open state",
+    )
+
+    # ============ IP Ban Circuit Breaker Configuration ============
+    # 被动探测型 IP 熔断器（src/core/ip_ban_breaker.py，NORMAL -> AUDIO_BANNED ->
+    # FULLY_BANNED 三级），是与上方两套下载器熔断器（CDP 组件级、manager 编排级）
+    # 独立的第三层：前两者决定"切换到哪个下载器"，这一层决定"是否应该现在就
+    # 别再请求 YouTube"。等待参数原先硬编码在 worker.py 构造熔断器处，这里
+    # 收敛为可配置项，与项目其余熔断器保持一致的"全部可配置"风格。
+    ip_ban_min_wait_before_retry: int = Field(
+        default=3600,
+        ge=60,
+        le=86400,
+        description="IP ban circuit breaker: minimum wait time in seconds before allowing a recovery probe (default: 60 minutes)",
+    )
+    ip_ban_max_retry_interval: int = Field(
+        default=1800,
+        ge=60,
+        le=86400,
+        description="IP ban circuit breaker: minimum interval in seconds between consecutive recovery probes (default: 30 minutes)",
     )
 
     # ============ WeCom Content Moderation ============

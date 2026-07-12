@@ -995,6 +995,14 @@ class TikHubDownloader(BaseDownloader):
         """
         仅获取视频元数据（不下载任何文件）。
 
+        错误分类现状：TikHub API 的 code != 200 错误响应只带一句自由文本
+        message，没有文档化/可复现的错误分类体系（不像 audios/subtitles 子对象
+        那样有稳定的 errorId 取值域），无法可靠区分"视频不存在/私有/地区限制"
+        与"限流/鉴权失败"等瞬时错误——贸然按字符串猜测容易把瞬时错误误判为
+        内容级终态错误，导致 precheck 错误地永久拒绝一个其实可下载的视频。
+        因此这里保留原行为：所有异常都吞掉返回 None，交由降级链换下一个下载器
+        （如 ytdlp/youtube_data_api）判定。
+
         Args:
             video_url: YouTube 视频 URL
             video_id: YouTube 视频 ID
@@ -1016,6 +1024,11 @@ class TikHubDownloader(BaseDownloader):
                 "title": video_data.get("title"),
                 "author": video_data.get("channel", {}).get("name"),
                 "duration": video_data.get("lengthSeconds"),
+                # TikHub 的元数据响应不包含直播状态字段，显式置 None 表示
+                # "未知"（而非"确认不是直播"）。DownloaderManager 发现
+                # live_broadcast_content 缺失/为 None 时会强制刷新一次，
+                # 交给链上其他下载器（如 youtube_data_api）判定真实状态。
+                "live_broadcast_content": None,
             }
         except Exception as e:
             logger.warning(f"[tikhub] Failed to get video metadata: {e}")
