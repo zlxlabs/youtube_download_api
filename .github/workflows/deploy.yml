@@ -7,7 +7,7 @@ on:
 
 jobs:
   ship:
-    uses: zj1123581321/ci-templates/.github/workflows/build-deploy.yml@v1
+    uses: zlxlabs/ci-templates/.github/workflows/build-deploy.yml@v1
     with:
       image_name: youtube-download-api                  # == ACR 镜像名 == 宿主 compose 的 image(crpi-.../zlx-personal/youtube-download-api)
       host: 100.68.21.80                                 # n305 的 Tailscale IP(runner 入 tailnet 后可达)
