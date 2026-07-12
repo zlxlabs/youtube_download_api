@@ -28,7 +28,11 @@ import pytest_asyncio
 from src.config import Settings
 from src.core.ip_ban_breaker import IPBanCircuitBreaker, calculate_ban_recovery_time
 from src.core.ip_ban_models import IPBanLevel, IPBanStateChangeContext
-from src.core.worker import DownloadWorker
+from src.core.worker import (
+    FULL_BAN_AUDIO_MIN_WAIT_MULTIPLIER,
+    MIN_DELAY_SECONDS_FLOOR,
+    DownloadWorker,
+)
 from src.db.database import Database
 from src.db.models import Task, TaskPriority, TaskStatus
 from src.utils.logger import logger as app_logger
@@ -965,6 +969,167 @@ class TestWorkerIPBanStartupRestore:
         # 第二次调用应被幂等 flag 拦截，不应再次触发数据库读取。
         await worker.restore_persisted_state()
         assert call_count == 1
+
+
+# ==================== FULLY_BANNED delay_seconds 配置化与口径修正测试 ====================
+# 背景（PR #6 CI gate / Codex review 发现的 major 问题）：
+# _check_ip_ban_and_decide() 的 FULLY_BANNED 分支曾经硬编码
+# min_wait = 3600 if task_type == "transcript_only" else 7200，运维调整
+# IP_BAN_MIN_WAIT_BEFORE_RETRY 对全局熔断的探测放行完全不生效；同时
+# delay_seconds=max(remaining, min_wait) 是一个掩盖 remaining 与放行判定口径
+# 错位的补丁——get_remaining_time() 原先按熔断器基础 min_wait 计算剩余时间，
+# 与 should_allow_attempt 用的 min_wait_override 不一致，即使探测窗口只剩几
+# 分钟，任务也会被推迟整整一个 min_wait 窗口。下面的测试锁死修复后的行为：
+# min_wait 来自 settings.ip_ban_min_wait_before_retry（音频/混合为其
+# FULL_BAN_AUDIO_MIN_WAIT_MULTIPLIER 倍），delay_seconds 是与放行判定同一
+# 口径的 remaining（带 MIN_DELAY_SECONDS_FLOOR 下限）。
+
+
+def _make_probe_task(task_id: str, *, include_audio: bool, include_transcript: bool) -> Task:
+    """构造一个用于探测判定测试的最小任务。"""
+    return Task(
+        id=task_id,
+        video_id=f"video-{task_id}",
+        video_url=f"https://youtube.com/watch?v=video-{task_id}",
+        status=TaskStatus.PENDING,
+        include_audio=include_audio,
+        include_transcript=include_transcript,
+        priority=TaskPriority.NORMAL,
+        created_at=datetime.now(timezone.utc),
+    )
+
+
+class TestFullyBannedDelaySeconds:
+    """测试 FULLY_BANNED 分支的 min_wait 配置化与 delay_seconds 口径修正。"""
+
+    @pytest.mark.asyncio
+    async def test_custom_min_wait_gates_transcript_and_audio_probes(
+        self, test_db: Database, test_settings: Settings
+    ) -> None:
+        """
+        自定义 IP_BAN_MIN_WAIT_BEFORE_RETRY=600 时：字幕任务应在等待满 600s 后
+        被放行作为探测，音频任务需要等满 2 倍（1200s）才被放行——修复前
+        FULLY_BANNED 分支硬编码 3600/7200，调整这个配置对全局熔断完全不生效。
+        """
+        test_settings.ip_ban_min_wait_before_retry = 600
+        test_settings.ip_ban_max_retry_interval = 60
+
+        worker = _make_worker(test_db, test_settings)
+        await worker.ip_ban_breaker.trigger_full_ban(reason="test")
+
+        transcript_task = _make_probe_task(
+            "transcript", include_audio=False, include_transcript=True
+        )
+        audio_task = _make_probe_task("audio", include_audio=True, include_transcript=False)
+
+        # 刚触发熔断：字幕、音频都还没到各自的等待窗口，应该被延迟。
+        decision = await worker._check_ip_ban_and_decide(transcript_task)
+        assert decision is not None and decision.action == "delay"
+        decision = await worker._check_ip_ban_and_decide(audio_task)
+        assert decision is not None and decision.action == "delay"
+
+        # 回拨到刚好等满 600s（字幕的 min_wait）：字幕应被放行，音频仍需等待
+        # （音频门槛是 600 * FULL_BAN_AUDIO_MIN_WAIT_MULTIPLIER = 1200s）。
+        worker.ip_ban_breaker.banned_at = datetime.now() - timedelta(seconds=600)
+
+        decision = await worker._check_ip_ban_and_decide(transcript_task)
+        assert decision is not None
+        assert decision.action == "execute"
+        assert decision.is_probe is True
+
+        decision = await worker._check_ip_ban_and_decide(audio_task)
+        assert decision is not None and decision.action == "delay"
+
+        # 回拨到等满 1200s（600 * 2）：音频任务现在也应该被放行作为探测。
+        worker.ip_ban_breaker.banned_at = datetime.now() - timedelta(seconds=600 * 2)
+
+        decision = await worker._check_ip_ban_and_decide(audio_task)
+        assert decision is not None
+        assert decision.action == "execute"
+        assert decision.is_probe is True
+
+    @pytest.mark.asyncio
+    async def test_audio_delay_seconds_reflects_remaining_not_full_window(
+        self, test_db: Database, test_settings: Settings
+    ) -> None:
+        """
+        FULLY_BANNED + 音频任务，已经等待 7100s（距 2×3600=7200s 的音频探测
+        窗口还差 100s）时，delay_seconds 应该约等于 100s（允许几秒抖动/下限），
+        而不是被拉回整个 min_wait（3600s）或 2×min_wait（7200s）窗口——旧代码
+        的 max(remaining, min_wait) 补丁会让这里的 delay_seconds 至少是 7200。
+        """
+        test_settings.ip_ban_min_wait_before_retry = 3600
+        test_settings.ip_ban_max_retry_interval = 60
+
+        worker = _make_worker(test_db, test_settings)
+        await worker.ip_ban_breaker.trigger_full_ban(reason="test")
+        worker.ip_ban_breaker.banned_at = datetime.now() - timedelta(seconds=7100)
+
+        audio_task = _make_probe_task("audio", include_audio=True, include_transcript=False)
+        decision = await worker._check_ip_ban_and_decide(audio_task)
+
+        assert decision is not None
+        assert decision.action == "delay"
+        # 允许调用耗时带来的几秒抖动，但必须远小于旧行为的 3600/7200 整窗口。
+        assert 0 < decision.delay_seconds <= 110, (
+            f"delay_seconds={decision.delay_seconds} 明显偏离剩余的约 100s，"
+            "疑似又回退到 max(remaining, min_wait) 的整窗口补丁"
+        )
+
+    @pytest.mark.asyncio
+    async def test_delay_seconds_floor_when_remaining_computed_zero_but_not_allowed(
+        self, test_db: Database, test_settings: Settings
+    ) -> None:
+        """
+        边界场景：get_remaining_time() 与 should_allow_attempt() 是两次独立
+        调用，中间隔着几毫秒的执行耗时，理论上可能出现 remaining 已经被算成
+        0，但 should_allow_attempt() 仍判定为不允许。直接 mock 这两个方法制造
+        该边界，断言 delay_seconds 落到 MIN_DELAY_SECONDS_FLOOR 而不是 0——
+        返回 0 会让任务立刻重新入队，形成没有实际退避的紧循环。
+        """
+        test_settings.ip_ban_min_wait_before_retry = 3600
+
+        worker = _make_worker(test_db, test_settings)
+        await worker.ip_ban_breaker.trigger_full_ban(reason="test")
+
+        worker.ip_ban_breaker.should_allow_attempt = MagicMock(  # type: ignore[method-assign]
+            return_value=(False, "Minimum wait not reached: 0 minutes remaining")
+        )
+        worker.ip_ban_breaker.get_remaining_time = MagicMock(return_value=0)  # type: ignore[method-assign]
+
+        audio_task = _make_probe_task(
+            "audio-edge", include_audio=True, include_transcript=False
+        )
+        decision = await worker._check_ip_ban_and_decide(audio_task)
+
+        assert decision is not None
+        assert decision.action == "delay"
+        assert decision.delay_seconds == MIN_DELAY_SECONDS_FLOOR
+
+    @pytest.mark.asyncio
+    async def test_transcript_task_uses_base_min_wait_not_multiplied(
+        self, test_db: Database, test_settings: Settings
+    ) -> None:
+        """
+        字幕任务（transcript_only）不应被乘以 FULL_BAN_AUDIO_MIN_WAIT_MULTIPLIER，
+        只有音频/混合任务才使用 2 倍等待时间——回归覆盖两个分支没有被写反。
+        """
+        test_settings.ip_ban_min_wait_before_retry = 3600
+        assert FULL_BAN_AUDIO_MIN_WAIT_MULTIPLIER == 2
+
+        worker = _make_worker(test_db, test_settings)
+        await worker.ip_ban_breaker.trigger_full_ban(reason="test")
+        worker.ip_ban_breaker.banned_at = datetime.now() - timedelta(seconds=3500)
+
+        transcript_task = _make_probe_task(
+            "transcript-only", include_audio=False, include_transcript=True
+        )
+        decision = await worker._check_ip_ban_and_decide(transcript_task)
+
+        assert decision is not None
+        assert decision.action == "delay"
+        # 距字幕自己的 min_wait(3600) 只差 100s，不是距 2 倍窗口(7200)差 3700s。
+        assert 0 < decision.delay_seconds <= 110
 
 
 # ==================== Settings 配置项测试 ====================

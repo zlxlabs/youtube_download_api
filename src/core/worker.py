@@ -42,6 +42,21 @@ from src.services.notify import NotificationService
 from src.services.task_service import TaskService
 from src.utils.logger import logger
 
+# 全局熔断（FULLY_BANNED）下，音频/混合任务的最小等待时间相对字幕任务的倍数。
+# 全局熔断意味着连字幕请求都被 YouTube 拒绝，说明风控比仅音频熔断
+# （AUDIO_BANNED）更严格，此时音频探测需要比字幕探测更保守地多等一段时间，
+# 避免刚触发全局熔断就用音频请求去试探，加重封禁。默认配置
+# （IP_BAN_MIN_WAIT_BEFORE_RETRY=3600）下等价于原先硬编码的 3600s/7200s，
+# 行为不变。
+FULL_BAN_AUDIO_MIN_WAIT_MULTIPLIER = 2
+
+# FULLY_BANNED 分支延迟重试的最小下限（秒）。get_remaining_time() 和
+# should_allow_attempt() 是两次独立调用，中间隔着几毫秒的执行耗时，边界情况下
+# remaining 可能已经被算成 0，但 should_allow_attempt() 仍判定为不允许——如果
+# 直接把 0 当作 delay_seconds 返回，任务会被立刻重新入队，下一次调度又落入
+# 同样的边界判断，形成没有实际退避的紧循环。
+MIN_DELAY_SECONDS_FLOOR = 60
+
 
 class DownloadWorker:
     """
@@ -1417,19 +1432,40 @@ class DownloadWorker:
 
         # 全局熔断状态
         elif ban_level == IPBanLevel.FULLY_BANNED:
-            # 全局熔断更严格
-            min_wait = 3600 if task_type == "transcript_only" else 7200
+            # 全局熔断更严格：字幕任务用配置的基础等待时间，音频/混合任务用其
+            # FULL_BAN_AUDIO_MIN_WAIT_MULTIPLIER 倍。两者都来自
+            # settings.ip_ban_min_wait_before_retry，运维调
+            # IP_BAN_MIN_WAIT_BEFORE_RETRY 现在能同时影响这两个分支。
+            base_min_wait = self.settings.ip_ban_min_wait_before_retry
+            min_wait = (
+                base_min_wait
+                if task_type == "transcript_only"
+                else base_min_wait * FULL_BAN_AUDIO_MIN_WAIT_MULTIPLIER
+            )
 
             allowed, reason = self.ip_ban_breaker.should_allow_attempt(
                 task_type, min_wait_override=min_wait
             )
 
             if not allowed:
-                remaining = self.ip_ban_breaker.get_remaining_time()
+                # remaining 必须用与上面放行判定完全相同的 min_wait 口径计算，
+                # 否则会出现 get_remaining_time() 按熔断器默认 min_wait（可能小于
+                # 音频任务实际使用的 2 倍值）算出剩余时间，与真正决定"是否放行"
+                # 的 min_wait_override 互相错位——旧代码曾用
+                # max(remaining, min_wait) 掩盖这个错位，代价是哪怕探测窗口只剩
+                # 几分钟，也会把任务硬推迟整整一个 min_wait 窗口。这里改为把同一个
+                # min_wait 传给 get_remaining_time()，remaining 与放行判定共享
+                # 同一套时间基准，不再需要 max() 补丁。
+                remaining = self.ip_ban_breaker.get_remaining_time(
+                    min_wait_override=min_wait
+                )
+                # 小下限防止 remaining 边界归零但仍被拒绝时形成紧循环，详见
+                # MIN_DELAY_SECONDS_FLOOR 定义处的说明。
+                delay_seconds = max(remaining, MIN_DELAY_SECONDS_FLOOR)
                 return ExecutionDecision(
                     action="delay",
                     reason=f"Full IP ban active: {reason}",
-                    delay_seconds=max(remaining, min_wait),
+                    delay_seconds=delay_seconds,
                 )
 
             # 允许尝试

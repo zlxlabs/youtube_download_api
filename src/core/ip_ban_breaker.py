@@ -157,9 +157,19 @@ class IPBanCircuitBreaker:
             return None
         return int((datetime.now() - self.last_attempt_at).total_seconds())
 
-    def get_estimated_recovery_time(self) -> Optional[datetime]:
+    def get_estimated_recovery_time(
+        self, min_wait_override: Optional[int] = None
+    ) -> Optional[datetime]:
         """
         获取预计恢复时间。
+
+        Args:
+            min_wait_override: 最小等待时间覆盖（秒），None 则使用熔断器默认的
+                MIN_WAIT_BEFORE_RETRY。与 should_allow_attempt() 的同名参数
+                保持同一套语义——调用方（如 worker 的全局熔断分支，音频/混合
+                任务需要比默认值更长的等待时间）需要用同一个 min_wait 计算
+                "是否允许尝试"和"还要等多久"，两者口径必须一致，否则会出现
+                剩余时间与放行判定互相矛盾。
 
         Returns:
             预计恢复时间（可以尝试的最早时间），如果未熔断返回 None
@@ -170,22 +180,33 @@ class IPBanCircuitBreaker:
         if not self.banned_at:
             return None
 
+        min_wait = (
+            min_wait_override if min_wait_override is not None else self.MIN_WAIT_BEFORE_RETRY
+        )
+
         # 复用模块级纯函数，避免与 calculate_ban_recovery_time 重复实现同一套公式
         return calculate_ban_recovery_time(
             self.banned_at,
             self.last_attempt_at,
-            self.MIN_WAIT_BEFORE_RETRY,
+            min_wait,
             self.MAX_RETRY_INTERVAL,
         )
 
-    def get_remaining_time(self) -> int:
+    def get_remaining_time(self, min_wait_override: Optional[int] = None) -> int:
         """
         获取距离可以尝试的剩余时间（秒）。
+
+        Args:
+            min_wait_override: 最小等待时间覆盖（秒），透传给
+                get_estimated_recovery_time()。调用方在用 min_wait_override
+                调用 should_allow_attempt() 做放行判定时，必须用同一个值调用
+                这里，否则剩余时间会按熔断器默认的 MIN_WAIT_BEFORE_RETRY 计算，
+                与真正决定是否放行的 min_wait 不一致。
 
         Returns:
             剩余等待秒数，0 表示可以立即尝试
         """
-        recovery_time = self.get_estimated_recovery_time()
+        recovery_time = self.get_estimated_recovery_time(min_wait_override)
         if not recovery_time:
             return 0
 
