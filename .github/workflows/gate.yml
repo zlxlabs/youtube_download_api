@@ -12,6 +12,7 @@ on:
 # The caller MUST grant it here — otherwise the run fails at startup with a
 # generic "workflow file issue" (reusable-workflow permission escalation).
 permissions:
+  actions: read
   contents: read
   pull-requests: write
 
