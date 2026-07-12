@@ -185,7 +185,8 @@ CDP 自己也是一个多层降级下载器（`src/downloaders/cdp/audio_downloa
 
 关键约束（`_maybe_retry_with_cookie` 方法）：
 - **每个阶段最多一次**带 cookie 重试，不是无限重试，也不与分片下载内部自身的重试矩阵叠加。
-- 这是相对保守、只在明确遇到 403 时才触发的策略，不影响正常无 403 场景的行为——`cookies` 参数为空，或原始 headers 已经带 Cookie（说明浏览器捕获到的真实请求本来就带 cookie）时，重试逻辑直接跳过，零行为变化。
+- 这是相对保守、只在明确遇到 403 时才触发的策略，不影响正常无 403 场景的行为——`cookies` 参数为空时，重试逻辑直接跳过，零行为变化。
+- `download_audio` 入口处会用 `_sanitize_download_headers` 无条件剥离 headers 里的 Cookie（大小写不敏感），保证首次请求、CDN 节点切换请求都不会带上 `quick_fetch_data` 可能被动捕获到的真实浏览器 Cookie；`_maybe_retry_with_cookie` 里"原始 headers 无 Cookie"的判断因此在正常路径下恒成立，仅作为防御性检查保留（防止未来 headers 来源变化绕过剥离）。真正用于重试的 Cookie 头完全基于 cookie jar 域匹配重新构造（`_build_cookie_header`），在剥离之后通过 `override_cookie` 参数重新注入，不受剥离影响。
 
 ---
 

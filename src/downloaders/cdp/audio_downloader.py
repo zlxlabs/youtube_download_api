@@ -260,16 +260,29 @@ class AudioDownloader:
     @staticmethod
     def _sanitize_download_headers(headers: Dict[str, str]) -> Dict[str, str]:
         """
-        清理浏览器捕获的 headers，移除可能与 Range 请求冲突的头。
+        清理浏览器捕获的 headers，移除可能与 Range 请求冲突的头，
+        并剥离 Cookie（账号风控保护，见下方说明）。
 
         浏览器捕获的 googlevideo.com 请求 headers 可能包含
         range/if-range/if-modified-since 等头，与我们自己设置的
         Range header 冲突导致 403。
+
+        Cookie 剥离设计（生产 403 取证后的保守策略，见
+        docs/architecture/downloader-architecture.md）：
+        - quick_fetch_data 通过 Playwright 被动捕获浏览器对 googlevideo
+          的真实请求头，理论上可能带有账号 Cookie（生产诊断 100% 无
+          cookie，但不能排除个别场景）。首次 curl_cffi 请求必须"始终不带
+          Cookie"（账号风控最保守策略），因此这里无条件剥离，不依赖上游
+          是否真的捕获到 Cookie。
+        - 仅在 403 后，由 _maybe_retry_with_cookie 基于 cookie jar 域匹配
+          显式构造 Cookie 头，通过 override_cookie 参数在本函数剥离之后
+          重新注入（见 _download_with_curl_cffi_multipart /
+          _download_with_curl_cffi），不受本次剥离影响。
         """
         # 需要移除的头（大小写不敏感匹配）
         remove_keys = {
             "range", "if-range", "if-modified-since", "if-none-match",
-            "if-match", "content-length", "content-type",
+            "if-match", "content-length", "content-type", "cookie",
         }
         cleaned = {}
         for k, v in headers.items():
@@ -1176,6 +1189,14 @@ class AudioDownloader:
         """
         logger.info(f"[{self.downloader_name}] Downloading audio for {video_id}")
 
+        # 单一收口点：函数入口处一次性剥离 headers（Range 冲突头 + Cookie）。
+        # quick_fetch_data 被动捕获的浏览器 headers 理论上可能带有真实账号
+        # Cookie（生产 403 取证 100% 无 cookie，但不能排除个别场景）；提前
+        # 在此处剥离，保证下面 multipart / 单线程首次请求、CDN 节点切换
+        # 请求，以及 _maybe_retry_with_cookie 的"原始 headers 无 Cookie"
+        # 前置判断，全部基于同一份已清理的 headers，不存在遗漏路径。
+        headers = self._sanitize_download_headers(headers)
+
         # 生成目标文件名
         safe_title = self._sanitize_filename(audio_info.title)
         filename = f"{safe_title}_itag{audio_info.itag or 'na'}.{audio_info.ext}"
@@ -1221,11 +1242,12 @@ class AudioDownloader:
 
                     retry_success = await self._maybe_retry_with_cookie(
                         stage="multipart",
-                        download_call=lambda h: self._download_with_curl_cffi_multipart(
+                        download_call=lambda h, c: self._download_with_curl_cffi_multipart(
                             url=audio_info.url,
                             target_path=target_path,
                             expected_size=multipart_expected_size,
                             headers=h,
+                            override_cookie=c,
                         ),
                         original_headers=headers,
                         cookies=cookies,
@@ -1280,11 +1302,12 @@ class AudioDownloader:
 
                     retry_success = await self._maybe_retry_with_cookie(
                         stage="single-thread",
-                        download_call=lambda h: self._download_with_curl_cffi(
+                        download_call=lambda h, c: self._download_with_curl_cffi(
                             url=audio_info.url,
                             target_path=target_path,
                             expected_size=audio_info.filesize,
                             headers=h,
+                            override_cookie=c,
                         ),
                         original_headers=headers,
                         cookies=cookies,
@@ -1374,7 +1397,7 @@ class AudioDownloader:
     async def _maybe_retry_with_cookie(
         self,
         stage: str,
-        download_call: Callable[[Dict[str, str]], Awaitable[bool]],
+        download_call: Callable[[Dict[str, str], str], Awaitable[bool]],
         original_headers: Dict[str, str],
         cookies: Optional[List[Dict[str, Any]]],
         target_url: str,
@@ -1385,8 +1408,7 @@ class AudioDownloader:
 
         仅在以下条件全部满足时才会真正发起一次重试请求：
         - cookies 非空
-        - 原始 headers 未携带 Cookie（避免与 has_cookie=True 场景重复触发，
-          此时说明浏览器捕获到的真实请求本来就带 cookie，无需新逻辑介入）
+        - 原始 headers 未携带 Cookie（见下方防御性检查说明）
         - 目标 URL 能匹配到至少一个 cookie（域名命中）
 
         每次调用最多发起一次下载尝试（阶段级重试，不叠加分片内部的
@@ -1396,9 +1418,12 @@ class AudioDownloader:
         Args:
             stage: 阶段标识（用于日志与错误归类，如 "multipart"/"single-thread"）
             download_call: 绑定了 url/target_path/expected_size 的下载协程工厂，
-                接受合并后的 headers 并返回下载是否成功
-            original_headers: 首次请求使用的 headers（用于 has_cookie 判断，
-                以及作为合并 Cookie 头的基底，保留其余原始头部不变）
+                接受 (headers, cookie_header) 两个参数并返回下载是否成功；
+                cookie_header 由下游通过 override_cookie 在 sanitize 之后
+                重新注入，不会被 _sanitize_download_headers 剥离
+            original_headers: 首次请求使用的原始 headers（未经 sanitize，
+                用于 has_cookie 防御性判断；原样透传给 download_call 作为
+                请求头基底，其中的 Cookie/Range 等仍会在下游被正常剥离）
             cookies: CDP 捕获的 cookie 列表
             target_url: 下载目标 URL（用于域匹配）
             errors: 错误收集列表，重试失败时原地追加
@@ -1409,7 +1434,14 @@ class AudioDownloader:
         if not cookies:
             return False
         if any(k.lower() == "cookie" for k in original_headers):
-            # 原始 headers 已带 Cookie（has_cookie=True 场景），不触发新逻辑
+            # 防御性检查（非主 gate）：_sanitize_download_headers 现在会无
+            # 条件剥离首次请求的 Cookie，因此正常情况下这里读到的
+            # original_headers 是否带 Cookie 已经不影响"是否会真的发出
+            # Cookie"——那由 sanitize + override_cookie 决定。保留此判断
+            # 是为了在浏览器捕获到的原始请求本来就带 Cookie 这种异常场景下
+            # （has_cookie=True，意味着上游行为可能已变化）不再叠加一次
+            # cookie 重试，避免与未来若 sanitize 逻辑被绕过/调整时的行为
+            # 产生冲突，属于兜底防御，不依赖它来保证"首次不带 cookie"。
             return False
 
         matched = self._match_cookies_for_url(cookies, target_url)
@@ -1417,8 +1449,6 @@ class AudioDownloader:
             return False
 
         cookie_header = "; ".join(f"{c['name']}={c.get('value', '')}" for c in matched)
-        retry_headers = dict(original_headers)
-        retry_headers["Cookie"] = cookie_header
 
         logger.info(
             f"[{self.downloader_name}] [403 CookieRetry] retrying {stage} with "
@@ -1426,7 +1456,7 @@ class AudioDownloader:
         )
 
         try:
-            success = await download_call(retry_headers)
+            success = await download_call(original_headers, cookie_header)
             if not success:
                 errors.append(f"{stage}_cookie_retry: download returned False")
             return success
@@ -1589,6 +1619,7 @@ class AudioDownloader:
         target_path: Path,
         expected_size: int,
         headers: Dict[str, str],
+        override_cookie: Optional[str] = None,
     ) -> bool:
         """
         curl_cffi 分片并发下载（模拟浏览器播放器行为）。
@@ -1604,7 +1635,11 @@ class AudioDownloader:
             url: 下载 URL
             target_path: 目标文件路径
             expected_size: 文件大小（必需，用于计算分片）
-            headers: 请求头（从 CDP 提取）
+            headers: 请求头（从 CDP 提取，可能带有浏览器原始 Cookie，
+                会被 _sanitize_download_headers 无条件剥离）
+            override_cookie: 403 阶段级重试时注入的 Cookie 头（基于 cookie
+                jar 域匹配构造），在 sanitize 剥离之后重新写入，不受剥离
+                影响；None 表示本次不携带 Cookie（首次请求的默认情况）
 
         Returns:
             bool: 下载是否成功
@@ -1621,8 +1656,11 @@ class AudioDownloader:
             logger.warning(f"[{self.downloader_name}] curl_cffi not installed, skipping multipart")
             return False
 
-        # 清理浏览器 headers，避免 Range 冲突
+        # 清理浏览器 headers（Range 冲突头 + Cookie，账号风控保护）
         clean_headers = self._sanitize_download_headers(headers)
+        if override_cookie:
+            # 403 阶段级 cookie 重试：在剥离之后重新注入受控 Cookie
+            clean_headers["Cookie"] = override_cookie
         # 动态匹配 Chrome 版本
         impersonate_target = self._get_impersonate_target(headers)
 
@@ -1879,6 +1917,7 @@ class AudioDownloader:
         target_path: Path,
         expected_size: Optional[int],
         headers: Dict[str, str],
+        override_cookie: Optional[str] = None,
     ) -> bool:
         """
         curl_cffi 下载（TLS 指纹模拟）。
@@ -1887,7 +1926,11 @@ class AudioDownloader:
             url: 下载 URL
             target_path: 目标文件路径
             expected_size: 预期文件大小
-            headers: 请求头
+            headers: 请求头（可能带有浏览器原始 Cookie，会被
+                _sanitize_download_headers 无条件剥离）
+            override_cookie: 403 阶段级重试时注入的 Cookie 头（基于 cookie
+                jar 域匹配构造），在 sanitize 剥离之后重新写入，不受剥离
+                影响；None 表示本次不携带 Cookie（首次请求的默认情况）
 
         Returns:
             bool: 下载是否成功
@@ -1898,8 +1941,11 @@ class AudioDownloader:
             logger.warning(f"[{self.downloader_name}] curl_cffi not installed, skipping")
             return False
 
-        # 清理 headers 并动态匹配 Chrome 版本
+        # 清理 headers（含 Cookie 剥离）并动态匹配 Chrome 版本
         clean_headers = self._sanitize_download_headers(headers)
+        if override_cookie:
+            # 403 阶段级 cookie 重试：在剥离之后重新注入受控 Cookie
+            clean_headers["Cookie"] = override_cookie
         impersonate_target = self._get_impersonate_target(headers)
         logger.debug(
             f"[{self.downloader_name}] Attempting download with curl_cffi "

@@ -10,9 +10,14 @@ curl-cffi 403 阶段级 Cookie 重试测试。
   仅在收到 403 后做一次"带 cookie 重试"，仍失败才走现有降级链
   （单线程 → CDN 切换 → yt-dlp 兜底）。
 
-本文件覆盖两部分：
+本文件覆盖三部分：
 1. 域匹配纯函数 AudioDownloader._build_cookie_header（RFC6265 简化版）
 2. 分片 / 单线程 403 后的阶段级单次 cookie 重试集成行为
+3. _sanitize_download_headers 的 Cookie 剥离行为（CI gate 修复：
+   quick_fetch_data 被动捕获的浏览器 headers 理论上可能带有真实账号
+   Cookie，首次请求必须无条件剥离；剥离后 _maybe_retry_with_cookie 的
+   "原始 headers 无 Cookie" 前置检查才能真正生效，403 后受控重试才能
+   正常触发）
 """
 
 from pathlib import Path
@@ -143,7 +148,55 @@ class TestBuildCookieHeader:
         assert header == "SID=abc123; HSID=xyz789"
 
 
-# ── 2. 阶段级重试集成测试 ────────────────────────────────────────────
+# ── 2. Cookie 剥离纯函数测试：AudioDownloader._sanitize_download_headers ──
+
+class TestSanitizeDownloadHeaders:
+    """
+    测试 headers 剥离逻辑（纯函数级）。
+
+    背景：quick_fetch_data 通过 Playwright 被动捕获浏览器对 googlevideo
+    的真实请求头，理论上可能带有账号 Cookie。首次 curl_cffi 请求必须
+    "始终不带 Cookie"（账号风控最保守策略），因此剥离清单需无条件包含
+    Cookie，且大小写不敏感（与其余剥离项写法一致）。
+    """
+
+    def test_strips_cookie_case_insensitive_variants(self):
+        """常见大小写形式（Cookie / cookie / COOKIE）均应被剥离。"""
+        for key in ("Cookie", "cookie", "COOKIE"):
+            headers = {key: "SID=real-account-cookie", "user-agent": "test-ua"}
+            cleaned = AudioDownloader._sanitize_download_headers(headers)
+            assert key not in cleaned
+            assert "cookie" not in {k.lower() for k in cleaned}
+            assert cleaned["user-agent"] == "test-ua"
+
+    def test_existing_strip_keys_regression_unaffected(self):
+        """
+        回归：新增 Cookie 剥离后，既有剥离项（range/if-range 等）不受影响，
+        非剥离项（user-agent 等）原样保留。
+        """
+        headers = {
+            "Range": "bytes=0-100",
+            "If-Range": "etag-value",
+            "If-Modified-Since": "Wed, 21 Oct 2015 07:28:00 GMT",
+            "If-None-Match": "etag-value",
+            "If-Match": "etag-value",
+            "Content-Length": "100",
+            "Content-Type": "audio/mp4",
+            "Cookie": "SID=real-account-cookie",
+            "user-agent": "test-ua",
+            "accept-language": "en-US",
+        }
+        cleaned = AudioDownloader._sanitize_download_headers(headers)
+        assert cleaned == {"user-agent": "test-ua", "accept-language": "en-US"}
+
+    def test_headers_without_cookie_unaffected(self):
+        """不含 Cookie 的 headers 剥离后应零行为变化（原有回归保护）。"""
+        headers = {"user-agent": "test-ua", "accept-language": "en-US"}
+        cleaned = AudioDownloader._sanitize_download_headers(headers)
+        assert cleaned == headers
+
+
+# ── 3. 阶段级重试集成测试 ────────────────────────────────────────────
 
 @pytest.fixture
 def settings():
@@ -195,8 +248,13 @@ async def test_multipart_403_cookie_retry_succeeds(audio_downloader, audio_info,
     """
     call_headers = []
 
-    async def mock_multipart(url, target_path, expected_size, headers):
-        call_headers.append(dict(headers))
+    async def mock_multipart(url, target_path, expected_size, headers, override_cookie=None):
+        # 模拟真实实现：override_cookie 在 sanitize 之后重新注入，
+        # 这里直接合并进记录的 headers 便于断言最终实际发出的请求头
+        effective_headers = dict(headers)
+        if override_cookie:
+            effective_headers["Cookie"] = override_cookie
+        call_headers.append(effective_headers)
         if len(call_headers) == 1:
             raise _err_403("first attempt")
         target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -238,12 +296,18 @@ async def test_multipart_403_cookie_retry_still_403_falls_back_to_single_thread(
     multipart_calls = []
     single_thread_calls = []
 
-    async def mock_multipart(url, target_path, expected_size, headers):
-        multipart_calls.append(dict(headers))
+    async def mock_multipart(url, target_path, expected_size, headers, override_cookie=None):
+        effective_headers = dict(headers)
+        if override_cookie:
+            effective_headers["Cookie"] = override_cookie
+        multipart_calls.append(effective_headers)
         raise _err_403("multipart always 403")
 
-    async def mock_single(url, target_path, expected_size, headers):
-        single_thread_calls.append(dict(headers))
+    async def mock_single(url, target_path, expected_size, headers, override_cookie=None):
+        effective_headers = dict(headers)
+        if override_cookie:
+            effective_headers["Cookie"] = override_cookie
+        single_thread_calls.append(effective_headers)
         target_path.parent.mkdir(parents=True, exist_ok=True)
         target_path.write_bytes(b"fake audio data")
         return True
@@ -281,11 +345,11 @@ async def test_no_matching_cookie_skips_retry(audio_downloader, audio_info, tmp_
     multipart_calls = []
     single_thread_calls = []
 
-    async def mock_multipart(url, target_path, expected_size, headers):
+    async def mock_multipart(url, target_path, expected_size, headers, override_cookie=None):
         multipart_calls.append(dict(headers))
         raise _err_403("no match")
 
-    async def mock_single(url, target_path, expected_size, headers):
+    async def mock_single(url, target_path, expected_size, headers, override_cookie=None):
         single_thread_calls.append(dict(headers))
         target_path.parent.mkdir(parents=True, exist_ok=True)
         target_path.write_bytes(b"fake audio data")
@@ -310,41 +374,114 @@ async def test_no_matching_cookie_skips_retry(audio_downloader, audio_info, tmp_
 
 
 @pytest.mark.asyncio
-async def test_headers_already_have_cookie_skips_retry(audio_downloader, audio_info, tmp_path):
+async def test_captured_headers_with_cookie_are_stripped_and_retry_still_triggers(
+    audio_downloader, audio_info, tmp_path
+):
     """
-    场景：原始 headers 本来就带 Cookie（has_cookie=True 场景，即浏览器
-    捕获到的真实请求本身已经携带 Cookie 头）。
-    期望：完全不触发新逻辑，分片下载只调用 1 次即正常降级。
+    CI gate 修复回归（本 PR 的核心场景）。
+
+    场景：quick_fetch_data 被动捕获的浏览器 headers 本身就带有 Cookie
+    （生产 403 取证 100% 未见，但理论上不能排除）；首次分片请求 403，
+    cookie jar 有域匹配。
+
+    修复前的双重 bug：
+    1. _sanitize_download_headers 不剥离 Cookie，首次请求会把捕获到的
+       真实账号 Cookie 原样发出去（违背"首次请求始终不带 Cookie"的账号
+       风控设计）。
+    2. _maybe_retry_with_cookie 的"原始 headers 无 Cookie"前置检查基于
+       未剥离的原始 headers，此时恒为 True（已有 Cookie），导致 403 后
+       的受控重试彻底失效，永远不会触发。
+
+    修复后期望：
+    - 首次请求实际发出的 headers 不含 Cookie（即使输入 headers 带 Cookie）。
+    - 403 后重试正常触发一次；注入的 Cookie 完全来自 cookie jar 域匹配
+      构造（SID=sid_value），与输入 headers 里的原始 Cookie 值无关。
     """
-    multipart_calls = []
-    single_thread_calls = []
+    call_headers = []
 
-    async def mock_multipart(url, target_path, expected_size, headers):
-        multipart_calls.append(dict(headers))
-        raise _err_403("already has cookie")
-
-    async def mock_single(url, target_path, expected_size, headers):
-        single_thread_calls.append(dict(headers))
+    async def mock_multipart(url, target_path, expected_size, headers, override_cookie=None):
+        effective_headers = dict(headers)
+        if override_cookie:
+            effective_headers["Cookie"] = override_cookie
+        call_headers.append(effective_headers)
+        if len(call_headers) == 1:
+            raise _err_403("first attempt with captured browser cookie")
         target_path.parent.mkdir(parents=True, exist_ok=True)
         target_path.write_bytes(b"fake audio data")
         return True
 
     with (
         patch.object(audio_downloader, "_download_with_curl_cffi_multipart", mock_multipart),
-        patch.object(audio_downloader, "_download_with_curl_cffi", mock_single),
         patch.object(audio_downloader, "_convert_to_m4a_if_needed", new=AsyncMock(side_effect=lambda p, _: p)),
     ):
-        await audio_downloader.download_audio(
+        result = await audio_downloader.download_audio(
             audio_info=audio_info,
             video_id="test123",
             task_id="task456",
             output_dir=tmp_path,
-            headers={"user-agent": "test-ua", "Cookie": "existing=already-there"},
+            # 模拟浏览器捕获到的 headers 本身带有真实账号 Cookie
+            headers={"user-agent": "test-ua", "Cookie": "real_account_sid=must-not-leak"},
             cookies=MATCHING_COOKIES,
         )
 
-    assert len(multipart_calls) == 1
-    assert len(single_thread_calls) == 1
+    assert result is not None
+    assert len(call_headers) == 2
+    # 首次请求：即使输入 headers 带 Cookie，实际发出的 headers 也不应包含
+    assert "Cookie" not in call_headers[0]
+    # 重试：正常触发，且 Cookie 值来自 jar 域匹配构造，不是原始捕获值
+    assert call_headers[1]["Cookie"] == "SID=sid_value"
+
+
+@pytest.mark.asyncio
+async def test_single_thread_captured_headers_with_cookie_are_stripped_and_retry_still_triggers(
+    settings, tmp_path
+):
+    """
+    与上一条相同场景的单线程版本（分片下载被禁用，直接走单线程）。
+    验证 Cookie 剥离 + 受控重试触发对 single-thread 路径同样生效。
+    """
+    settings.cdp_enable_multipart = False
+    downloader = AudioDownloader(settings=settings, downloader_name="cdp")
+
+    audio_info = AudioInfo(
+        url=TARGET_URL,
+        title="test_video",
+        ext="m4a",
+        mime_type="audio/mp4",
+        itag=140,
+        filesize=1 * 1024 * 1024,
+    )
+
+    call_headers = []
+
+    async def mock_single(url, target_path, expected_size, headers, override_cookie=None):
+        effective_headers = dict(headers)
+        if override_cookie:
+            effective_headers["Cookie"] = override_cookie
+        call_headers.append(effective_headers)
+        if len(call_headers) == 1:
+            raise _err_403("single-thread first attempt with captured browser cookie")
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_bytes(b"fake audio data")
+        return True
+
+    with (
+        patch.object(downloader, "_download_with_curl_cffi", mock_single),
+        patch.object(downloader, "_convert_to_m4a_if_needed", new=AsyncMock(side_effect=lambda p, _: p)),
+    ):
+        result = await downloader.download_audio(
+            audio_info=audio_info,
+            video_id="test123",
+            task_id="task456",
+            output_dir=tmp_path,
+            headers={"user-agent": "test-ua", "Cookie": "real_account_sid=must-not-leak"},
+            cookies=MATCHING_COOKIES,
+        )
+
+    assert result is not None
+    assert len(call_headers) == 2
+    assert "Cookie" not in call_headers[0]
+    assert call_headers[1]["Cookie"] == "SID=sid_value"
 
 
 @pytest.mark.asyncio
@@ -356,11 +493,11 @@ async def test_cookies_none_zero_behavior_change(audio_downloader, audio_info, t
     multipart_calls = []
     single_thread_calls = []
 
-    async def mock_multipart(url, target_path, expected_size, headers):
+    async def mock_multipart(url, target_path, expected_size, headers, override_cookie=None):
         multipart_calls.append(dict(headers))
         raise _err_403("no cookies provided")
 
-    async def mock_single(url, target_path, expected_size, headers):
+    async def mock_single(url, target_path, expected_size, headers, override_cookie=None):
         single_thread_calls.append(dict(headers))
         target_path.parent.mkdir(parents=True, exist_ok=True)
         target_path.write_bytes(b"fake audio data")
@@ -405,8 +542,11 @@ async def test_single_thread_403_cookie_retry_succeeds(settings, tmp_path):
 
     call_headers = []
 
-    async def mock_single(url, target_path, expected_size, headers):
-        call_headers.append(dict(headers))
+    async def mock_single(url, target_path, expected_size, headers, override_cookie=None):
+        effective_headers = dict(headers)
+        if override_cookie:
+            effective_headers["Cookie"] = override_cookie
+        call_headers.append(effective_headers)
         if len(call_headers) == 1:
             raise _err_403("single-thread first attempt")
         target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -457,8 +597,11 @@ async def test_single_thread_403_cookie_retry_still_403_falls_back_to_cdn(settin
     ytdlp_called = {"called": False}
     fake_file = tmp_path / "fake.m4a"
 
-    async def mock_single(url, target_path, expected_size, headers):
-        single_thread_calls.append(dict(headers))
+    async def mock_single(url, target_path, expected_size, headers, override_cookie=None):
+        effective_headers = dict(headers)
+        if override_cookie:
+            effective_headers["Cookie"] = override_cookie
+        single_thread_calls.append(effective_headers)
         raise _err_403("single-thread always 403")
 
     async def mock_ytdlp(video_url, cookie_file, output_dir, expected_filename):
