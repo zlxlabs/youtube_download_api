@@ -230,7 +230,7 @@ class TranscodeService:
         if output_filename is None:
             output_filename = input_file.stem
 
-        output_file = output_dir / f"{output_filename}.m4a"
+        output_file = self._resolve_output_path(input_file, output_dir, output_filename)
 
         # If AAC audio is already present, remux (copy) to m4a for speed.
         audio_codec = await self._get_audio_codec(input_file)
@@ -316,6 +316,45 @@ class TranscodeService:
             logger.error(f"Transcode error: {e}", exc_info=True)
             self._cleanup_partial_output(output_file)
             raise TranscodeError(f"Transcode failed: {e}") from e
+
+    @staticmethod
+    def _resolve_output_path(input_file: Path, output_dir: Path, output_filename: str) -> Path:
+        """
+        计算输出路径，确保它不会与输入文件指向同一个位置。
+
+        输入本身就是 .m4a 且输出目录与输入同级时（人工上传 m4a 的典型场景），
+        直接用 stem 拼出的路径会与输入完全相同：ffmpeg 会拒绝执行
+        （"Output ... same as Input"），失败清理还会把输入文件一并删掉，
+        导致后续回退分支找不到输入。撞名时改用 _converted 后缀。
+
+        输出路径与输入路径不同，是下游所有删除操作（remux 失败清理、
+        _cleanup_partial_output）不会误删输入文件的唯一前提。
+
+        Args:
+            input_file: 输入文件路径
+            output_dir: 输出目录
+            output_filename: 输出文件名（不含扩展名）
+
+        Returns:
+            与输入文件不冲突的输出路径
+        """
+        input_resolved = input_file.resolve()
+
+        output_file = output_dir / f"{output_filename}.m4a"
+        if output_file.resolve() != input_resolved:
+            return output_file
+
+        candidate = output_dir / f"{output_filename}_converted.m4a"
+        index = 1
+        while candidate.resolve() == input_resolved or candidate.exists():
+            candidate = output_dir / f"{output_filename}_converted_{index}.m4a"
+            index += 1
+
+        logger.info(
+            f"Output path collides with input, using {candidate.name} instead of "
+            f"{output_file.name}"
+        )
+        return candidate
 
     @staticmethod
     def _cleanup_partial_output(output_file: Path) -> None:
