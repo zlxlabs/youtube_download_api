@@ -7,7 +7,7 @@ on:
 
 jobs:
   ship:
-    uses: zlxlabs/ci-templates/.github/workflows/build-deploy.yml@v1
+    uses: zlxlabs/ci-templates/.github/workflows/build-deploy.yml@v2
     with:
       image_name: youtube-download-api                  # == ACR 镜像名 == 宿主 compose 的 image(crpi-.../zlx-personal/youtube-download-api)
       host: 100.68.21.80                                 # n305 的 Tailscale IP(runner 入 tailnet 后可达)
@@ -18,7 +18,7 @@ jobs:
       healthcheck_warmup: 90
       healthcheck_retries: 12
       healthcheck_interval: 5
-      ci_templates_ref: v1
+      ci_templates_ref: v2
     secrets:                                             # 逐个显式传,最小权限
       ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
       ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
