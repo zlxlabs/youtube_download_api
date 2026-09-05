@@ -1,5 +1,6 @@
-# 调 Lane B 复用流水线(ci-templates @v1)。push main 自动 build→ACR→入 tailnet→SSH n305→探针→部署。
-# 钉 @v1(不钉 @main)——一个坏 commit 不会扇出炸全舰队。
+# 调 Lane B 复用流水线(ci-templates @v2)。push main 自动 build→ACR→入 tailnet→SSH n305→探针→部署。
+# 钉 @v2(不钉 @main)——一个坏 commit 不会扇出炸全舰队。
+# v1 停在 2026-08-14；v2 起于 c837cd6，含 oneshot 回滚修复与对账语义整改。
 name: deploy
 on:
   push:
