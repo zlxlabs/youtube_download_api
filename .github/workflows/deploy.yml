@@ -5,6 +5,14 @@ name: deploy
 on:
   push:
     branches: [main]            # 本仓默认分支是 main
+    # 仅改 CI/文档不触发生产部署:改 workflow/文档不该扇出一次 D3 应用部署。
+    # 真实 src 改动(不在下列路径)照常部署。
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.github/**'
+  # 手动触发口:paths-ignore 排除了 .github/**,workflow 自身修复后需手动补发部署
+  workflow_dispatch:
 
 jobs:
   ship:
