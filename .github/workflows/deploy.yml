@@ -35,3 +35,4 @@ jobs:
       KNOWN_HOSTS: ${{ secrets.KNOWN_HOSTS }}
       TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
       CI_TEMPLATES_PAT: ${{ secrets.CI_TEMPLATES_PAT }}
+      FEISHU_CI_WEBHOOK: ${{ secrets.FEISHU_CI_WEBHOOK }}   # #46：webhook 从 vars 迁到 secrets（vars 不打码，会进日志）
