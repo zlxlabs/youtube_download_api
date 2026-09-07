@@ -27,7 +27,7 @@ permissions:
 
 jobs:
   gate:
-    uses: zlxlabs/gate/.github/workflows/gate-v2.yml@aa8d5917d3e237bcea452c42f03338b69006a428
+    uses: zlxlabs/gate/.github/workflows/gate-v2.yml@v2
     with:
       tier: personal        # personal | internal | saas
       runner: self          # self (self-hosted) | hosted (GitHub free minutes — cold repos / pilot)
