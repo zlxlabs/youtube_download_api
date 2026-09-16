@@ -27,7 +27,7 @@ permissions:
 
 jobs:
   gate:
-    uses: zlxlabs/gate/.github/workflows/gate-v2.yml@v2
+    uses: zlxlabs/gate/.github/workflows/gate-v2.yml@ea7f1d8f7a4766c47220ad703ee96ff3d79451ff
     with:
       tier: personal        # personal | internal | saas
       runner: self          # self (self-hosted) | hosted (GitHub free minutes — cold repos / pilot)
@@ -37,3 +37,6 @@ jobs:
       # 失败通知 webhook。公开仓必须用 repo SECRET(fork PR 的 run 拿不到 secrets,
       # 防泄露刷群);私有仓可不配 secret,notify 会回落到同名 repo VARIABLE。
       FEISHU_CI_WEBHOOK: ${{ secrets.FEISHU_CI_WEBHOOK }}
+      # 透传 zlxlabs org 级 Silo 凭据（配合 gate 仓 Silo 迁移）
+      SILO_ACCESS_KEY: ${{ secrets.SILO_ACCESS_KEY }}
+      SILO_SECRET_KEY: ${{ secrets.SILO_SECRET_KEY }}
