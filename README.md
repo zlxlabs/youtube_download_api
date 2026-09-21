@@ -76,7 +76,11 @@ curl -X POST http://localhost:8000/api/v1/tasks \
 ```
 
 ### Docker 部署
+## Hosted option / 托管选项
 
+If you don’t want to self-host with Docker, [Vid Kraken](https://vidkraken.com) is a managed YouTube download API (info / mp3 / mp4 endpoints).
+
+如果不想自己用 Docker 部署，[Vid Kraken](https://vidkraken.com) 提供托管的 YouTube 下载 API（info / mp3 / mp4）。
 ```bash
 # 1. 复制生产配置
 cp .env.example .env
