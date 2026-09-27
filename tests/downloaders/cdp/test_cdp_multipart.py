@@ -14,7 +14,7 @@ CDP 分片多线程下载测试脚本。
 2. 设置 CDP_URLS 环境变量（真实 CDP 端点，无默认值）：
    Linux/Mac: export CDP_URLS=http://127.0.0.1:9222
    Windows:   set CDP_URLS=http://127.0.0.1:9222
-   未设置时本测试跳过（不提供任何默认地址）；详见下方 pytest.skip 分支。
+   未设置时不构造任何地址：pytest 下 skip，直接运行时打印 [SKIP] 并以 0 退出。
 
 3. 运行测试：
    uv run python tests/downloaders/cdp/test_cdp_multipart.py
@@ -64,10 +64,14 @@ async def test_cdp_multipart_download():
     settings.cdp_multipart_chunks = 6  # 最大并发数
     settings.cdp_multipart_min_size = 1 * 1024 * 1024  # 降低阈值到 1MB
 
-    # CDP 端点只从环境变量取（无默认地址）；未配置时跳过而不是以异常中止
-    if "CDP_URLS" not in os.environ:
-        pytest.skip("CDP_URLS 未设置：该测试需要真实 CDP 端点")
-    cdp_url = os.environ["CDP_URLS"]
+    # CDP 端点只从环境变量取（无默认地址）；未配置时跳过，不构造任何地址
+    cdp_url = os.environ.get("CDP_URLS")
+    if not cdp_url:
+        message = "CDP_URLS 未设置：该测试需要真实 CDP 端点"
+        if "PYTEST_CURRENT_TEST" in os.environ:
+            pytest.skip(message)
+        logger.info(f"[SKIP] {message}")
+        return None
     settings.cdp_urls = cdp_url
 
     logger.info("-" * 60)
@@ -160,13 +164,16 @@ def main():
     """主函数。"""
     try:
         success = asyncio.run(test_cdp_multipart_download())
-        sys.exit(0 if success else 1)
     except KeyboardInterrupt:
         logger.info("Test interrupted by user")
         sys.exit(130)
     except Exception as e:
         logger.error(f"Test failed: {e}", exc_info=True)
         sys.exit(1)
+    if success is None:
+        # CDP_URLS 未配置，已打印 [SKIP]
+        sys.exit(0)
+    sys.exit(0 if success else 1)
 
 
 if __name__ == "__main__":
