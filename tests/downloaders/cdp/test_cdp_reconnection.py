@@ -19,7 +19,7 @@ def settings():
     return Settings(
         api_key="test-key",
         cdp_enabled=True,
-        cdp_urls="http://192.168.31.222:9223",
+        cdp_urls="http://localhost:9222",
         cdp_timeout=10,
     )
 

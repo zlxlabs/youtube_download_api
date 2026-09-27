@@ -59,8 +59,8 @@ async def test_cdp_multipart_download():
     settings.cdp_multipart_chunks = 6  # 最大并发数
     settings.cdp_multipart_min_size = 1 * 1024 * 1024  # 降低阈值到 1MB
 
-    # 使用指定的 CDP URL
-    cdp_url = os.getenv("CDP_URLS", "http://192.168.31.222:9223")
+    # 使用指定的 CDP URL（缺失即 KeyError，无默认值）
+    cdp_url = os.environ["CDP_URLS"]
     settings.cdp_urls = cdp_url
 
     logger.info("-" * 60)
