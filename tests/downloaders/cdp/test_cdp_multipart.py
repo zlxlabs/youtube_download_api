@@ -11,7 +11,12 @@ CDP 分片多线程下载测试脚本。
    Mac:
    /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome --remote-debugging-port=9222 --user-data-dir=/tmp/chrome-cdp
 
-2. 运行测试：
+2. 设置 CDP_URLS 环境变量（真实 CDP 端点，无默认值）：
+   Linux/Mac: export CDP_URLS=http://127.0.0.1:9222
+   Windows:   set CDP_URLS=http://127.0.0.1:9222
+   未设置时本测试跳过（不提供任何默认地址）；详见下方 pytest.skip 分支。
+
+3. 运行测试：
    uv run python tests/downloaders/cdp/test_cdp_multipart.py
 """
 
@@ -59,7 +64,9 @@ async def test_cdp_multipart_download():
     settings.cdp_multipart_chunks = 6  # 最大并发数
     settings.cdp_multipart_min_size = 1 * 1024 * 1024  # 降低阈值到 1MB
 
-    # 使用指定的 CDP URL（缺失即 KeyError，无默认值）
+    # CDP 端点只从环境变量取（无默认地址）；未配置时跳过而不是以异常中止
+    if "CDP_URLS" not in os.environ:
+        pytest.skip("CDP_URLS 未设置：该测试需要真实 CDP 端点")
     cdp_url = os.environ["CDP_URLS"]
     settings.cdp_urls = cdp_url
 
