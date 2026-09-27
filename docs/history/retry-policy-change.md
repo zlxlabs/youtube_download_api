@@ -167,7 +167,7 @@ TASK_INTERVAL_MAX=2700   # 45 分钟
 
 ```bash
 # 统计各状态任务数量
-curl -H "X-API-Key: YOUR_KEY" http://192.168.31.218:8300/api/v1/tasks \
+curl -H "X-API-Key: YOUR_KEY" http://<api-host>:8300/api/v1/tasks \
   | jq '.[] | .status' | sort | uniq -c
 
 # 输出示例：
@@ -180,7 +180,7 @@ curl -H "X-API-Key: YOUR_KEY" http://192.168.31.218:8300/api/v1/tasks \
 
 ```bash
 # 查看所有失败任务
-curl -H "X-API-Key: YOUR_KEY" http://192.168.31.218:8300/api/v1/tasks \
+curl -H "X-API-Key: YOUR_KEY" http://<api-host>:8300/api/v1/tasks \
   | jq '.[] | select(.status=="failed") | {id, video_id, error_code, retry_count}'
 ```
 

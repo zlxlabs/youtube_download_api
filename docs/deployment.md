@@ -458,7 +458,7 @@ pip install python-dotenv
 ```bash
 # .env
 CDP_ENABLED=true
-CDP_URLS=http://192.168.1.100:9222,http://192.168.1.101:9222
+CDP_URLS=http://<chrome-host>:9222,http://<chrome-host>:9222
 CDP_ENABLE_MULTIPART=true
 CDP_MULTIPART_MIN_SIZE=1  # 降低阈值，让小文件也享受分片加速
 CDP_MULTIPART_CHUNKS=6

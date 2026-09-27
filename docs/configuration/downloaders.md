@@ -232,7 +232,7 @@ AUDIO_DOWNLOAD_PRIORITY=cdp,ytdlp,tikhub
 
 ```bash
 CDP_ENABLED=true
-CDP_URLS=http://192.168.1.100:9222,http://192.168.1.101:9222
+CDP_URLS=http://<chrome-host>:9222,http://<chrome-host>:9222
 CDP_FAILOVER_STRATEGY=sequential
 CDP_USE_CURL_CFFI=true
 CDP_ENABLE_MULTIPART=true
@@ -246,7 +246,7 @@ AUDIO_DOWNLOAD_PRIORITY=cdp,ytdlp,tikhub
 ```bash
 # 基础配置
 CDP_ENABLED=true
-CDP_URLS=http://192.168.1.100:9222,http://192.168.1.101:9222
+CDP_URLS=http://<chrome-host>:9222,http://<chrome-host>:9222
 CDP_TIMEOUT=30
 CDP_FAILOVER_STRATEGY=sequential
 

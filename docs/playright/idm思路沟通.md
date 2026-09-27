@@ -2,7 +2,7 @@
 
 我想要通过 playwright cdp 来模拟 idm 的下载流程，最终实现可以控制浏览器下载指定 youtube url 的音频流。
 
-外部已经通过 "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --remote-allow-origins=* --user-data-dir="D:\MyFolders\Developments\0Python\251212_youtube_download_api\data\chrome-profile" --new-window "https://www.youtube.com/watch?v=YEsO1B_p5o8" 启动了一个 chrome 实例。
+外部已经通过 "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --remote-allow-origins=* --user-data-dir="<chrome-profile-dir>" --new-window "https://www.youtube.com/watch?v=YEsO1B_p5o8" 启动了一个 chrome 实例。
 
 我需要你结合下方的 gemini 沟通思路帮我实现整个流程，并且完成测试。
 
