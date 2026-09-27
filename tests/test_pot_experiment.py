@@ -8,6 +8,8 @@
 
 import os
 import tempfile
+
+import pytest
 from pathlib import Path
 
 # 清除本地代理环境变量，防止 yt-dlp 把本地代理传递给远程 pot-provider
@@ -18,11 +20,12 @@ for key in ["http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY
 import yt_dlp
 
 
+pytestmark = pytest.mark.requires_external
+
 VIDEO_ID = "MWvpXswLFxA"
 VIDEO_URL = f"https://www.youtube.com/watch?v={VIDEO_ID}"
 COOKIE_FILE = "data/cookies.txt"
 # pot-provider 运行在服务器上，本地通过服务器 IP 访问
-POT_SERVER_URL = "http://100.68.21.80:4416"
 
 
 class TestLogger:
@@ -47,6 +50,7 @@ def test_web_creator_with_pot_token():
     print("=" * 70)
     print("TEST 1: web_creator + PO Token (via pot-provider) + cookies")
     print("=" * 70)
+    pot_server_url = os.environ["POT_SERVER_URL"]
 
     with tempfile.TemporaryDirectory() as tmpdir:
         opts = {
@@ -66,7 +70,7 @@ def test_web_creator_with_pot_token():
                     "player_js_version": ["actual"],
                 },
                 "youtubepot-bgutilhttp": {
-                    "base_url": [POT_SERVER_URL],
+                    "base_url": [pot_server_url],
                 },
             },
             "remote_components": {"ejs:github"},
@@ -99,6 +103,7 @@ def test_ios_client_fallback():
     print("=" * 70)
     print("TEST 2: ios client + PO Token (no cookies)")
     print("=" * 70)
+    pot_server_url = os.environ["POT_SERVER_URL"]
 
     with tempfile.TemporaryDirectory() as tmpdir:
         opts = {
@@ -118,7 +123,7 @@ def test_ios_client_fallback():
                     "player_js_version": ["actual"],
                 },
                 "youtubepot-bgutilhttp": {
-                    "base_url": [POT_SERVER_URL],
+                    "base_url": [pot_server_url],
                 },
             },
             "remote_components": {"ejs:github"},
@@ -149,7 +154,7 @@ def test_ios_client_fallback():
 if __name__ == "__main__":
     print(f"yt-dlp version: {yt_dlp.version.__version__}")
     print(f"Video: {VIDEO_URL}")
-    print(f"POT Server: {POT_SERVER_URL}")
+    print("POT Server: configured")
     print(f"Cookie: {COOKIE_FILE}")
     print()
 

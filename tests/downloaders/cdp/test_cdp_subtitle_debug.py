@@ -5,7 +5,7 @@ CDP 字幕下载调试测试脚本。
 
 使用方法：
     # 设置 CDP_URLS 环境变量
-    $env:CDP_URLS="http://192.168.31.222:9223"
+    $env:CDP_URLS="http://127.0.0.1:9222"
 
     # 运行测试
     uv run python -m tests.downloaders.cdp.test_cdp_subtitle_debug
@@ -55,7 +55,7 @@ except ImportError:
 
 
 # ==================== 配置 ====================
-CDP_URL = os.getenv("CDP_URLS", "http://192.168.31.222:9223")
+# CDP_URL 在 main() 中从 CDP_URLS 环境变量读取（缺失即 KeyError，无默认值）
 VIDEO_URL = "https://www.youtube.com/watch?v=Uqr2U24uxOs"
 VIDEO_ID = "Uqr2U24uxOs"
 
@@ -516,8 +516,10 @@ async def main():
     """主测试函数。"""
     print_section("CDP Subtitle Download Debug Test")
 
+    cdp_url = os.environ["CDP_URLS"]
+
     print(f"Configuration:")
-    print(f"  CDP URL: {CDP_URL}")
+    print(f"  CDP URL: {cdp_url}")
     print(f"  Video URL: {VIDEO_URL}")
     print(f"  Video ID: {VIDEO_ID}")
     print(f"  Playwright available: {PLAYWRIGHT_AVAILABLE}")
@@ -545,10 +547,10 @@ async def main():
         print_subsection("Step 1: Connect to CDP and export cookies")
 
         playwright = await async_playwright().start()
-        print(f"[INFO] Connecting to CDP: {CDP_URL}")
+        print(f"[INFO] Connecting to CDP: {cdp_url}")
 
         browser = await playwright.chromium.connect_over_cdp(
-            CDP_URL,
+            cdp_url,
             timeout=30000,
         )
         print(f"[OK] Connected to browser")
