@@ -152,3 +152,8 @@ def test_default_resource_priorities_exclude_ytdlp():
     assert settings.transcript_only_priority == "cdp,tikhub"
     assert "ytdlp" not in settings.audio_download_priority.split(",")
     assert "ytdlp" not in settings.transcript_only_priority.split(",")
+
+
+def test_cdp_does_not_expose_manual_pot_token_bypass():
+    assert not hasattr(CDPDownloader, "_get_pot_token")
+    assert not hasattr(CDPDownloader, "_get_pot_token_safe")
