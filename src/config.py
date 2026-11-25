@@ -376,16 +376,16 @@ class Settings(BaseSettings):
         description="Metadata fetching priority (comma-separated, e.g., 'ytdlp,tikhub')",
     )
 
-    # 仅字幕下载优先级（TikHub 更稳定）
+    # 仅字幕下载优先级（CDP 与 TikHub 是不同故障域）
     transcript_only_priority: str = Field(
-        default="tikhub,ytdlp",
-        description="Transcript-only download priority (comma-separated, e.g., 'tikhub,ytdlp')",
+        default="cdp,tikhub",
+        description="Transcript-only download priority (comma-separated, e.g., 'cdp,tikhub')",
     )
 
-    # 音频下载优先级（CDP 优先，然后降级到免费方案）
+    # 音频下载优先级（CDP 优先，TikHub 作为独立故障域回退）
     audio_download_priority: str = Field(
-        default="cdp,ytdlp,tikhub",
-        description="Audio download priority (comma-separated, e.g., 'cdp,ytdlp,tikhub')",
+        default="cdp,tikhub",
+        description="Audio download priority (comma-separated, e.g., 'cdp,tikhub')",
     )
 
     # TikHub API 响应缓存时长

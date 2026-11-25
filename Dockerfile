@@ -13,15 +13,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-# Copy dependency files (uv.lock is required for uv export)
-# README.md is required by hatchling to build the local package
-COPY pyproject.toml uv.lock README.md ./
-
-# Export dependencies to requirements.txt and install
-# --no-dev: exclude dev dependencies
-# --no-hashes: simplify requirements.txt format
-RUN uv export --no-dev --no-hashes -o requirements.txt && \
-    uv pip install --system --no-cache --target=/app/deps -r requirements.txt
+# Install locked runtime dependencies into the builder environment
+COPY pyproject.toml uv.lock ./
+RUN uv sync --no-dev --no-install-project && \
+    mkdir -p /app/deps && \
+    cp -a /app/.venv/lib/python3.11/site-packages/. /app/deps/
 
 # Stage 2: Final runtime image
 FROM python:3.11-slim
@@ -62,9 +58,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && rm -rf /tmp/* \
     && rm -rf /root/.cache
-
-# Copy uv from builder stage (for runtime yt-dlp auto-update)
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/
 
 # Copy Python dependencies from builder stage, then clean up unnecessary files
 # This layer only rebuilds when pyproject.toml/uv.lock change
@@ -109,41 +102,9 @@ COPY src/ ./src/
 ARG BUILD_TIME=unknown
 ENV BUILD_TIME=${BUILD_TIME}
 
-# PO Token Provider type: rust (default) or nodejs
-# Controls which bgutil yt-dlp plugin to install at startup
-ENV POT_PROVIDER_TYPE=rust
-
-# Run the application with optional yt-dlp auto-update
-# YTDLP_AUTO_UPDATE: update yt-dlp on startup (default: true)
-# Set to "false" to disable auto-update
-# This helps handle YouTube's frequent player.js changes
 # release 版本标记:D3 build 注入 --build-arg GIT_SHA → SDK 缺省读取 → GlitchTip release=repo@<sha>
 # 放最终 runtime 阶段、CMD 前(源码 COPY 之后),缓存损失最小
 ARG GIT_SHA=unknown
 ENV GIT_SHA=$GIT_SHA
 
-CMD ["sh", "-c", "\
-    if [ \"${POT_PROVIDER_TYPE}\" = \"nodejs\" ]; then \
-        POT_PKG='bgutil-ytdlp-pot-provider'; \
-        POT_PKG_REMOVE='bgutil-ytdlp-pot-provider-rs'; \
-    else \
-        POT_PKG='bgutil-ytdlp-pot-provider-rs'; \
-        POT_PKG_REMOVE='bgutil-ytdlp-pot-provider'; \
-    fi && \
-    echo \"[startup] PO Token Provider: ${POT_PROVIDER_TYPE} (package: ${POT_PKG})\" && \
-    uv pip uninstall --system ${POT_PKG_REMOVE} 2>/dev/null || true && \
-    if [ \"${POT_PROVIDER_TYPE}\" = \"nodejs\" ]; then \
-        uv pip install --system --no-deps ${POT_PKG} 2>&1 \
-        || echo \"[startup] ${POT_PKG} install failed\"; \
-    else \
-        uv pip install --system --no-deps \
-            \"bgutil-ytdlp-pot-provider-rs @ https://github.com/jim60105/bgutil-ytdlp-pot-provider-rs/archive/refs/heads/master.tar.gz#subdirectory=plugin\" 2>&1 \
-        || echo '[startup] bgutil-rs plugin install failed'; \
-    fi && \
-    if [ \"${YTDLP_AUTO_UPDATE:-true}\" = \"true\" ]; then \
-        echo '[startup] Checking yt-dlp updates...' && \
-        uv pip install --system --upgrade --no-deps yt-dlp yt-dlp-ejs 2>&1 \
-        || echo '[startup] yt-dlp update failed, continuing with current version'; \
-        echo \"[startup] yt-dlp version: $(python -c 'import yt_dlp; print(yt_dlp.version.__version__)')\"; \
-    fi && \
-    python -m uvicorn src.main:app --host 0.0.0.0 --port ${PORT}"]
+CMD ["sh", "-c", "exec python -m uvicorn src.main:app --host 0.0.0.0 --port ${PORT}"]

@@ -139,8 +139,8 @@ class DownloaderManager:
         # 从多个配置中收集下载器名称
         priority_configs = [
             getattr(self.settings, "metadata_priority", "ytdlp,tikhub"),
-            getattr(self.settings, "transcript_only_priority", "tikhub,ytdlp"),
-            getattr(self.settings, "audio_download_priority", "ytdlp,tikhub"),
+            getattr(self.settings, "transcript_only_priority", "cdp,tikhub"),
+            getattr(self.settings, "audio_download_priority", "cdp,tikhub"),
             getattr(self.settings, "downloader_priority", "ytdlp,tikhub"),  # 兜底配置
         ]
 
@@ -510,7 +510,8 @@ class DownloaderManager:
                             output_dir,
                             include_audio,
                             include_transcript,
-                        )
+                        ),
+                        should_record_failure=downloader.should_trigger_circuit_breaker,
                     )
                 else:
                     result = await self._download_with_downloader(
@@ -585,7 +586,6 @@ class DownloaderManager:
                 # 判断是否应该触发熔断器
                 if circuit_breaker and downloader.should_trigger_circuit_breaker(e):
                     logger.debug(f"Error will count towards circuit breaker for {downloader.name}")
-                    # 熔断器已经通过 call_async 记录了失败
 
                     # 检查是否是全局性错误（如 nsig 失败），需要立即熔断
                     from src.db.models import ErrorCode

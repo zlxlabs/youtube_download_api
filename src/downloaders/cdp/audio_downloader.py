@@ -23,6 +23,7 @@ except ImportError:
     YTDLP_AVAILABLE = False
 
 from src.config import Settings
+from src.core.downloader import YtDlpLogger
 from src.db.models import ErrorCode
 from src.downloaders.cdp.models import AudioInfo, ExtractedInfo, SubtitleInfo
 from src.downloaders.cdp.subtitle_fetcher import fetch_subtitle, sort_subtitle_tracks
@@ -44,18 +45,6 @@ NSIG_ERROR_PATTERNS = [
     "n query parameter not found",
     "nsig function code",
 ]
-
-# 瞬时性错误模式（YouTube 偶尔返回不完整响应，重试大概率成功）
-TRANSIENT_ERROR_PATTERNS = [
-    "requested format is not available",
-]
-
-
-def _is_transient_error(error_msg: str) -> bool:
-    """检测错误消息是否为可重试的瞬时性错误。"""
-    error_lower = error_msg.lower()
-    return any(pattern in error_lower for pattern in TRANSIENT_ERROR_PATTERNS)
-
 
 def _is_nsig_error(error_msg: str) -> bool:
     """
@@ -389,30 +378,9 @@ class AudioDownloader:
             except (ValueError, TypeError):
                 pass
 
-    def _build_extractor_args(self, pot_token: Optional[str] = None) -> Dict[str, Any]:
-        """
-        构建 yt-dlp extractor_args，包含 PO Token 服务地址和 player client 配置。
-
-        确保 bgutil:http provider 能连接到正确的 POT 服务，
-        而不是使用默认的 127.0.0.1:4416（在 Docker 容器中不可达）。
-
-        注意：仅在 pot-provider 健康时注入 bgutil 配置，
-        否则 yt-dlp 的 bgutil 插件会无限重试导致任务超时。
-        """
-        # Player client 选择策略（与 core/downloader.py 保持一致）
-        # tv_embedded 已被 yt-dlp 废弃（2026.03+）
-        youtube_args: Dict[str, list] = {
-            "player_client": ["web_creator"] if self.settings.cookie_file else ["ios", "web_creator"],
-            "player_js_version": ["actual"],
-        }
-        if pot_token:
-            youtube_args["po_token"] = [pot_token]
-
-        args: Dict[str, Any] = {"youtube": youtube_args}
-
-        # 仅在 PO Token 功能启用且 pot-provider 健康时注入 bgutil 配置
-        # pot-provider 不可用时注入此配置会导致 yt-dlp 的 bgutil 插件
-        # 无限重试获取 PO Token，最终耗尽任务超时时间
+    def _build_extractor_args(self) -> Dict[str, Any]:
+        """Configure the optional bgutil provider without overriding yt-dlp client defaults."""
+        args: Dict[str, Any] = {}
         if self.settings.cdp_enable_pot_token and self.settings.pot_server_url:
             from src.downloaders.pot_health import PotProviderHealthTracker
             tracker = PotProviderHealthTracker.get_instance()
@@ -425,7 +393,6 @@ class AudioDownloader:
                     f"[{self.downloader_name}] Skipping bgutil config injection: "
                     f"pot-provider unavailable (failures: {tracker.consecutive_failures})"
                 )
-
         return args
 
     def _build_base_opts(self) -> Dict[str, Any]:
@@ -441,7 +408,6 @@ class AudioDownloader:
         video_id: str,
         cookie_file: Path,
         task_id: str,
-        pot_token: Optional[str] = None,
     ) -> AudioInfo:
         """
         使用 yt-dlp + cookies 提取音频信息（避免触发下载）。
@@ -451,7 +417,6 @@ class AudioDownloader:
             video_id: 视频 ID
             cookie_file: cookies 文件路径
             task_id: 任务 ID
-            pot_token: 可选的 PO Token
 
         Returns:
             AudioInfo: 音频信息
@@ -474,7 +439,8 @@ class AudioDownloader:
             # 格式优先级：m4a > webm，排除需要清单文件的格式
             "format": "bestaudio[protocol!^=http_dash_segments][protocol!=m3u8]/bestaudio",
             "quiet": True,
-            "no_warnings": True,
+            "no_warnings": False,
+            "logger": YtDlpLogger(),
             "skip_download": True,  # 关键：禁止下载
             "simulate": False,
             "extract_flat": False,
@@ -482,10 +448,7 @@ class AudioDownloader:
             **self._build_base_opts(),
         }
 
-        # 注入 extractor_args（PO Token 服务地址 + player_client + 可选 poToken）
-        ydl_opts["extractor_args"] = self._build_extractor_args(pot_token)
-        if pot_token:
-            logger.info(f"[{self.downloader_name}] Using poToken for {video_id}")
+        ydl_opts["extractor_args"] = self._build_extractor_args()
 
         try:
             # 在线程池中执行（避免阻塞）
@@ -592,7 +555,6 @@ class AudioDownloader:
         video_id: str,
         cookie_file: Path,
         task_id: str,
-        pot_token: Optional[str] = None,
         include_audio: bool = True,
         include_transcript: bool = True,
     ) -> ExtractedInfo:
@@ -606,7 +568,6 @@ class AudioDownloader:
             video_id: 视频 ID
             cookie_file: cookies 文件路径
             task_id: 任务 ID
-            pot_token: 可选的 PO Token
             include_audio: 是否提取音频信息
             include_transcript: 是否提取字幕信息
 
@@ -631,7 +592,8 @@ class AudioDownloader:
         ydl_opts = {
             "cookiefile": str(cookie_file),
             "quiet": True,
-            "no_warnings": True,
+            "no_warnings": False,
+            "logger": YtDlpLogger(),
             "skip_download": True,
             "simulate": False,
             "extract_flat": False,
@@ -646,74 +608,39 @@ class AudioDownloader:
             # 仅字幕模式：忽略格式错误（n challenge 失败不影响字幕获取）
             ydl_opts["ignore_no_formats_error"] = True
 
-        # 注入 extractor_args（PO Token 服务地址 + 可选 poToken）
-        ydl_opts["extractor_args"] = self._build_extractor_args(pot_token)
-        if pot_token:
-            logger.info(f"[{self.downloader_name}] Using poToken for {video_id}")
+        ydl_opts["extractor_args"] = self._build_extractor_args()
 
-        # 瞬时错误内部重试（YouTube 偶尔返回不完整格式列表）
-        max_transient_retries = 1
-        last_transient_error = None
-
-        for attempt in range(max_transient_retries + 1):
-            try:
-                info = await self._extract_and_parse_video_info(
-                    video_url, video_id, ydl_opts, include_audio, include_transcript,
-                )
-                return info
-
-            except DownloaderError:
-                raise
-
-            except Exception as e:
-                error_msg = str(e)
-                error_msg_lower = error_msg.lower()
-
-                # 检测直播/直播预约/首播视频（视频级别问题，无需降级）
-                if (
-                    "premieres in" in error_msg_lower
-                    or "live event" in error_msg_lower
-                    or "is a livestream" in error_msg_lower
-                ):
-                    raise DownloaderError(
-                        message="Live streams are not supported",
-                        error_code=ErrorCode.VIDEO_LIVE_STREAM,
-                        downloader=self.downloader_name,
-                        stop_fallback=True,
-                    )
-
-                # 检测 nsig/n challenge 错误（全局性问题）
-                if _is_nsig_error(error_msg):
-                    raise DownloaderError(
-                        message=f"yt-dlp nsig extraction failed (yt-dlp update required): {error_msg}",
-                        error_code=ErrorCode.CDP_NSIG_FAILED,
-                        downloader=self.downloader_name,
-                    )
-
-                # 瞬时错误：内部重试一次
-                if _is_transient_error(error_msg) and attempt < max_transient_retries:
-                    delay = 3 + random.uniform(0, 2)
-                    logger.warning(
-                        f"[{self.downloader_name}] Transient error for {video_id}, "
-                        f"retrying in {delay:.1f}s ({attempt + 1}/{max_transient_retries}): "
-                        f"{error_msg[:100]}"
-                    )
-                    last_transient_error = error_msg
-                    await asyncio.sleep(delay)
-                    continue
-
+        try:
+            return await self._extract_and_parse_video_info(
+                video_url, video_id, ydl_opts, include_audio, include_transcript,
+            )
+        except DownloaderError:
+            raise
+        except Exception as e:
+            error_msg = str(e)
+            error_msg_lower = error_msg.lower()
+            if (
+                "premieres in" in error_msg_lower
+                or "live event" in error_msg_lower
+                or "is a livestream" in error_msg_lower
+            ):
                 raise DownloaderError(
-                    message=f"yt-dlp extraction failed: {error_msg}",
-                    error_code=ErrorCode.CDP_YTDLP_FAILED,
+                    message="Live streams are not supported",
+                    error_code=ErrorCode.VIDEO_LIVE_STREAM,
+                    downloader=self.downloader_name,
+                    stop_fallback=True,
+                )
+            if _is_nsig_error(error_msg):
+                raise DownloaderError(
+                    message=f"yt-dlp nsig extraction failed (yt-dlp update required): {error_msg}",
+                    error_code=ErrorCode.CDP_NSIG_FAILED,
                     downloader=self.downloader_name,
                 )
-
-        # 瞬时重试耗尽
-        raise DownloaderError(
-            message=f"yt-dlp transient error persisted after retries: {last_transient_error}",
-            error_code=ErrorCode.CDP_YTDLP_FAILED,
-            downloader=self.downloader_name,
-        )
+            raise DownloaderError(
+                message=f"yt-dlp extraction failed: {error_msg}",
+                error_code=ErrorCode.CDP_YTDLP_FAILED,
+                downloader=self.downloader_name,
+            )
 
     async def _extract_and_parse_video_info(
         self,
@@ -726,7 +653,7 @@ class AudioDownloader:
         """
         执行 yt-dlp 提取并解析视频信息。
 
-        从 extract_video_info 中提取出来以支持瞬时错误重试。
+        从 extract_video_info 中提取出来以隔离 yt-dlp 调用和结果解析。
         """
         # 在线程池中执行（避免阻塞）
         info = await asyncio.to_thread(self._ytdlp_extract_info, video_url, ydl_opts)
@@ -1835,7 +1762,8 @@ class AudioDownloader:
             "cookiefile": str(cookie_file),
             "format": "bestaudio",
             "quiet": True,
-            "no_warnings": True,
+            "no_warnings": False,
+            "logger": YtDlpLogger(),
             "outtmpl": outtmpl,
             "noplaylist": True,
             "extractor_args": self._build_extractor_args(),

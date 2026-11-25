@@ -87,6 +87,49 @@ async def test_closed_failures_reach_threshold_opens():
     assert cb.state == CircuitState.OPEN
 
 
+async def test_async_ignored_failures_do_not_increment_or_open():
+    """调用方判定为非系统性错误时，不增加失败数也不打开熔断器。"""
+    cb = CircuitBreaker("t", failure_threshold=2)
+    for _ in range(10):
+        with pytest.raises(ValueError):
+            await cb.call_async(
+                _fail_async(ValueError("private video")),
+                should_record_failure=lambda error: False,
+            )
+    assert cb.failure_count == 0
+    assert cb.is_closed
+
+
+async def test_async_ignored_half_open_failure_releases_probe_slot():
+    """半开探测遇到不计数错误时，归还名额以允许后续真实探测。"""
+    cb = CircuitBreaker(
+        "t", failure_threshold=1, timeout=0, half_open_max_calls=1, success_threshold=1
+    )
+    with pytest.raises(ValueError):
+        await cb.call_async(_fail_async(ValueError("systemic")))
+    with pytest.raises(ValueError):
+        await cb.call_async(
+            _fail_async(ValueError("private video")),
+            should_record_failure=lambda error: False,
+        )
+
+    assert cb.is_half_open
+    assert cb.failure_count == 1
+    assert cb.half_open_calls == 0
+    await cb.call_async(_ok_async())
+    assert cb.is_closed
+
+
+async def test_async_call_forwards_arguments_and_keywords():
+    """异步熔断器保留向被包装函数传递参数的契约。"""
+    cb = CircuitBreaker("t")
+
+    async def combine(prefix, *, suffix):
+        return f"{prefix}-{suffix}"
+
+    assert await cb.call_async(combine, "left", suffix="right") == "left-right"
+
+
 # ---------------------------------------------------------------------------
 # OPEN 状态
 # ---------------------------------------------------------------------------

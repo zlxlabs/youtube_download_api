@@ -42,18 +42,14 @@ except Exception as e:
     print(f"[FAIL] {e}")
     sys.exit(1)
 
-print("\nTest 4: Check POT Token was integrated")
+print("\nTest 4: Check obsolete manual POT token bypass was removed")
 try:
-    import inspect
-
-    # 读取文件内容检查（CDP 下载器已模块化）
     cdp_file = project_root / "src" / "downloaders" / "cdp" / "downloader.py"
     content = cdp_file.read_text(encoding="utf-8")
 
     checks = [
-        ("_get_pot_token", "_get_pot_token" in content),
-        ("pot_token获取", "pot_token" in content and "get_pot" in content),
-        ("cdp_enable_pot_token配置", "cdp_enable_pot_token" in content),
+        ("_get_pot_token bypass", "_get_pot_token" not in content),
+        ("/get_pot request", "/get_pot" not in content),
     ]
 
     for name, result in checks:
@@ -61,9 +57,9 @@ try:
         print(f"  {status} {name}")
 
     if all(r for _, r in checks):
-        print("[PASS] POT Token integration found in code")
+        print("[PASS] Manual POT token bypass removed")
     else:
-        print("[FAIL] POT Token integration incomplete")
+        print("[FAIL] Manual POT token bypass remains")
         sys.exit(1)
 
 except Exception as e:
