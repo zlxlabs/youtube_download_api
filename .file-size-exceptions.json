@@ -1,0 +1,17 @@
+[
+  {
+    "path": "src/core/worker.py",
+    "ceiling": 1644,
+    "reason": "grandfather: pre-existing 1644-line file before 1500-line repo gate was introduced (Refs #20)"
+  },
+  {
+    "path": "src/downloaders/cdp/audio_downloader.py",
+    "ceiling": 2171,
+    "reason": "grandfather: pre-existing 2171-line file before 1500-line repo gate was introduced (Refs #20)"
+  },
+  {
+    "path": "src/db/database.py",
+    "ceiling": 1937,
+    "reason": "grandfather: pre-existing 1937-line file before 1500-line repo gate was introduced (Refs #20)"
+  }
+]
