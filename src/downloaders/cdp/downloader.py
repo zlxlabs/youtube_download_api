@@ -460,30 +460,24 @@ class CDPDownloader(BaseDownloader):
                             downloader=self.name,
                         )
 
-                # 10. 下载字幕（如果需要）
+                # 10. 下载字幕（如果需要）。失败上抛，不把 429 压成 has_transcript=False。
                 transcript_path = None
-                has_transcript = False
-                if include_transcript:
-                    if extracted_info.subtitles:
-                        # 选择最佳字幕（已按优先级排序）
-                        best_subtitle = extracted_info.subtitles[0]
-                        transcript_path = await self._audio_downloader.download_subtitle(
-                            video_url=video_url,
-                            video_id=video_id,
-                            cookie_file=cookie_file,
-                            output_dir=output_dir,
-                            subtitle_lang=best_subtitle.lang,
-                        )
-                        if transcript_path:
-                            has_transcript = True
-                            logger.info(
-                                f"[cdp] Subtitle downloaded: {transcript_path.name} "
-                                f"(lang={best_subtitle.lang}, auto={best_subtitle.is_auto})"
-                            )
-                        else:
-                            logger.warning(f"[cdp] Subtitle download failed for {video_id}")
-                    else:
-                        logger.info(f"[cdp] No subtitles available for {video_id}")
+                has_transcript = False if include_transcript else None
+                if include_transcript and extracted_info.subtitles:
+                    best_subtitle = extracted_info.subtitles[0]
+                    transcript_path = await self._audio_downloader.download_subtitle(
+                        subtitle=best_subtitle,
+                        video_id=video_id,
+                        cookie_file=cookie_file,
+                        output_dir=output_dir,
+                    )
+                    has_transcript = True
+                    logger.info(
+                        f"[cdp] Subtitle downloaded: {transcript_path.name} "
+                        f"(lang={best_subtitle.lang}, auto={best_subtitle.is_auto})"
+                    )
+                elif include_transcript:
+                    logger.info(f"[cdp] No subtitles available for {video_id}")
 
                 # 11. 构造成功结果
                 metadata = VideoMetadata(

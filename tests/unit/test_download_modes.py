@@ -479,7 +479,7 @@ class TestWorkerExecutionModes:
             video_metadata=self._make_metadata(video_id),
             audio_path=audio_file,
             transcript_path=None,
-            has_transcript=False,
+            has_transcript=None,
         ))
 
         task = Task(

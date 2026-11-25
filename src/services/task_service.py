@@ -184,36 +184,9 @@ class TaskService:
         existing_audio = existing_files.get("audio")
         existing_transcript = existing_files.get("transcript")
 
-        # Check if video is known to have no native transcript
-        video_resource = await self.db.get_video_resource(video_id)
-        video_has_no_transcript = (
-            video_resource is not None
-            and video_resource.has_native_transcript is False
-        )
-
         # Determine what we need
         need_audio = request.include_audio and existing_audio is None
         need_transcript = request.include_transcript and existing_transcript is None
-
-        # Special case: user requests transcript, but video is known to have none
-        # If audio exists, return it as fallback (no need to create new task)
-        if (
-            need_transcript
-            and video_has_no_transcript
-            and existing_audio is not None
-        ):
-            logger.info(
-                f"Cache hit for video {video_id}: no native transcript, "
-                f"returning existing audio as fallback"
-            )
-            return await self._build_cached_response(
-                video_id=video_id,
-                video_url=request.video_url,
-                request=request,
-                audio_file=existing_audio,
-                transcript_file=None,
-                audio_fallback=True,
-            )
 
         # If all requested resources exist, return immediately (cache hit)
         if not need_audio and not need_transcript:

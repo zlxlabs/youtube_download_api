@@ -792,7 +792,7 @@ class DownloadWorker:
 
                 # Audio fallback 逻辑：仅字幕模式但无字幕时，自动下载音频
                 audio_fallback = False
-                if not need_audio and need_transcript and not result.has_transcript:
+                if not need_audio and need_transcript and result.has_transcript is False:
                     logger.info(
                         f"Task {task.id}: No transcript available, falling back to audio download"
                     )
@@ -837,11 +837,11 @@ class DownloadWorker:
                     thumbnail=result.video_metadata.thumbnail,
                 )
 
-                # Update video resource with metadata
+                # 仅在本次真正探测字幕时写入三态；纯音频/未探测不得覆写。
                 await self._update_video_resource(
                     task.video_id,
                     video_info,
-                    result.has_transcript,
+                    first_result.has_transcript if need_transcript else None,
                 )
 
                 # Process audio file
@@ -952,7 +952,7 @@ class DownloadWorker:
         self,
         video_id: str,
         video_info: VideoInfo,
-        has_native_transcript: bool,
+        has_native_transcript: Optional[bool],
     ) -> None:
         """
         Update video resource with metadata.
@@ -1079,9 +1079,9 @@ class DownloadWorker:
                     f"in {retry_delay:.0f}s"
                 )
 
-                await asyncio.sleep(retry_delay)
-                # 重试任务使用最低优先级，新任务会优先处理
-                await self.task_service.task_queue.put((RETRY_QUEUE_PRIORITY, task.id))
+                asyncio.get_running_loop().call_later(
+                    retry_delay, lambda tid=task.id: asyncio.create_task(  # type: ignore[misc]
+                        self.task_service.task_queue.put((RETRY_QUEUE_PRIORITY, tid))))
                 return
 
         await self.db.update_task_status(

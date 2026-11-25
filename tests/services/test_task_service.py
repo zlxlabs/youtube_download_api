@@ -861,13 +861,8 @@ class TestActiveTaskDedupCoverage:
 
 class TestTranscriptFallbackHasNativeTranscriptSemantics:
     """
-    create_task 顶部的音频兜底判断只应在 video_resource.has_native_transcript
-    严格等于 False（== 已被 worker 真实探测确认无字幕）时触发；has_native_transcript
-    为 None（尚未探测）绝不能触发兜底，否则 precheck 元数据落库时误写的 False
-    （已修复的 P2 bug）一旦复现，会让原本只是"还没探测过"的视频被错误地当成
-    "确认无字幕"处理，把用户请求的字幕悄悄替换成音频。
-
-    使用禁用 precheck 的 TaskService，隔离前置检查逻辑，只验证这段读取判断本身。
+    create_task 不再因历史 has_native_transcript=False 跳过字幕、直接返回旧音频。
+    None 与 False 都应创建探测任务。使用禁用 precheck 的 TaskService 隔离验证。
     """
 
     @pytest_asyncio.fixture
@@ -928,13 +923,12 @@ class TestTranscriptFallbackHasNativeTranscriptSemantics:
         assert response.status == TaskStatus.PENDING
 
     @pytest.mark.asyncio
-    async def test_confirmed_no_transcript_triggers_audio_fallback(
+    async def test_confirmed_no_transcript_still_creates_transcript_task(
         self, test_db: Database, test_settings: Settings, service: TaskService
     ) -> None:
         """
-        测试 D（回归，锁定既有行为不被破坏）：has_native_transcript=False
-        （worker 真实探测确认无字幕）+ 音频已缓存 + 请求字幕
-        -> 应触发音频兜底，直接返回缓存的音频，不创建新任务。
+        测试 D：has_native_transcript=False + 音频已缓存 + 请求字幕
+        -> 不再走负缓存捷径，应创建下载任务重新探测字幕。
         """
         video_id = "transcriptd01"
         await test_db.get_or_create_video_resource(video_id)
@@ -948,10 +942,9 @@ class TestTranscriptFallbackHasNativeTranscriptSemantics:
         )
         response = await service.create_task(request)
 
-        assert response.cache_hit is True
-        assert response.task_id is None
-        assert response.result is not None
-        assert response.result.audio_fallback is True
+        assert response.cache_hit is False
+        assert response.task_id is not None
+        assert response.status == TaskStatus.PENDING
 
 
 # ==================== 同视频并发建任务的 TOCTOU 窗口(Codex 第6轮问题2) ====================
