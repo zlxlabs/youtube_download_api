@@ -72,8 +72,8 @@ class DownloaderResult:
     audio_path: Optional[Path] = None
     transcript_path: Optional[Path] = None
 
-    # 字幕信息
-    has_transcript: bool = False  # 视频是否有可用字幕
+    # 字幕存在性三态：True=确认有字幕，False=完整探测且字幕列表为空，None=未探测或探测/下载失败
+    has_transcript: Optional[bool] = None
 
     # 部分成功支持
     partial_success: bool = False  # 是否是部分成功（请求多项但只成功部分）

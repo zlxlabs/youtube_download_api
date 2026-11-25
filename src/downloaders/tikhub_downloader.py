@@ -162,7 +162,7 @@ class TikHubDownloader(BaseDownloader):
 
             # 4. 下载字幕（如果需要）
             transcript_path = None
-            has_transcript = False
+            has_transcript = False if include_transcript else None
             if include_transcript:
                 logger.debug("[tikhub] Step 4: Selecting subtitle...")
                 subtitle_info = self._select_subtitle(video_data)

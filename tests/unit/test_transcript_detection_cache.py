@@ -299,5 +299,10 @@ class TestTranscriptDetectionCache:
         mock_dependencies["db"].update_video_resource.assert_called_once()
 
 
+def test_subtitle_download_failed_marker_in_audio_downloader() -> None:
+    source = Path("src/downloaders/cdp/audio_downloader.py").read_text(encoding="utf-8")
+    assert "SUBTITLE-DOWNLOAD-FAILED" in source
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
