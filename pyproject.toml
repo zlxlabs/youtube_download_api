@@ -13,12 +13,8 @@ dependencies = [
     # Download Core
     # curl-cffi extras enables TLS fingerprint impersonation
     # 2026-01-25: 升级到 0.14.0 修复 TLS 错误
-    # yt-dlp 使用预发布版本以支持 curl-cffi 0.14.0
     "curl-cffi>=0.14.0",
-    "yt-dlp[default,curl-cffi]>=2026.1.19",
-    # bgutil PO Token 插件在 Dockerfile CMD 中根据 POT_PROVIDER_TYPE 动态安装
-    # rust: bgutil-ytdlp-pot-provider-rs (from GitHub)
-    # nodejs: bgutil-ytdlp-pot-provider (from PyPI)
+    "yt-dlp[default]>=2026.11.23",
     # CDP Downloader (Playwright)
     "playwright>=1.40.0",
     # Database

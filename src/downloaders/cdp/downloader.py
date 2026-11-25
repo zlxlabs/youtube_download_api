@@ -423,16 +423,12 @@ class CDPDownloader(BaseDownloader):
                     page, video_url, video_id, task_id, video_duration
                 )
 
-                # 7. 获取 PO Token（如果启用）
-                pot_token = await self._get_pot_token_safe(video_id)
-
-                # 8. 一次性提取视频信息（音频 URL + 字幕信息）
+                # 7. 一次性提取视频信息（音频 URL + 字幕信息）
                 extracted_info = await self._audio_downloader.extract_video_info(
                     video_url=video_url,
                     video_id=video_id,
                     cookie_file=cookie_file,
                     task_id=task_id,
-                    pot_token=pot_token,
                     include_audio=include_audio,
                     include_transcript=include_transcript,
                 )
@@ -828,48 +824,6 @@ class CDPDownloader(BaseDownloader):
         task.add_done_callback(handle_task_exception)
         return True
 
-    async def _get_pot_token_safe(self, video_id: str) -> Optional[str]:
-        """
-        安全获取 PO Token（失败不抛出异常）。
-
-        集成 PotProviderHealthTracker：
-        - pot-provider 不可用时跳过请求（避免无谓等待）
-        - 成功/失败时更新健康状态
-
-        Args:
-            video_id: 视频 ID
-
-        Returns:
-            PO Token 或 None
-        """
-        if not self.settings.cdp_enable_pot_token:
-            return None
-
-        from src.downloaders.pot_health import PotProviderHealthTracker
-        tracker = PotProviderHealthTracker.get_instance()
-
-        # pot-provider 不可用时跳过（冷却期内不浪费时间）
-        if not tracker.is_available():
-            logger.debug(
-                f"[cdp] Skipping poToken for {video_id}: "
-                f"provider unavailable (failures: {tracker.consecutive_failures})"
-            )
-            return None
-
-        try:
-            pot_token = await self._get_pot_token(video_id)
-            if pot_token:
-                tracker.record_success()
-                return pot_token
-            else:
-                tracker.record_failure()
-                logger.warning(f"[cdp] Failed to get poToken for {video_id}")
-                return None
-        except Exception as e:
-            tracker.record_failure()
-            logger.warning(f"[cdp] poToken acquisition error: {e}")
-            return None
-
     # ========== Cookie 同步方法 ==========
 
     async def _sync_cookie_to_shared_location(self, cookie_file: Path) -> None:
@@ -925,51 +879,6 @@ class CDPDownloader(BaseDownloader):
                     "error": str(e),
                 }
             )
-
-    # ========== POT Token 方法 ==========
-
-    async def _get_pot_token(self, video_id: str) -> Optional[str]:
-        """
-        从 POT Provider 获取 poToken。
-
-        Args:
-            video_id: 视频 ID
-
-        Returns:
-            poToken 字符串，或 None（如果获取失败）
-        """
-        if not self.settings.pot_server_url:
-            logger.debug("[cdp] POT_SERVER_URL not configured")
-            return None
-
-        try:
-            import httpx
-
-            pot_url = f"{self.settings.pot_server_url.rstrip('/')}/get_pot"
-            payload = {
-                "client": "web",
-                "video_id": video_id,
-            }
-
-            timeout = httpx.Timeout(10.0, connect=5.0)
-
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                response = await client.post(pot_url, json=payload)
-                response.raise_for_status()
-
-                data = response.json()
-                pot_token = data.get("po_token") or data.get("poToken")
-
-                if pot_token:
-                    logger.debug(f"[cdp] Successfully got poToken for {video_id}")
-                    return str(pot_token)
-                else:
-                    logger.warning(f"[cdp] POT provider returned no token: {data}")
-                    return None
-
-        except Exception as e:
-            logger.warning(f"[cdp] Failed to get poToken from {self.settings.pot_server_url}: {e}")
-            return None
 
     # ========== 熔断器管理 ==========
 

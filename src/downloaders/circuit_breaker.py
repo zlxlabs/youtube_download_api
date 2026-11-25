@@ -7,7 +7,7 @@
 
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Awaitable, Callable, Optional, TypeVar
+from typing import Any, Awaitable, Callable, Optional, TypeVar
 
 from src.utils.logger import logger
 
@@ -134,12 +134,21 @@ class CircuitBreaker:
                 self.half_open_calls -= 1
             raise
 
-    async def call_async(self, func: Callable[[], Awaitable[T]]) -> T:
+    async def call_async(
+        self,
+        func: Callable[..., Awaitable[T]],
+        *args: Any,
+        should_record_failure: Optional[Callable[[Exception], bool]] = None,
+        **kwargs: Any,
+    ) -> T:
         """
         通过熔断器调用异步函数。
 
         Args:
-            func: 要调用的异步函数（无参数）
+            func: 要调用的异步函数
+            *args: 传递给异步函数的位置参数
+            should_record_failure: 可选的异常计数判定函数
+            **kwargs: 传递给异步函数的关键字参数
 
         Returns:
             函数返回值
@@ -169,11 +178,14 @@ class CircuitBreaker:
 
         # 3. 执行调用
         try:
-            result = await func()
+            result = await func(*args, **kwargs)
             self._on_success()
             return result
-        except Exception:
-            self._on_failure()
+        except Exception as error:
+            if should_record_failure is None or should_record_failure(error):
+                self._on_failure()
+            elif acquired_half_open and self.state == CircuitState.HALF_OPEN:
+                self.half_open_calls -= 1
             raise
         except BaseException:
             # asyncio.CancelledError（任务超时取消，见 worker.py 的 wait_for）

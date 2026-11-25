@@ -1,0 +1,60 @@
+name: Bump yt-dlp
+
+on:
+  schedule:
+    - cron: "17 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Check PyPI for a newer yt-dlp release
+        id: versions
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import tomllib
+          import urllib.request
+
+          with open("uv.lock", "rb") as lock_file:
+              packages = tomllib.load(lock_file)["package"]
+          locked = next(package["version"] for package in packages if package["name"] == "yt-dlp")
+          with urllib.request.urlopen("https://pypi.org/pypi/yt-dlp/json") as response:
+              latest = json.load(response)["info"]["version"]
+          is_newer = tuple(map(int, latest.split("."))) > tuple(map(int, locked.split(".")))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"update={'true' if is_newer else 'false'}\n")
+          print(f"Locked yt-dlp: {locked}; latest on PyPI: {latest}")
+          PY
+
+      - name: Update yt-dlp and yt-dlp-ejs lock entries
+        if: steps.versions.outputs.update == 'true'
+        run: uv lock --upgrade-package yt-dlp --upgrade-package yt-dlp-ejs
+
+      - name: Create or update dependency pull request
+        if: steps.versions.outputs.update == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          add-paths: uv.lock
+          branch: automation/bump-ytdlp
+          delete-branch: true
+          title: "chore(deps): bump yt-dlp"
+          commit-message: |-
+            chore(deps): bump yt-dlp
+
+            Refs #20
+          body: "Refs #20"
