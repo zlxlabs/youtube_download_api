@@ -1,0 +1,17 @@
+[
+  {
+    "path": "src/core/worker.py",
+    "ceiling": 1644,
+    "reason": "Historical file exceeding 1500-line hard limit before file-size gate adoption; grandfathered at current line count (Refs #20)."
+  },
+  {
+    "path": "src/downloaders/cdp/audio_downloader.py",
+    "ceiling": 2171,
+    "reason": "Historical file exceeding 1500-line hard limit before file-size gate adoption; grandfathered at current line count and slated for net reduction (Refs #20)."
+  },
+  {
+    "path": "src/db/database.py",
+    "ceiling": 1937,
+    "reason": "Historical file exceeding 1500-line hard limit before file-size gate adoption; grandfathered at current line count (Refs #20)."
+  }
+]
