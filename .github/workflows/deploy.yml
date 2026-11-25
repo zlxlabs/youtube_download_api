@@ -28,6 +28,7 @@ jobs:
       healthcheck_retries: 12
       healthcheck_interval: 5
       ci_templates_ref: v2
+      environment: production                            # 只允许 main；同名 secret 以 Environment 值优先（#17）
     secrets:                                             # 逐个显式传,最小权限
       ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
       ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
