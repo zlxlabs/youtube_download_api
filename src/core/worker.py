@@ -1588,7 +1588,11 @@ class DownloadWorker:
                 )
                 return
 
-            if (audio_requested and audio_success) or transcript_probe_succeeded:
+            if (
+                audio_requested
+                and audio_success
+                and not transcript_requested
+            ) or transcript_probe_succeeded:
                 # 字幕恢复，降级到音频熔断
                 logger.info("📉 Transcript recovered, downgrading to audio ban")
                 await self.ip_ban_breaker.downgrade_to_audio_ban()

@@ -242,11 +242,8 @@ class IPBanCircuitBreaker:
         """
         old_state = self.get_state()
         if self.current_level == IPBanLevel.FULLY_BANNED:
-            self.banned_at = datetime.now()
-            self.last_attempt_at = None
-            self.failed_attempts = 0
             logger.warning("Full IP ban retained after audio 403")
-            await self._emit_state_change("extended", old_state, reason=reason)
+            await self.record_failed_attempt()
             return
         self.current_level = IPBanLevel.AUDIO_BANNED
         self.banned_at = datetime.now()

@@ -23,13 +23,19 @@ async def test_probe_lease_allows_only_one_attempt_per_cooldown_window():
 
 
 @pytest.mark.asyncio
-async def test_audio_trigger_cannot_downgrade_full_ban():
+async def test_audio_trigger_cannot_downgrade_full_ban_or_reset_its_window():
     breaker = IPBanCircuitBreaker()
-    await breaker.trigger_full_ban()
+    banned_at = datetime.now() - timedelta(hours=2)
+    prior_attempt = datetime.now() - timedelta(minutes=5)
+    await breaker.restore_state(IPBanLevel.FULLY_BANNED, banned_at, prior_attempt, 2)
 
     await breaker.trigger_audio_ban(reason="audio 403")
 
     assert breaker.get_current_level() == IPBanLevel.FULLY_BANNED
+    assert breaker.banned_at == banned_at
+    assert breaker.failed_attempts == 3
+    assert breaker.last_attempt_at is not None
+    assert breaker.last_attempt_at > prior_attempt
 
 
 @pytest.mark.asyncio

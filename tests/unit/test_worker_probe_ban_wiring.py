@@ -212,6 +212,32 @@ class TestProbeSuccessDrivesBanRecovery:
 
 class TestFullBanAudioProbeRecovery:
     @pytest.mark.asyncio
+    async def test_mixed_probe_audio_success_transcript_failure_keeps_full_ban(
+        self, ban_settings: Settings
+    ) -> None:
+        worker = _make_worker(AsyncMock(), ban_settings)
+        await worker.ip_ban_breaker.trigger_full_ban()
+        result = DownloaderResult(
+            success=True,
+            partial_success=True,
+            downloader="ytdlp",
+            video_metadata=VideoMetadata(video_id="mixed-probe", title="Mixed"),
+            audio_path=Path("/tmp/probe-audio.m4a"),
+            transcript_path=None,
+            has_transcript=True,
+        )
+
+        await worker._analyze_result_and_update_ban(
+            result,
+            was_probe=True,
+            ban_level_before=IPBanLevel.FULLY_BANNED,
+            audio_requested=True,
+            transcript_requested=True,
+        )
+
+        assert worker.ip_ban_breaker.get_current_level() == IPBanLevel.FULLY_BANNED
+
+    @pytest.mark.asyncio
     async def test_audio_only_probe_downgrades_and_next_probe_is_leased(
         self, ban_settings: Settings
     ) -> None:
