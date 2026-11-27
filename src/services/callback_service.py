@@ -16,12 +16,11 @@ import httpx
 from src.api.schemas import (
     CallbackPayload,
     ErrorInfoResponse,
-    FileInfoResponse,
-    FilesResponse,
     VideoInfoResponse,
 )
 from src.db.database import Database
 from src.db.models import CallbackStatus, Task, TaskStatus
+from src.services.files_view import build_files_response
 from src.utils.logger import logger
 
 if TYPE_CHECKING:
@@ -259,33 +258,16 @@ class CallbackService:
                     thumbnail=video_info.thumbnail,
                 )
 
-            # Add file URLs (with base URL for external access)
-            if task.audio_file_id:
-                audio_url = f"{self.base_url}/api/v1/files/{task.audio_file_id}"
-                transcript_url = None
-                if task.transcript_file_id:
-                    transcript_url = (
-                        f"{self.base_url}/api/v1/files/{task.transcript_file_id}"
-                    )
-
-                payload.files = FilesResponse(
-                    audio=FileInfoResponse(
-                        url=audio_url,
-                        size=audio_file.size if audio_file else None,
-                        format=audio_file.format if audio_file else None,
-                        bitrate=None,
-                        language=None,
-                    ),
-                    transcript=FileInfoResponse(
-                        url=transcript_url,
-                        size=transcript_file.size if transcript_file else None,
-                        format="json",
-                        bitrate=None,
-                        language=transcript_file.language if transcript_file else None,
-                    )
-                    if transcript_url
-                    else None,
-                )
+            payload.files = build_files_response(
+                audio_file,
+                transcript_file,
+                audio_url=lambda file: (
+                    f"{self.base_url}/api/v1/files/{file.id}"
+                ),
+                transcript_url=lambda file: (
+                    f"{self.base_url}/api/v1/files/{file.id}"
+                ),
+            )
 
         # Add error info for failed tasks
         elif task.status == TaskStatus.FAILED and task.error_code:
