@@ -4,7 +4,6 @@
 提供视频资源的列表、详情、删除等管理功能。
 """
 
-from pathlib import Path
 from typing import Annotated, Any, Optional
 
 import aiosqlite
@@ -183,22 +182,10 @@ async def delete_video_resource(
                 detail=f"Video resource not found: {video_id}",
             )
 
-        # 删除数据库记录并获取文件路径列表
-        file_paths = await db.delete_video_resource(video_id)
-
-        # 物理删除文件
-        deleted_count = 0
-        failed_count = 0
-        for file_path in file_paths:
-            try:
-                path = Path(file_path)
-                if path.exists():
-                    path.unlink()
-                    deleted_count += 1
-                    logger.debug(f"Deleted file: {file_path}")
-            except Exception as e:
-                failed_count += 1
-                logger.error(f"Failed to delete file {file_path}: {e}")
+        counts = await file_service.delete_video_resource(video_id)
+        deleted_count = counts["files_deleted"]
+        failed_count = counts["files_failed"]
+        missing_count = counts["files_missing"]
 
         logger.info(
             f"Deleted video resource: {video_id} "
@@ -210,6 +197,7 @@ async def delete_video_resource(
             "message": "Video resource deleted successfully",
             "files_deleted": deleted_count,
             "files_failed": failed_count,
+            "files_missing": missing_count,
         }
 
     except HTTPException:

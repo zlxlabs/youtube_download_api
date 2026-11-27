@@ -10,7 +10,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from src.config import Settings
 from src.db.database import Database
@@ -310,6 +310,66 @@ class FileService:
 
         return result
 
+    async def delete_video_resource(self, video_id: str) -> dict[str, int]:
+        """Delete a video's database records, then its physical files."""
+        records = await self.db.get_files_by_video(video_id)
+        paths = [self.data_dir / record.filepath for record in records]
+        await self.db.delete_video_resource(video_id)
+        result = {"files_deleted": 0, "files_missing": 0, "files_failed": 0}
+        for record, path in zip(records, paths):
+            try:
+                if path.is_file():
+                    path.unlink()
+                    result["files_deleted"] += 1
+                else:
+                    result["files_missing"] += 1
+            except OSError as error:
+                result["files_failed"] += 1
+                logger.error(f"Failed to delete file {record.id} at {path}: {error}")
+        return result
+
+    async def delete_file_record(self, file_id: str) -> bool:
+        """Delete one file record first, then its stored file."""
+        record = await self.db.get_file(file_id)
+        if record is None:
+            return False
+        await self.db.delete_file(file_id)
+        path = self.data_dir / record.filepath
+        if path.is_file():
+            path.unlink()
+        return True
+
+    async def cleanup_orphan_files(
+        self, grace_period_seconds: int = 600, dry_run: bool = False
+    ) -> dict[str, int]:
+        """Reconcile aged UUID-prefixed files not represented in the files table."""
+        cutoff = datetime.now(timezone.utc).timestamp() - grace_period_seconds
+        result = {"scanned": 0, "orphans_found": 0, "orphans_deleted": 0, "skipped_within_grace": 0}
+        for directory in (self.settings.audio_dir, self.settings.transcript_dir):
+            if not directory.exists():
+                continue
+            for path in directory.iterdir():
+                if not path.is_file():
+                    continue
+                prefix = path.name.split("_", 1)[0]
+                try:
+                    uuid4_type = UUID(prefix)
+                except ValueError:
+                    continue
+                if str(uuid4_type) != prefix.lower():
+                    continue
+                result["scanned"] += 1
+                if await self.db.get_file(str(uuid4_type)):
+                    continue
+                if path.stat().st_mtime >= cutoff:
+                    result["skipped_within_grace"] += 1
+                    continue
+                result["orphans_found"] += 1
+                if not dry_run:
+                    path.unlink()
+                    result["orphans_deleted"] += 1
+        return result
+
     async def cleanup_expired_files(self) -> int:
         """
         Clean up files that haven't been accessed within retention period.
@@ -328,17 +388,18 @@ class FileService:
             try:
                 file_path = self.data_dir / file_record.filepath
 
-                # Delete physical file
-                if file_path.exists():
+                await self.db.delete_file(file_record.id)
+                if file_path.is_file():
                     file_path.unlink()
                     logger.info(f"Deleted expired file: {file_path}")
-
-                # Delete database record
-                await self.db.delete_file(file_record.id)
                 deleted_count += 1
 
             except Exception as e:
                 logger.error(f"Failed to delete file {file_record.id}: {e}")
+
+        orphan_stats = await self.cleanup_orphan_files()
+        if orphan_stats["orphans_deleted"]:
+            logger.info(f"Deleted {orphan_stats['orphans_deleted']} orphan files")
 
         # Clean up empty directories
         self._cleanup_empty_dirs()

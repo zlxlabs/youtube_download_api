@@ -538,16 +538,8 @@ class ManualUploadService:
             return False
 
         file_id = row["id"]
-        file_record = await self.db.get_file(file_id)
-        if not file_record:
+        deleted = await self.file_service.delete_file_record(file_id)
+        if not deleted:
             return False
-
-        file_path = self.settings.data_dir / file_record.filepath
-        if file_path.exists():
-            file_path.unlink()
-            logger.info(f"[ManualUpload] Deleted file: {file_path}")
-
-        await self.db.delete_file(file_id)
         logger.info(f"[ManualUpload] Deleted manual upload for video {video_id}")
-
         return True
