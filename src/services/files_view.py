@@ -13,6 +13,7 @@ def build_files_response(
     *,
     audio_url: FileURL,
     transcript_url: FileURL,
+    default_transcript_format: Optional[str] = "json",
 ) -> Optional[FilesResponse]:
     """Project file records into the shared API response shape."""
     if audio_file is None and transcript_file is None:
@@ -24,7 +25,11 @@ def build_files_response(
             url=audio_url(audio_file),
             size=audio_file.size,
             format=audio_file.format,
-            bitrate=int(audio_file.quality) if audio_file.quality else None,
+            bitrate=(
+                int(audio_file.quality.strip())
+                if audio_file.quality and audio_file.quality.strip().isdigit()
+                else None
+            ),
         )
 
     transcript = None
@@ -32,7 +37,7 @@ def build_files_response(
         transcript = FileInfoResponse(
             url=transcript_url(transcript_file),
             size=transcript_file.size,
-            format=transcript_file.format or "json",
+            format=transcript_file.format or default_transcript_format,
             language=transcript_file.language,
         )
 

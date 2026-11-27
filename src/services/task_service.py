@@ -786,6 +786,7 @@ class TaskService:
                 transcript_url=lambda file: (
                     f"/api/v1/files/{file.id}.{file.format or 'srt'}"
                 ),
+                default_transcript_format="srt",
             )
 
             # Set expiry

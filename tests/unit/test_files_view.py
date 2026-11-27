@@ -59,9 +59,37 @@ def test_build_files_response_projects_all_file_combinations(audio, transcript, 
         assert result.transcript.language == transcript.language
 
 
+def test_non_numeric_audio_quality_projects_no_bitrate():
+    for quality in ("128k", "best"):
+        audio = _file("audio", FileType.AUDIO, quality=quality)
+        result = build_files_response(
+            audio, None, audio_url=_urls, transcript_url=_urls
+        )
+
+        assert result is not None
+        assert result.audio is not None
+        assert result.audio.bitrate is None
+
+
 def test_transcript_format_uses_default_only_when_record_has_no_format():
     transcript = _file("transcript", FileType.TRANSCRIPT, format=None)
 
+    result = build_files_response(
+        None,
+        transcript,
+        audio_url=_urls,
+        transcript_url=_urls,
+        default_transcript_format="srt",
+    )
+
+    assert result is not None
+    assert result.transcript is not None
+    assert result.transcript.format == "srt"
+    assert result.transcript.url.endswith(".srt")
+
+
+def test_transcript_format_default_is_json_for_webhook_projection():
+    transcript = _file("transcript", FileType.TRANSCRIPT, format=None)
     result = build_files_response(
         None, transcript, audio_url=_urls, transcript_url=_urls
     )
@@ -69,4 +97,3 @@ def test_transcript_format_uses_default_only_when_record_has_no_format():
     assert result is not None
     assert result.transcript is not None
     assert result.transcript.format == "json"
-    assert result.transcript.url.endswith(".srt")
