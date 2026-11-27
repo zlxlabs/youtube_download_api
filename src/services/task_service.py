@@ -37,6 +37,7 @@ from src.db.models import (
 from src.downloaders.exceptions import DownloaderError
 from src.downloaders.manager import DownloaderManager
 from src.services.file_service import FileService
+from src.services.files_view import build_files_response
 from src.utils.helpers import extract_video_id
 from src.utils.keyed_lock import KeyedLockManager
 from src.utils.logger import logger
@@ -775,35 +776,18 @@ class TaskService:
             if task.transcript_file_id:
                 transcript_file = await self.db.get_file(task.transcript_file_id)
 
-            # Build files response
-            if audio_file or transcript_file:
-                audio_info = None
-                if audio_file:
-                    # Generate URL with extension for better compatibility
-                    # Fallback to extension from filename if format field is empty
-                    audio_ext = audio_file.format or Path(audio_file.filename).suffix.lstrip(".") or "m4a"
-                    audio_info = FileInfoResponse(
-                        url=f"/api/v1/files/{audio_file.id}.{audio_ext}",
-                        size=audio_file.size,
-                        format=audio_file.format,
-                        bitrate=audio_file.quality,
-                    )
-
-                transcript_info = None
-                if transcript_file:
-                    # Generate URL with extension for better compatibility
-                    transcript_ext = transcript_file.format or "srt"
-                    transcript_info = FileInfoResponse(
-                        url=f"/api/v1/files/{transcript_file.id}.{transcript_ext}",
-                        size=transcript_file.size,
-                        format=transcript_file.format,
-                        language=transcript_file.language,
-                    )
-
-                response.files = FilesResponse(
-                    audio=audio_info,
-                    transcript=transcript_info,
-                )
+            response.files = build_files_response(
+                audio_file,
+                transcript_file,
+                audio_url=lambda file: (
+                    f"/api/v1/files/{file.id}."
+                    f"{file.format or Path(file.filename).suffix.lstrip('.') or 'm4a'}"
+                ),
+                transcript_url=lambda file: (
+                    f"/api/v1/files/{file.id}.{file.format or 'srt'}"
+                ),
+                default_transcript_format="srt",
+            )
 
             # Set expiry
             if audio_file:
