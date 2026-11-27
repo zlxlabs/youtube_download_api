@@ -422,6 +422,45 @@ class TestBuildPayload:
         assert payload.files.transcript is None
 
     @pytest.mark.asyncio
+    async def test_transcript_only_callback_posts_file_projection_bytes(
+        self, callback_service: CallbackService, mock_db: AsyncMock
+    ):
+        task = _make_task(audio_file_id=None, transcript_file_id="file-transcript-001")
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        captured = {}
+
+        async def post(url, *, content, headers):
+            captured["body"] = content.encode() if isinstance(content, str) else content
+            return response
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(side_effect=post)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client_cls.return_value = mock_client
+
+            assert await callback_service.send_callback(task) is True
+
+        import json
+
+        body_bytes = captured["body"]
+        body = json.loads(body_bytes)
+        assert body["files"]["audio"] is None
+        assert body["files"]["transcript"] == {
+            "url": "https://api.example.com/api/v1/files/file-transcript-001",
+            "size": 1024,
+            "format": "json",
+            "bitrate": None,
+            "language": "en",
+        }
+        assert b'"files":{"audio":null,"transcript"' in body_bytes
+        mock_db.update_callback_status.assert_awaited_once_with(
+            task.id, CallbackStatus.SUCCESS, 1
+        )
+
+    @pytest.mark.asyncio
     async def test_pending_task_no_files_or_error(
         self, callback_service: CallbackService
     ):
