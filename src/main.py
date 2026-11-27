@@ -180,6 +180,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Restore pending tasks to queue
     await task_service.restore_pending_tasks()
+    await callback_service.recover_pending_callbacks()
+
 
     # Start background worker
     # TODO: 未来支持多 Worker 并发时，根据 settings.download_concurrency 启动多个 worker
@@ -210,6 +212,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Setup scheduler for periodic tasks
     scheduler = AsyncIOScheduler(timezone=settings.tz)
+
+    # Callback outbox recovery: retry unfinished terminal-task callbacks.
+    scheduler.add_job(
+        callback_service.recover_pending_callbacks,
+        "interval",
+        minutes=1,
+        id="recover_pending_callbacks",
+    )
 
     # File cleanup: daily at 3 AM
     scheduler.add_job(

@@ -56,8 +56,52 @@ class CallbackService:
         self.db = db
         self.file_service = file_service
         self.base_url = base_url.rstrip("/")
+        self._in_flight_task_ids: set[str] = set()
 
     async def send_callback(self, task: Task) -> bool:
+        if task.id in self._in_flight_task_ids:
+            return False
+        self._in_flight_task_ids.add(task.id)
+        try:
+            return await self._send_callback(task)
+        finally:
+            self._in_flight_task_ids.discard(task.id)
+
+    async def recover_pending_callbacks(
+        self, max_age_days: int = 7, limit: int = 100
+    ) -> int:
+        cutoff = time.strftime(
+            "%Y-%m-%d %H:%M:%S", time.gmtime(time.time() - max_age_days * 86400)
+        )
+        cursor = await self.db.execute(
+            """
+            SELECT * FROM tasks
+            WHERE status IN ('completed', 'failed')
+              AND callback_url IS NOT NULL AND callback_url != ''
+              AND callback_status = 'pending'
+              AND datetime(COALESCE(completed_at, created_at)) >= datetime(?)
+            ORDER BY datetime(COALESCE(completed_at, created_at)) ASC
+            LIMIT ?
+            """,
+            (cutoff, limit),
+        )
+        rows = await cursor.fetchall()
+        processed = 0
+        for row in rows:
+            task = self.db._row_to_task(row)
+            if task.id in self._in_flight_task_ids:
+                continue
+            processed += 1
+            try:
+                await self.send_callback(task)
+            except Exception as exc:
+                logger.error(
+                    f"Callback recovery failed for task {task.id}: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+        return processed
+
+    async def _send_callback(self, task: Task) -> bool:
         """
         Send webhook callback for a completed/failed task.
 
@@ -189,7 +233,7 @@ class CallbackService:
             headers["X-Signature"] = signature
 
         async with httpx.AsyncClient(timeout=self.TIMEOUT_SECONDS) as client:
-            response = await client.post(url, content=body, headers=headers)
+            response = await client.post(url, content=body.encode(), headers=headers)
             response.raise_for_status()
 
     def _generate_signature(self, body: bytes, secret: str) -> str:
