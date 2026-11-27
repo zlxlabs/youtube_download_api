@@ -103,7 +103,7 @@ sqlite3.register_converter("TIMESTAMP", _convert_timestamp)
 class Database:
     """Async SQLite database manager."""
 
-    def __init__(self, db_path: Path):
+    def __init__(self, db_path: Path, data_dir: Optional[Path] = None):
         """
         Initialize database manager.
 
@@ -111,6 +111,7 @@ class Database:
             db_path: Path to SQLite database file.
         """
         self.db_path = db_path
+        self.data_dir = data_dir or (db_path.parent if str(db_path) != ":memory:" else None)
         self._connection: Optional[aiosqlite.Connection] = None
 
     async def connect(self) -> None:
@@ -273,7 +274,6 @@ class Database:
                     "Migration: Added 'event_type' column to ip_ban_history table"
                 )
 
-        # Create IP ban tables if not exist
         await self._create_ip_ban_tables()
 
     async def _create_ip_ban_tables(self) -> None:
@@ -423,6 +423,8 @@ class Database:
             await self.execute(
                 "CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at)"
             )
+            from src.db.file_uniqueness_migration import migrate_audio_file_uniqueness
+            await migrate_audio_file_uniqueness(self, self.data_dir)
 
     # ==================== Video Resource Operations ====================
 
@@ -822,16 +824,14 @@ class Database:
         Returns:
             FileRecord or None if not found.
         """
-        # Build query based on parameters
         sql = "SELECT * FROM files WHERE video_id = ? AND file_type = ?"
         params: list[Any] = [video_id, file_type.value]
 
         if quality is not None:
             sql += " AND quality = ?"
             params.append(quality)
-        else:
+        elif file_type != FileType.AUDIO:
             sql += " AND (quality IS NULL OR quality = '')"
-
         if language is not None:
             sql += " AND language = ?"
             params.append(language)

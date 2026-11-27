@@ -17,7 +17,7 @@ from src.config import Settings
 from src.db.database import Database
 from src.db.models import FileType, VideoInfo, VideoResource
 from src.downloaders.manager import DownloaderManager
-from src.services.file_service import FileService
+from src.services.file_service import AssetAlreadyExistsError, FileService
 from src.services.transcode_service import TranscodeError, TranscodeService
 from src.utils.helpers import extract_video_id, sanitize_filename as sanitize_filename_util
 from src.utils.logger import logger
@@ -378,15 +378,18 @@ class ManualUploadService:
                 await self.db.create_video_resource(video_resource)
 
             logger.info(f"[ManualUpload] Creating file record")
-            file_record = await self.file_service.create_file_record(
-                video_id=video_id,
-                file_type=FileType.AUDIO,
-                source_path=m4a_path,
-                quality=str(self.settings.audio_quality),
-                video_title=merged_metadata.title if merged_metadata else None,
-                upload_source="manual",
-                original_format=original_format,
-            )
+            try:
+                file_record = await self.file_service.create_file_record(
+                    video_id=video_id,
+                    file_type=FileType.AUDIO,
+                    source_path=m4a_path,
+                    quality=str(self.settings.audio_quality),
+                    video_title=merged_metadata.title if merged_metadata else None,
+                    upload_source="manual",
+                    original_format=original_format,
+                )
+            except AssetAlreadyExistsError as error:
+                raise AudioAlreadyExistsError(video_id, error.existing.upload_source) from error
 
             logger.info(f"[ManualUpload] Upload completed successfully: {file_record.id}")
 

@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.services.file_service import FileService
+from src.services.file_service import AssetAlreadyExistsError, FileService
 
 
 @pytest.fixture
@@ -183,3 +183,25 @@ class TestGetDiskUsage:
         assert "free_space" in usage
         assert usage["total_size"] == usage["audio_size"] + usage["transcript_size"]
         assert usage["free_space"] > 0
+
+
+@pytest.mark.asyncio
+async def test_audio_unique_conflict_cleans_moved_file_and_reuses_winner(file_service, tmp_path: Path):
+    import sqlite3
+
+    from src.db.models import FileType
+
+    existing = MagicMock(id="winner", video_id="vid")
+    file_service.db.get_file_by_video = AsyncMock(return_value=existing)
+    file_service.db.create_file = AsyncMock(side_effect=sqlite3.IntegrityError("unique"))
+    file_service.settings.file_retention_days = 30
+    source = tmp_path / "racing.m4a"
+    source.write_bytes(b"racer")
+    with pytest.raises(AssetAlreadyExistsError) as error:
+        await file_service.create_file_record("vid", FileType.AUDIO, source)
+    assert error.value.existing is existing
+    assert not list(file_service.settings.audio_dir.iterdir())
+    source.write_bytes(b"second racer")
+    record, reused = await file_service.create_or_reuse_file_record("vid", FileType.AUDIO, source)
+    assert record is existing and reused is True
+    assert not list(file_service.settings.audio_dir.iterdir())

@@ -6,6 +6,7 @@ Files are indexed by video_id for resource sharing across tasks.
 """
 
 import shutil
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -16,6 +17,12 @@ from src.db.database import Database
 from src.db.models import FileRecord, FileType
 from src.utils.helpers import get_expiry_time, sanitize_filename
 from src.utils.logger import logger
+
+
+class AssetAlreadyExistsError(Exception):
+    def __init__(self, existing: FileRecord):
+        self.existing = existing
+        super().__init__(f"Asset already exists: {existing.video_id}")
 
 
 class FileOperationError(Exception):
@@ -150,6 +157,14 @@ class FileService:
         # Create database record with error handling
         try:
             await self.db.create_file(file_record)
+        except sqlite3.IntegrityError as e:
+            target_path.unlink(missing_ok=True)
+            if file_type != FileType.AUDIO:
+                raise
+            existing = await self.db.get_file_by_video(video_id, FileType.AUDIO)
+            if existing is None:
+                raise
+            raise AssetAlreadyExistsError(existing) from e
         except Exception as e:
             # 数据库创建失败，清理已移动的文件
             logger.error(f"Failed to create file record in database: {e}")
@@ -163,6 +178,25 @@ class FileService:
         logger.info(f"Created file record: {file_id} ({file_type.value}) for video {video_id}")
 
         return file_record
+
+    async def create_or_reuse_file_record(
+        self,
+        video_id: str,
+        file_type: FileType,
+        source_path: Path,
+        quality: Optional[str] = None,
+        language: Optional[str] = None,
+        video_title: Optional[str] = None,
+        upload_source: Optional[str] = None,
+        original_format: Optional[str] = None,
+    ) -> tuple[FileRecord, bool]:
+        try:
+            return await self.create_file_record(
+                video_id, file_type, source_path, quality, language, video_title,
+                upload_source, original_format,
+            ), False
+        except AssetAlreadyExistsError as error:
+            return error.existing, True
 
     async def get_file(self, file_id: str) -> Optional[tuple[FileRecord, Path]]:
         """
