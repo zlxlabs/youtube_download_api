@@ -595,6 +595,7 @@ class DownloadWorker:
         # 记录是否是探测尝试
         is_probe = decision.is_probe if decision else False
         ban_level_before = self.ip_ban_breaker.get_current_level()
+        probe_analyzed = False
 
         # 重置取消标志，为新任务准备
         self.downloader_manager.reset_cancel_all()
@@ -633,6 +634,7 @@ class DownloadWorker:
                     audio_requested=result.get("audio_requested", True),
                     transcript_requested=result.get("transcript_requested", True),
                 )
+                probe_analyzed = True
 
             if task.include_audio and result["audio_file_id"] is None and result["transcript_file_id"] is None:
                 raise DownloaderError(
@@ -664,6 +666,8 @@ class DownloadWorker:
             await self._send_notifications_safe(task, result)
 
         except DownloadCancelledError:
+            if is_probe and not probe_analyzed:
+                await self.ip_ban_breaker.record_failed_attempt()
             # 下载被取消（通常是因为 Ctrl+C）
             # 将任务状态重置为 pending，下次启动时会自动恢复
             logger.warning(f"Task {task.id} cancelled due to shutdown")
@@ -672,9 +676,13 @@ class DownloadWorker:
             return
 
         except (DownloaderError, AllDownloadersFailed) as e:
+            if is_probe and not probe_analyzed:
+                await self.ip_ban_breaker.record_failed_attempt()
             await self._handle_download_error(task, e)
 
         except Exception as e:
+            if is_probe and not probe_analyzed:
+                await self.ip_ban_breaker.record_failed_attempt()
             logger.error(f"Unexpected error processing task {task.id}: {e}")
             # 将未知错误转换为 DownloaderError
             downloader_error = DownloaderError(
@@ -1413,7 +1421,7 @@ class DownloadWorker:
                 return None
 
             # 音频/混合任务，检查是否可以尝试
-            allowed, reason = self.ip_ban_breaker.should_allow_attempt(task_type)
+            allowed, reason = await self.ip_ban_breaker.try_acquire_probe(task_type)
 
             if not allowed:
                 # 不允许，延迟任务
@@ -1448,7 +1456,7 @@ class DownloadWorker:
                 else base_min_wait * FULL_BAN_AUDIO_MIN_WAIT_MULTIPLIER
             )
 
-            allowed, reason = self.ip_ban_breaker.should_allow_attempt(
+            allowed, reason = await self.ip_ban_breaker.try_acquire_probe(
                 task_type, min_wait_override=min_wait
             )
 
@@ -1559,39 +1567,32 @@ class DownloadWorker:
 
         # 全局熔断期间的探测
         elif ban_level_before == IPBanLevel.FULLY_BANNED:
-            if not transcript_requested:
+            if not audio_requested and not transcript_requested:
                 # 本次任务没有真正向下载器请求字幕（缓存复用或任务本不需要），
                 # 无法据此判断全局熔断是否恢复，跳过分析。
                 #
-                # 取舍说明（P2 修复顺带评估，2026-07-11）：如果这是一个纯音频
-                # 探测任务（transcript_requested=False），即使 audio_success 为
-                # True，这里也不会做任何降级——ip_ban_breaker 没有"FULLY_BANNED
-                # 期间音频探测成功"对应的干净降级路径（现有分级语义里，
-                # FULLY_BANNED 只能通过字幕探测成功降级到 AUDIO_BANNED，见
-                # downgrade_to_audio_ban；音频和字幕是两条独立探测的资源，音频
-                # 恢复不能反推字幕也已解封，硬造一个"音频探测成功直接降级"的
-                # 路径会破坏这套语义）。保守起见维持现状：不处理，等待字幕探测
-                # 覆盖这个视频。下面对 transcript_success 的判定修复后，字幕探测
-                # 的成功率已经修正回真实值，这条恢复通路不再被"无字幕视频"误判
-                # 堵死，因此没有为音频探测单独新增路径的必要。
                 logger.debug(
                     "Probe task did not actually request transcript this run "
                     "(cache reuse or not needed), skipping full-ban analysis"
                 )
                 return
 
-            # 探测"成功"不能只看 transcript_path 是否非空：视频本身没有原生
-            # 字幕时，下载器会成功返回 transcript_path=None、has_transcript=
-            # False（不抛异常，见 ytdlp_downloader.py 的
-            # _download_simple/_download_with_partial_success 以及
-            # tikhub_downloader.py 的同等分支）——这同样证明本次请求没有被
-            # 封禁，是和"真正拿到字幕"同等有效的恢复信号。如果仍然只按
-            # transcript_success 判定，无字幕视频（真实流量中很常见）每命中一次
-            # 就会被误判为"探测仍失败"，把 banned_at 重置延长一小时，导致 IP
-            # 早已恢复也走不出熔断（P2，独立 gate 审查复现）。
-            transcript_probe_succeeded = transcript_success or result.has_transcript is False
+            transcript_probe_succeeded = transcript_requested and (
+                transcript_success or result.has_transcript is False
+            )
 
-            if transcript_probe_succeeded:
+            if audio_requested and audio_success and transcript_probe_succeeded:
+                await self.ip_ban_breaker.reset_to_normal()
+                await self.notify_service.send_ip_recovery_notification(
+                    "IP recovered: Audio and transcript downloads are available"
+                )
+                return
+
+            if (
+                audio_requested
+                and audio_success
+                and not transcript_requested
+            ) or transcript_probe_succeeded:
                 # 字幕恢复，降级到音频熔断
                 logger.info("📉 Transcript recovered, downgrading to audio ban")
                 await self.ip_ban_breaker.downgrade_to_audio_ban()

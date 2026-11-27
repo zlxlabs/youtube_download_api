@@ -1042,6 +1042,7 @@ class TestFullyBannedDelaySeconds:
 
         # 回拨到等满 1200s（600 * 2）：音频任务现在也应该被放行作为探测。
         worker.ip_ban_breaker.banned_at = datetime.now() - timedelta(seconds=600 * 2)
+        worker.ip_ban_breaker.last_attempt_at = None
 
         decision = await worker._check_ip_ban_and_decide(audio_task)
         assert decision is not None

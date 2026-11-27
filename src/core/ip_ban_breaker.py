@@ -241,8 +241,13 @@ class IPBanCircuitBreaker:
             reason: 触发原因（可选，用于日志）
         """
         old_state = self.get_state()
+        if self.current_level == IPBanLevel.FULLY_BANNED:
+            logger.warning("Full IP ban retained after audio 403")
+            await self.record_failed_attempt()
+            return
         self.current_level = IPBanLevel.AUDIO_BANNED
         self.banned_at = datetime.now()
+        self.last_attempt_at = None
         self.failed_attempts = 0
 
         reason_msg = f" - {reason}" if reason else ""
@@ -267,6 +272,7 @@ class IPBanCircuitBreaker:
         old_state = self.get_state()
         self.current_level = IPBanLevel.FULLY_BANNED
         self.banned_at = datetime.now()
+        self.last_attempt_at = None
         self.failed_attempts = 0
 
         reason_msg = f" - {reason}" if reason else ""
@@ -292,6 +298,7 @@ class IPBanCircuitBreaker:
         reason = "Transcript also blocked"
         self.current_level = IPBanLevel.FULLY_BANNED
         self.banned_at = datetime.now()
+        self.last_attempt_at = None
         self.failed_attempts = 0
 
         logger.error(f"⬆️ Upgrading from audio ban to full ban - {reason}")
@@ -311,6 +318,7 @@ class IPBanCircuitBreaker:
         old_state = self.get_state()
         self.current_level = IPBanLevel.AUDIO_BANNED
         self.banned_at = datetime.now()  # 重置时间
+        self.last_attempt_at = None
         self.failed_attempts = 0
 
         logger.info("⬇️ Downgraded from full ban to audio ban")
@@ -407,6 +415,7 @@ class IPBanCircuitBreaker:
         old_state = self.get_state()
         # 简单实现：重置开始时间（相当于延长）
         self.banned_at = datetime.now()
+        self.last_attempt_at = None
 
         logger.info(
             f"Extending {self.current_level.value} by "
@@ -438,6 +447,19 @@ class IPBanCircuitBreaker:
             return
 
         await self.extend_ban(additional_duration)
+
+    async def try_acquire_probe(
+        self, task_type: str, min_wait_override: Optional[int] = None
+    ) -> tuple[bool, str]:
+        """判定并占用当前熔断窗口的唯一探测租约。"""
+        allowed, reason = self.should_allow_attempt(task_type, min_wait_override)
+        if not allowed or self.current_level == IPBanLevel.NORMAL:
+            return allowed, reason
+
+        old_state = self.get_state()
+        self.last_attempt_at = datetime.now()
+        await self._emit_state_change("probe_started", old_state)
+        return True, reason
 
     def should_allow_attempt(
         self, task_type: str, min_wait_override: Optional[int] = None

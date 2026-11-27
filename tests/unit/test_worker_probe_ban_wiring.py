@@ -170,7 +170,7 @@ class TestProbeSuccessDrivesBanRecovery:
             "字幕探测成功后必须降级到 AUDIO_BANNED——如果这里仍是 FULLY_BANNED，"
             "说明 _analyze_result_and_update_ban 根本没被调用（P1 断线复现）"
         )
-        db.save_ip_ban_state.assert_called_once()
+        assert db.save_ip_ban_state.call_count == 2
         assert (
             db.save_ip_ban_state.call_args.kwargs["current_level"]
             == IPBanLevel.AUDIO_BANNED
@@ -203,11 +203,75 @@ class TestProbeSuccessDrivesBanRecovery:
         assert worker.ip_ban_breaker.get_current_level() == IPBanLevel.NORMAL, (
             "音频探测成功后必须解除熔断回到 NORMAL"
         )
-        assert db.save_ip_ban_state.call_count == 2
+        assert db.save_ip_ban_state.call_count == 4
         assert db.save_ip_ban_state.call_args.kwargs["current_level"] == IPBanLevel.NORMAL
         assert db.append_ip_ban_history.call_count == 2
         assert db.append_ip_ban_history.call_args.kwargs["event_type"] == "recovered"
         assert worker.notify_service.send_ip_recovery_notification.call_count == 2
+
+
+class TestFullBanAudioProbeRecovery:
+    @pytest.mark.asyncio
+    async def test_mixed_probe_audio_success_transcript_failure_keeps_full_ban(
+        self, ban_settings: Settings
+    ) -> None:
+        worker = _make_worker(AsyncMock(), ban_settings)
+        await worker.ip_ban_breaker.trigger_full_ban()
+        result = DownloaderResult(
+            success=True,
+            partial_success=True,
+            downloader="ytdlp",
+            video_metadata=VideoMetadata(video_id="mixed-probe", title="Mixed"),
+            audio_path=Path("/tmp/probe-audio.m4a"),
+            transcript_path=None,
+            has_transcript=True,
+        )
+
+        await worker._analyze_result_and_update_ban(
+            result,
+            was_probe=True,
+            ban_level_before=IPBanLevel.FULLY_BANNED,
+            audio_requested=True,
+            transcript_requested=True,
+        )
+
+        assert worker.ip_ban_breaker.get_current_level() == IPBanLevel.FULLY_BANNED
+
+    @pytest.mark.asyncio
+    async def test_audio_only_probe_downgrades_and_next_probe_is_leased(
+        self, ban_settings: Settings
+    ) -> None:
+        db = AsyncMock()
+        worker = _make_worker(db, ban_settings)
+        await worker.ip_ban_breaker.restore_state(
+            IPBanLevel.FULLY_BANNED,
+            datetime.now() - timedelta(hours=8),
+            None,
+            0,
+        )
+        worker._running = True
+        task = _make_task("full-ban-audio", include_audio=True, include_transcript=False)
+        worker.task_service.get_next_task = AsyncMock(return_value=task)
+        worker.db.get_task = AsyncMock(return_value=task)
+        worker.downloader_manager.download_with_fallback = AsyncMock(
+            return_value=DownloaderResult(
+                success=True,
+                downloader="cdp",
+                video_metadata=VideoMetadata(video_id=task.video_id, title="Audio"),
+                audio_path=Path("/tmp/probe-audio.m4a"),
+                transcript_path=None,
+                has_transcript=False,
+            )
+        )
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            await worker._process_next_task()
+
+        assert worker.ip_ban_breaker.get_current_level() == IPBanLevel.AUDIO_BANNED
+        assert worker.ip_ban_breaker.last_attempt_at is None
+        allowed, reason = await worker.ip_ban_breaker.try_acquire_probe("audio", 60)
+        assert allowed is False
+        assert "Minimum wait" in reason
 
 
 class TestProbeFailureExistingSemantics(object):
@@ -354,7 +418,7 @@ class TestCachedResourceDoesNotMisleadAnalysis:
         assert worker.ip_ban_breaker.get_current_level() == IPBanLevel.AUDIO_BANNED, (
             "缓存命中不应该被误判为音频探测仍然失败，不能升级到 FULLY_BANNED"
         )
-        db.save_ip_ban_state.assert_not_called()
+        db.save_ip_ban_state.assert_called_once()
         db.append_ip_ban_history.assert_not_called()
 
 
@@ -429,16 +493,13 @@ class TestFullyBannedNoNativeCaptionIsNotMisreadAsStillBanned:
             "无字幕视频的成功探测必须被识别为'请求本身成功'，按既有语义降级到 "
             "AUDIO_BANNED；如果仍是 FULLY_BANNED，说明探测成功判定又被误判为失败"
         )
-        db.save_ip_ban_state.assert_called_once()
+        assert db.save_ip_ban_state.call_count == 2
         assert (
             db.save_ip_ban_state.call_args.kwargs["current_level"]
             == IPBanLevel.AUDIO_BANNED
         )
         db.append_ip_ban_history.assert_called_once()
-        assert db.append_ip_ban_history.call_args.kwargs["event_type"] == "downgraded", (
-            "必须是'降级'而不是'延长'——修复前这里会是 extend_full_ban 产生的 "
-            "'extended' 事件，把 banned_at 错误地在 FULLY_BANNED 里自续一小时"
-        )
+        assert db.append_ip_ban_history.call_args.kwargs["event_type"] == "downgraded"
         worker.notify_service.send_ip_recovery_notification.assert_called_once()
 
 
@@ -505,7 +566,7 @@ class TestAudioBannedNoNativeCaptionIsNotMisreadAsUpgrade:
             "无字幕视频的部分成功探测必须被识别为'字幕请求成功、音频仍失败'，"
             "维持 AUDIO_BANNED；如果变成 FULLY_BANNED，说明又被误判为双失败升级"
         )
-        db.save_ip_ban_state.assert_called_once()
+        assert db.save_ip_ban_state.call_count == 2
         assert (
             db.save_ip_ban_state.call_args.kwargs["current_level"]
             == IPBanLevel.AUDIO_BANNED
@@ -563,7 +624,7 @@ class TestAudioBannedNoNativeCaptionIsNotMisreadAsUpgrade:
         assert worker.ip_ban_breaker.get_current_level() == IPBanLevel.NORMAL, (
             "音频探测成功必须解除音频熔断回 NORMAL，无字幕视频不影响这一判定"
         )
-        db.save_ip_ban_state.assert_called_once()
+        assert db.save_ip_ban_state.call_count == 2
         assert (
             db.save_ip_ban_state.call_args.kwargs["current_level"] == IPBanLevel.NORMAL
         )
