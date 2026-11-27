@@ -59,6 +59,9 @@ def _worker(settings: Settings) -> DownloadWorker:
         return_value={"audio": None, "transcript": None}
     )
     file_service.create_file_record = AsyncMock(return_value=MagicMock(id="file-id"))
+    file_service.create_or_reuse_file_record = AsyncMock(
+        return_value=(MagicMock(id="file-id"), False)
+    )
     return DownloadWorker(
         db=db,
         settings=settings,

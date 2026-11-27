@@ -853,7 +853,7 @@ class DownloadWorker:
 
                 # 修复：audio_fallback 场景下也需要保存音频
                 if (need_audio or audio_fallback) and result.audio_path and result.audio_path.exists():
-                    audio_file = await self.file_service.create_file_record(
+                    audio_file, reused_audio = await self.file_service.create_or_reuse_file_record(
                         video_id=task.video_id,
                         file_type=FileType.AUDIO,
                         source_path=result.audio_path,
@@ -861,8 +861,7 @@ class DownloadWorker:
                         video_title=video_info.title,
                     )
                     audio_file_id = audio_file.id
-                    reused_audio = False
-                    audio_downloader = result.downloader
+                    audio_downloader = None if reused_audio else result.downloader
 
                 # Process transcript file
                 # 优化：无论用户是否请求字幕，只要下载器返回了字幕就保存

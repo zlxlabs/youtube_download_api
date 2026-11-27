@@ -20,10 +20,14 @@ def mock_dependencies():
     """创建测试所需的 mock 对象"""
     settings = MagicMock()
     settings.audio_quality = 128
+    file_service = AsyncMock()
+    file_service.create_or_reuse_file_record = AsyncMock(
+        return_value=(MagicMock(id="file-id"), False)
+    )
 
     return {
         "db": AsyncMock(),
-        "file_service": AsyncMock(),
+        "file_service": file_service,
         "task_service": AsyncMock(),
         "notify_service": AsyncMock(),
         "callback_service": AsyncMock(),
