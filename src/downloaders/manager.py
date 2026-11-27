@@ -706,13 +706,6 @@ class DownloaderManager:
         """
         使用指定下载器下载，带有重试和指数退避。
 
-        重试策略：
-        - 403/风控错误：不重试（避免加重风控）
-        - 其他网络错误：最多重试 2 次（总共 3 次尝试）
-        - 指数退避：1s, 2s
-        - 只对 should_retry() 返回 True 的错误重试
-        - 适用于临时性网络问题（ConnectError, TimeoutException 等）
-
         Args:
             downloader: 下载器实例
             video_url: 视频 URL
@@ -720,12 +713,6 @@ class DownloaderManager:
             output_dir: 输出目录
             include_audio: 是否下载音频
             include_transcript: 是否获取字幕
-
-        Returns:
-            DownloaderResult
-
-        Raises:
-            DownloaderError: 下载失败（包括重试后仍失败）
         """
         # 默认最大重试次数
         default_max_retries = 2
@@ -739,6 +726,15 @@ class DownloaderManager:
                     include_audio=include_audio,
                     include_transcript=include_transcript,
                 )
+
+                if not result.audio_path and not result.transcript_path and not (
+                    not include_audio and include_transcript and result.has_transcript is False
+                ):
+                    raise DownloaderError(
+                        "Downloader returned no deliverable resource",
+                        error_code=ErrorCode.DOWNLOAD_FAILED,
+                        downloader=downloader.name,
+                    )
 
                 # 成功，如果之前有重试，记录成功信息
                 if attempt > 0:

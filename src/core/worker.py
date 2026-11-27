@@ -634,6 +634,12 @@ class DownloadWorker:
                     transcript_requested=result.get("transcript_requested", True),
                 )
 
+            if task.include_audio and result["audio_file_id"] is None and result["transcript_file_id"] is None:
+                raise DownloaderError(
+                    "Audio task completed without any deliverable resource",
+                    error_code=ErrorCode.DOWNLOAD_FAILED,
+                )
+
             # Update task completion with retry logic
             # 这是关键操作，如果失败会导致任务状态不一致
             await self._update_task_completed_with_retry(task.id, result)
@@ -1541,15 +1547,8 @@ class DownloadWorker:
             elif result.partial_success and (
                 transcript_success or result.has_transcript is False
             ):
-                # 字幕请求成功但音频仍失败。和下面 FULLY_BANNED 分支的判定同理
-                # （P2 同类缺陷收尾，2026-07-11）：字幕"成功"不能只看
-                # transcript_path 是否非空——视频本身没有原生字幕时，ytdlp 的
-                # _download_with_partial_success 走"音频失败 -> 字幕降级成功"
-                # 路径，会成功返回 partial_success=True / transcript_path=None /
-                # has_transcript=False（不抛异常；音频字幕双失败路径必然抛
-                # DownloaderError，根本到不了这里）。字幕请求本身成功即证明
-                # 字幕侧没被封禁，只应维持/延长音频熔断，绝不能被误判为
-                # "音频字幕双失败"而错误升级到全局熔断。
+                # has_transcript=False confirms subtitle probing completed without captions;
+                # it is not evidence that subtitles were blocked, so retain AUDIO_BANNED.
                 logger.info("Transcript OK but audio still banned, continuing audio ban")
                 await self.ip_ban_breaker.extend_audio_ban()
 

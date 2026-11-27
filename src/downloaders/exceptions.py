@@ -33,6 +33,7 @@ class DownloaderError(Exception):
         http_status_code: Optional[int] = None,
         stop_fallback: bool = False,
         operation: Optional[str] = None,
+        transcript_confirmed_absent: bool = False,
     ):
         self.message = message
         self.error_code = error_code
@@ -40,6 +41,7 @@ class DownloaderError(Exception):
         self.http_status_code = http_status_code  # HTTP 状态码（用于判断是否应该重试）
         self.stop_fallback = stop_fallback  # 是否停止降级（True 表示不再尝试其他下载器）
         self.operation = operation  # 操作类型："audio" | "transcript" | "mixed"（用于熔断分级）
+        self.transcript_confirmed_absent = transcript_confirmed_absent
         super().__init__(message)
 
     def __str__(self) -> str:

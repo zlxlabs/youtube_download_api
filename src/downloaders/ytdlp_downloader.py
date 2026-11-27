@@ -271,6 +271,17 @@ class YtdlpDownloader(BaseDownloader):
                 )
                 transcript_path = transcript_result.transcript_path
 
+                if transcript_path is None:
+                    raise DownloaderError(
+                        message=f"Audio failed: {audio_error}; transcript confirmed absent",
+                        error_code=e.error_code,
+                        downloader=self.name,
+                        http_status_code=http_status,
+                        stop_fallback=(http_status == 403),
+                        operation="mixed",
+                        transcript_confirmed_absent=(transcript_result.has_transcript is False),
+                    ) from e
+
                 # 部分成功：音频失败，字幕成功
                 logger.info("[ytdlp] Partial success: transcript OK, audio failed")
 
