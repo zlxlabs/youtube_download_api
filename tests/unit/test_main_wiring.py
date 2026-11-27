@@ -71,6 +71,8 @@ async def test_lifespan_wires_single_shared_downloader_manager(
     # 跳过真实的 worker 任务循环（本测试只关心构造期的依赖注入是否正确，
     # 不需要真的处理任务），避免引入不必要的等待与副作用。
     monkeypatch.setattr(DownloadWorker, "start", AsyncMock())
+    recovery = AsyncMock(return_value=0)
+    monkeypatch.setattr(main_module.CallbackService, "recover_pending_callbacks", recovery)
 
     async with main_module.lifespan(main_module.app):
         assert main_module.downloader_manager is not None
@@ -91,6 +93,11 @@ async def test_lifespan_wires_single_shared_downloader_manager(
         # 人工上传服务（manual_upload_enabled=True 时）同样应共享同一实例。
         if main_module.manual_upload_service is not None:
             assert main_module.manual_upload_service.downloader_manager is shared_manager
+
+        callback_job = main_module.scheduler.get_job("recover_pending_callbacks")
+        assert callback_job is not None
+        assert callback_job.trigger.interval.total_seconds() == 60
+        recovery.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
