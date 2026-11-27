@@ -27,7 +27,7 @@ def build_files_response(
             format=audio_file.format,
             bitrate=(
                 int(audio_file.quality.strip())
-                if audio_file.quality and audio_file.quality.strip().isdigit()
+                if audio_file.quality and audio_file.quality.strip().isdecimal()
                 else None
             ),
         )

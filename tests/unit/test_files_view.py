@@ -60,7 +60,7 @@ def test_build_files_response_projects_all_file_combinations(audio, transcript, 
 
 
 def test_non_numeric_audio_quality_projects_no_bitrate():
-    for quality in ("128k", "best"):
+    for quality in ("128k", "best", "²"):
         audio = _file("audio", FileType.AUDIO, quality=quality)
         result = build_files_response(
             audio, None, audio_url=_urls, transcript_url=_urls
