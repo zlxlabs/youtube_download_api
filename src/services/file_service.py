@@ -158,9 +158,9 @@ class FileService:
         try:
             await self.db.create_file(file_record)
         except sqlite3.IntegrityError as e:
+            target_path.unlink(missing_ok=True)
             if file_type != FileType.AUDIO:
                 raise
-            target_path.unlink()
             existing = await self.db.get_file_by_video(video_id, FileType.AUDIO)
             if existing is None:
                 raise

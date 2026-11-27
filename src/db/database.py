@@ -824,13 +824,14 @@ class Database:
         Returns:
             FileRecord or None if not found.
         """
-        # Build query based on parameters
         sql = "SELECT * FROM files WHERE video_id = ? AND file_type = ?"
         params: list[Any] = [video_id, file_type.value]
 
         if quality is not None:
             sql += " AND quality = ?"
             params.append(quality)
+        elif file_type != FileType.AUDIO:
+            sql += " AND (quality IS NULL OR quality = '')"
         if language is not None:
             sql += " AND language = ?"
             params.append(language)

@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from pathlib import Path
 import sqlite3
 
@@ -13,6 +14,28 @@ async def _add_audio(db: Database, file_id: str, video_id: str, quality: str, so
         "VALUES (?, ?, 'audio', ?, ?, ?, ?, ?)",
         (file_id, video_id, file_id, filepath, quality, source, created),
     )
+
+
+@pytest.mark.asyncio
+async def test_migration_sorts_datetime_and_null_created_at(tmp_path: Path) -> None:
+    db = Database(tmp_path / "db.sqlite")
+    await db.connect()
+    try:
+        await db.execute("DROP INDEX ux_files_video_audio")
+        await _add_audio(
+            db, "dated", "mixed-created-at", "128", "auto",
+            datetime(2025, 1, 1, tzinfo=timezone.utc), "dated.m4a",
+        )
+        await _add_audio(db, "undated", "mixed-created-at", "256", "auto", None, "undated.m4a")
+
+        await migrate_audio_file_uniqueness(db)
+
+        cursor = await db.execute(
+            "SELECT id FROM files WHERE video_id = 'mixed-created-at' AND file_type='audio'"
+        )
+        assert (await cursor.fetchone())["id"] == "dated"
+    finally:
+        await db.disconnect()
 
 
 @pytest.mark.asyncio

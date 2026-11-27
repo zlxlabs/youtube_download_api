@@ -16,7 +16,7 @@ async def migrate_audio_file_uniqueness(db, data_dir: Optional[Path] = None) -> 
             continue
         def rank(row):
             physical = bool(data_dir and (data_dir / row["filepath"]).is_file())
-            return (physical, row["upload_source"] == "manual", row["created_at"] or "", row["id"])
+            return (physical, row["upload_source"] == "manual", str(row["created_at"] or ""), row["id"])
         keeper = max(duplicates, key=rank)
         for row in duplicates:
             if row["id"] == keeper["id"]:

@@ -205,7 +205,14 @@ async def test_manual_upload_metadata_cached_on_failure(tmp_path: Path):
             manual_metadata=None,
         )
 
-    await db.disconnect()
+        video_resource = await db.get_video_resource("dQw4w9WgXcQ")
+        assert video_resource is not None
+        assert video_resource.video_info is not None
+        assert video_resource.video_info.title == "Test Title"
+        assert video_resource.video_info.author == "Test Author"
+        assert video_resource.video_info.duration == 123
+
+        await db.disconnect()
 
 
 @pytest.mark.asyncio
